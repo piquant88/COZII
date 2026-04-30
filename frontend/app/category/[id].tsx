@@ -20,6 +20,7 @@ export default function CategoryDetail() {
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<'all' | 'available' | 'low' | 'finished'>('all');
   const [showAddSheet, setShowAddSheet] = useState(false);
+  const [search, setSearch] = useState('');
 
   const load = useCallback(async () => {
     if (!activeSpace || !id) return;
