@@ -65,9 +65,9 @@ Cozii is a cozy, pastel-themed home inventory and finance management app for fam
 - Cozy off-white background (#FEF9F8)
 - Nunito-style bold headings with -0.5 letter spacing
 
-## Phase 2 (Planned — not yet built)
-- AI receipt / item scanning with GPT-4 Vision (via Emergent LLM key)
-- Socket.io real-time push (replaces polling)
-- Investment tracking module
-- Low-stock alerts & expiry reminders
-- Shopping list with "already have" cross-check
+## Phase 2 (Partially Delivered)
+- ✅ AI receipt / item scanning with GPT-4o Vision (via Emergent LLM key) — full bulk flow from photo → extracted editable items → save in one step, with default + per-item category assignment
+- ⏳ Socket.io real-time push (polling still active)
+- ⏳ Investment tracking module
+- ⏳ Low-stock alerts & expiry reminders
+- ⏳ Shopping list with "already have" cross-check

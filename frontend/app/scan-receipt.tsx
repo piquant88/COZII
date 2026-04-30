@@ -65,7 +65,7 @@ export default function ScanReceipt() {
       const options = {
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
         allowsEditing: false,
-        quality: 0.7,
+        quality: 0.5,
         base64: true,
       } as any;
       const result = fromCamera
@@ -73,12 +73,36 @@ export default function ScanReceipt() {
         : await ImagePicker.launchImageLibraryAsync(options);
       if (!result.canceled && result.assets?.[0]) {
         const a = result.assets[0];
-        const base64 = a.base64 ? `data:image/jpeg;base64,${a.base64}` : a.uri;
+        let base64 = a.base64 ? `data:image/jpeg;base64,${a.base64}` : a.uri;
+        // Downscale on web to save AI tokens
+        if (Platform.OS === 'web' && base64.startsWith('data:')) {
+          try { base64 = await downscaleBase64(base64, 1024); } catch {}
+        }
         setPhoto(base64);
         setItems([]);
       }
     } catch (e) { console.warn(e); }
   };
+
+  async function downscaleBase64(src: string, maxSide: number): Promise<string> {
+    return new Promise((resolve, reject) => {
+      try {
+        const img = new (window as any).Image();
+        img.onload = () => {
+          const ratio = Math.min(1, maxSide / Math.max(img.width, img.height));
+          const w = Math.round(img.width * ratio);
+          const h = Math.round(img.height * ratio);
+          const canvas = (window as any).document.createElement('canvas');
+          canvas.width = w; canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, w, h);
+          resolve(canvas.toDataURL('image/jpeg', 0.7));
+        };
+        img.onerror = () => resolve(src);
+        img.src = src;
+      } catch (e) { reject(e); }
+    });
+  }
 
   const scan = async () => {
     if (!photo) return;

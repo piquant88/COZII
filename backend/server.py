@@ -705,6 +705,9 @@ async def scan_receipt(body: ScanReceiptRequest, user: User = Depends(get_curren
         response = await chat.send_message(message)
     except Exception as e:
         logger.exception("AI scan failed")
+        msg = str(e).lower()
+        if 'budget' in msg or 'quota' in msg or '429' in msg:
+            raise HTTPException(status_code=402, detail="AI quota reached. Please top up your Emergent LLM key or try again later.")
         raise HTTPException(status_code=502, detail=f"AI scan failed: {e}")
 
     text = response if isinstance(response, str) else str(response)
