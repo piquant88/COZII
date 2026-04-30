@@ -11,12 +11,20 @@ import { Icon } from '../src/Icon';
 
 export default function SpaceSetup() {
   const router = useRouter();
-  const { createSpace, joinSpace, logout } = useAuth();
+  const { createSpace, joinSpace, logout, spaces } = useAuth();
   const [mode, setMode] = useState<'create' | 'join'>('create');
   const [spaceName, setSpaceName] = useState('');
   const [inviteCode, setInviteCode] = useState('');
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  const hasExistingSpace = spaces.length > 0;
+
+  const goBack = () => {
+    if (hasExistingSpace) {
+      router.back();
+    }
+  };
 
   const onSubmit = async () => {
     setErr(null);
@@ -50,10 +58,23 @@ export default function SpaceSetup() {
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
         <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
           <View style={styles.topRow}>
+            {hasExistingSpace ? (
+              <TouchableOpacity
+                style={styles.backBtn}
+                onPress={goBack}
+                testID="space-setup-back"
+              >
+                <Icon name="X" color={colors.textMain} size={20} />
+              </TouchableOpacity>
+            ) : (
+              <View style={{ width: 40 }} />
+            )}
             <View style={{ flex: 1 }} />
-            <TouchableOpacity onPress={logout} testID="space-setup-logout">
-              <Text style={styles.logoutTxt}>Log out</Text>
-            </TouchableOpacity>
+            {!hasExistingSpace && (
+              <TouchableOpacity onPress={logout} testID="space-setup-logout">
+                <Text style={styles.logoutTxt}>Log out</Text>
+              </TouchableOpacity>
+            )}
           </View>
 
           <Text style={styles.title}>Set up your space</Text>
@@ -131,6 +152,12 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   scroll: { padding: spacing.lg },
   topRow: { flexDirection: 'row', alignItems: 'center', marginBottom: spacing.xl },
+  backBtn: {
+    width: 40, height: 40, borderRadius: 20,
+    backgroundColor: colors.surface,
+    alignItems: 'center', justifyContent: 'center',
+    ...shadows.card,
+  },
   logoutTxt: { color: colors.textMuted, fontWeight: '600' },
   title: { fontSize: 28, fontWeight: '900', color: colors.textMain, letterSpacing: -0.5 },
   subtitle: { fontSize: 14, color: colors.textMuted, marginTop: 6, marginBottom: spacing.xl, lineHeight: 20 },

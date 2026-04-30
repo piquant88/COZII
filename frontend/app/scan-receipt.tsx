@@ -511,27 +511,3 @@ const styles = StyleSheet.create({
   },
   modalRowTxt: { flex: 1, fontSize: 15, fontWeight: '600', color: colors.textMain },
 });
-,
-    borderRadius: radius.full,
-    marginTop: 4,
-  },
-  addBtnTxt: { color: colors.primary, fontWeight: '700', fontSize: 13 },
-  error: { color: colors.dangerText, marginTop: 10, fontSize: 13, textAlign: 'center' },
-  modalOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.4)',
-    justifyContent: 'flex-end',
-  },
-  modalSheet: {
-    backgroundColor: colors.surface,
-    borderTopLeftRadius: 32, borderTopRightRadius: 32,
-    padding: spacing.lg,
-    paddingBottom: 40,
-  },
-  modalTitle: { fontSize: 18, fontWeight: '800', color: colors.textMain, marginBottom: spacing.md, textAlign: 'center' },
-  modalRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 10,
-    paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: colors.border,
-  },
-  modalRowTxt: { flex: 1, fontSize: 15, fontWeight: '600', color: colors.textMain },
-});
