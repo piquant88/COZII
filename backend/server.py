@@ -10,6 +10,8 @@ import string
 import uuid
 import bcrypt
 import httpx
+import json
+import re
 from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional, Dict, Any
@@ -31,6 +33,9 @@ logger = logging.getLogger(__name__)
 
 SESSION_DURATION_DAYS = 7
 EMERGENT_AUTH_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
+EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
+AI_SCAN_MODEL_PROVIDER = os.environ.get("AI_SCAN_PROVIDER", "openai")
+AI_SCAN_MODEL_NAME = os.environ.get("AI_SCAN_MODEL", "gpt-4o")
 
 
 # =========================
@@ -626,6 +631,163 @@ async def delete_item(item_id: str, user: User = Depends(get_current_user)):
     await db.items.delete_one({"item_id": item_id})
     await record_activity(doc["space_id"], user, "deleted", "item", item_id, doc["name"])
     return {"success": True}
+
+
+# =========================
+# AI Receipt Scan
+# =========================
+class ScanReceiptRequest(BaseModel):
+    image_base64: str  # data URI or raw base64
+
+
+class ScannedItem(BaseModel):
+    name: str
+    quantity: float = 1
+    price: Optional[float] = None
+    category_hint: Optional[str] = None
+
+
+class ScanReceiptResponse(BaseModel):
+    items: List[ScannedItem]
+    raw: Optional[str] = None
+
+
+def _extract_json_block(text: str) -> str:
+    # Remove code fences if present
+    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
+    if fenced:
+        return fenced.group(1).strip()
+    # Try to find a JSON object in plain text
+    m = re.search(r"\{[\s\S]*\}", text)
+    if m:
+        return m.group(0)
+    return text
+
+
+@api_router.post("/ai/scan-receipt", response_model=ScanReceiptResponse)
+async def scan_receipt(body: ScanReceiptRequest, user: User = Depends(get_current_user)):
+    if not EMERGENT_LLM_KEY:
+        raise HTTPException(status_code=503, detail="AI key not configured")
+
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"AI library not available: {e}")
+
+    raw = body.image_base64 or ""
+    # Strip data URI prefix if present
+    if "," in raw and raw.startswith("data:"):
+        raw = raw.split(",", 1)[1]
+
+    if not raw:
+        raise HTTPException(status_code=400, detail="No image provided")
+
+    system_message = (
+        "You are a helpful assistant that extracts shopping items from receipt or product images. "
+        "Return STRICT JSON only, no prose, in this schema: "
+        '{"items":[{"name":"string","quantity":number,"price":number_or_null,"category_hint":"food|skincare|toiletries|closet|cleaning|other"}]}. '
+        "Skip tax, subtotal, total, fees, change, tip, payment type, and store name. "
+        "Use lowercase category_hint values. If price is unclear, set it to null. Quantity defaults to 1."
+    )
+
+    chat = LlmChat(
+        api_key=EMERGENT_LLM_KEY,
+        session_id=f"scan_{user.user_id}_{uuid.uuid4().hex[:8]}",
+        system_message=system_message,
+    ).with_model(AI_SCAN_MODEL_PROVIDER, AI_SCAN_MODEL_NAME)
+
+    message = UserMessage(
+        text="Extract each line item from this image as JSON following the schema.",
+        file_contents=[ImageContent(image_base64=raw)],
+    )
+
+    try:
+        response = await chat.send_message(message)
+    except Exception as e:
+        logger.exception("AI scan failed")
+        raise HTTPException(status_code=502, detail=f"AI scan failed: {e}")
+
+    text = response if isinstance(response, str) else str(response)
+    json_text = _extract_json_block(text)
+
+    try:
+        parsed = json.loads(json_text)
+    except Exception:
+        raise HTTPException(status_code=502, detail="AI returned unparseable response")
+
+    items_raw = parsed.get("items", []) if isinstance(parsed, dict) else []
+    items: List[ScannedItem] = []
+    for it in items_raw:
+        if not isinstance(it, dict):
+            continue
+        name = str(it.get("name") or "").strip()
+        if not name:
+            continue
+        try:
+            qty = float(it.get("quantity") or 1)
+        except Exception:
+            qty = 1.0
+        price = it.get("price")
+        try:
+            price = float(price) if price is not None else None
+        except Exception:
+            price = None
+        hint = it.get("category_hint")
+        if hint is not None:
+            hint = str(hint).lower().strip() or None
+        items.append(ScannedItem(name=name, quantity=qty, price=price, category_hint=hint))
+
+    return ScanReceiptResponse(items=items, raw=text[:2000])
+
+
+class BulkCreateItemsRequest(BaseModel):
+    space_id: str
+    category_id: str  # Default category
+    per_item_category: Dict[str, str] = {}  # index -> category_id override
+    items: List[ScannedItem]
+    purchase_date: Optional[str] = None
+    receipt_photo_base64: Optional[str] = None
+
+
+@api_router.post("/items/bulk", response_model=List[Item])
+async def bulk_create_items(body: BulkCreateItemsRequest, user: User = Depends(get_current_user)):
+    await assert_space_member(body.space_id, user.user_id)
+    # Load categories owned by this space to validate ids
+    cat_docs = await db.categories.find({"space_id": body.space_id}, {"_id": 0, "category_id": 1}).to_list(200)
+    valid_cat_ids = {c["category_id"] for c in cat_docs}
+    if body.category_id not in valid_cat_ids:
+        raise HTTPException(status_code=400, detail="Invalid default category")
+
+    created: List[dict] = []
+    for idx, it in enumerate(body.items):
+        cid = body.per_item_category.get(str(idx), body.category_id)
+        if cid not in valid_cat_ids:
+            cid = body.category_id
+        doc = {
+            "item_id": gen_id("item"),
+            "space_id": body.space_id,
+            "category_id": cid,
+            "name": it.name.strip(),
+            "photo_base64": body.receipt_photo_base64,
+            "status": "available",
+            "quantity": it.quantity,
+            "unit": None,
+            "price": it.price,
+            "purchase_date": body.purchase_date,
+            "expiry_date": None,
+            "notes": None,
+            "fields": {},
+            "created_by": user.user_id,
+            "created_by_name": user.name,
+            "created_at": now_utc(),
+            "updated_at": now_utc(),
+        }
+        await db.items.insert_one(doc)
+        out = await db.items.find_one({"item_id": doc["item_id"]}, {"_id": 0})
+        created.append(out)
+        await record_activity(body.space_id, user, "added", "item", out["item_id"], out["name"])
+
+    return [Item(**d) for d in created]
 
 
 # =========================

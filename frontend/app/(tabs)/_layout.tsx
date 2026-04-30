@@ -31,7 +31,7 @@ function CustomTabBar({ state, navigation }: any) {
           const isFocused = state.routes[state.index]?.name === t.name;
           const onPress = () => {
             if (t.name === 'scan') {
-              router.push('/item/new');
+              router.push('/scan-receipt');
               return;
             }
             const event = navigation.emit({ type: 'tabPress', target: state.routes.find((r: any) => r.name === t.name)?.key, canPreventDefault: true });
