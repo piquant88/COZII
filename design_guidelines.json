@@ -1,0 +1,195 @@
+{
+  "project_name": "Cozii",
+  "theme_archetype": "Archetype 3: Pastel & Soft (Light Theme)",
+  "rationale": "For a home inventory and family management app, users need an approachable, optimistic, and tactile interface that reduces the cognitive load of chores and budgeting. The light, bright pastel aesthetic brings warmth and coziness ('Cozii'), making mundane tasks like tracking toilet paper feel pleasant.",
+  "colors": {
+    "background": "#FEF9F8",
+    "surface": "#FFFFFF",
+    "surface_glass": "rgba(255, 255, 255, 0.8)",
+    "primary": {
+      "default": "#FFB5A7",
+      "hover": "#FCA394",
+      "text": "#FFFFFF"
+    },
+    "secondary": {
+      "default": "#A3E4D7",
+      "hover": "#8CDECF",
+      "text": "#2D3436"
+    },
+    "accent_lavender": "#D7BDE2",
+    "accent_yellow": "#F9E79F",
+    "accent_peach": "#FFDAC1",
+    "accent_sage": "#B5EAD7",
+    "text": {
+      "main": "#2D3436",
+      "muted": "#636E72",
+      "inverse": "#FFFFFF"
+    },
+    "border": "rgba(45, 52, 54, 0.05)",
+    "status": {
+      "available": "#A3E4D7",
+      "low": "#F9E79F",
+      "finished": "#FFB5A7"
+    }
+  },
+  "typography": {
+    "font_family": {
+      "heading": "Nunito",
+      "body": "Nunito"
+    },
+    "hierarchy": {
+      "h1": "text-4xl font-black tracking-tight leading-none text-[#2D3436]",
+      "h2": "text-3xl font-extrabold tracking-tight text-[#2D3436]",
+      "h3": "text-xl font-bold text-[#2D3436]",
+      "h4": "text-lg font-bold text-[#2D3436]",
+      "body_large": "text-base font-medium text-[#2D3436] leading-relaxed",
+      "body": "text-sm font-medium text-[#636E72] leading-relaxed",
+      "label": "text-xs font-bold uppercase tracking-[0.1em] text-[#636E72]"
+    }
+  },
+  "spacing": {
+    "screen_padding": "p-6",
+    "section_gap": "gap-8",
+    "item_gap": "gap-4",
+    "radius": {
+      "sm": "rounded-lg",
+      "md": "rounded-2xl",
+      "lg": "rounded-[24px]",
+      "full": "rounded-full"
+    }
+  },
+  "component_styles": {
+    "card": {
+      "base": "bg-white rounded-[24px] p-5 shadow-[0_8px_30px_rgba(0,0,0,0.04)] border border-black/5",
+      "interactive": "active:scale-95 transition-transform"
+    },
+    "button": {
+      "primary": "bg-[#FFB5A7] text-white rounded-full py-4 px-6 font-bold shadow-sm active:scale-95 transition-transform flex flex-row items-center justify-center",
+      "secondary": "bg-[#F8F9FA] text-[#2D3436] rounded-full py-4 px-6 font-bold active:bg-gray-100 transition-colors"
+    },
+    "input": {
+      "base": "bg-[#F8F9FA] rounded-2xl px-5 py-4 text-[#2D3436] placeholder-[#95A5A6] border-none font-medium",
+      "focused": "border border-[#FFB5A7] bg-white ring-2 ring-[#FFB5A7]/20"
+    },
+    "bottom_sheet": {
+      "base": "bg-white rounded-t-[32px] shadow-[0_-8px_30px_rgba(0,0,0,0.05)] p-6"
+    },
+    "pill": {
+      "base": "rounded-full px-3 py-1 text-xs font-bold"
+    }
+  },
+  "screen_layouts": {
+    "auth": {
+      "layout": "flex-1 bg-[#FEF9F8] justify-between p-6",
+      "elements": [
+        "Hero Image: Cozy aesthetic taking top 40% of screen with rounded-b-[40px] and shadow",
+        "Titles: 'Cozii' (H1) and 'Your home, perfectly in place' (Body Large)",
+        "Actions: Google OAuth Button (Pill), Email Login, Sign Up text link"
+      ]
+    },
+    "home_dashboard": {
+      "layout": "flex-1 bg-[#FEF9F8] p-6 pb-24 scroll-y",
+      "elements": [
+        "Header: User greeting, Family Space dropdown toggle (e.g., 'The Apartment')",
+        "Overview Stats (Bento Grid): 'Total Items' (Primary Color), 'Expiring Soon' (Warning Yellow), 'Spent This Month' (Mint Green)",
+        "Quick Actions: Floating 'Add via Scan' central pill button",
+        "Recent Activity: Vertical list of items added or finished by family members"
+      ]
+    },
+    "inventory_dashboard": {
+      "layout": "flex-1 bg-[#FEF9F8] p-6 pb-24",
+      "elements": [
+        "Header: 'Inventory' title, Search bar",
+        "Category Grid (2 columns): Cards with pastel background tint. E.g., Food (Mint tint), Skincare (Lavender tint), Closet (Peach tint)",
+        "Inside Category Card: Icon, Category Name, '14 items' label"
+      ]
+    },
+    "item_list": {
+      "layout": "flex-1 bg-[#FEF9F8]",
+      "elements": [
+        "Header: Category Title, Back button",
+        "Filter Chips: Horizontal scroll (All, Available, Low, Finished)",
+        "Item Rows: White card, rounded-2xl, flex-row. Left: Thumbnail image. Middle: Item Name, Expiry Date tag. Right: Quantity increment/decrement buttons"
+      ]
+    },
+    "add_item_sheet": {
+      "layout": "bg-white p-6 rounded-t-[32px]",
+      "elements": [
+        "Header: 'Add New Item'",
+        "AI Scan Button: Wide prominent button 'Scan with AI'",
+        "Manual Form: Name input, Category picker, Expiry date (Date picker), Quantity, Price",
+        "Action: 'Save Item' button"
+      ]
+    },
+    "finance_dashboard": {
+      "layout": "flex-1 bg-[#FEF9F8] p-6 pb-24",
+      "elements": [
+        "Header: 'Finances', Month selector",
+        "Hero Card: Total spent this month, vs Last month comparison",
+        "Needs vs Wants: Two horizontal progress bars indicating spend distribution",
+        "Category Breakdown: List of spending by category (Food, Utilities, Shopping) with amounts and mini-charts"
+      ]
+    }
+  },
+  "tab_bar_design": {
+    "style": "Absolute positioning at bottom, mx-6 mb-8 rounded-[32px] bg-white/90 backdrop-blur-xl shadow-[0_8px_30px_rgba(0,0,0,0.08)] border border-white flex flex-row justify-around items-center h-20",
+    "items": [
+      { "name": "Home", "icon": "Home" },
+      { "name": "Inventory", "icon": "Box" },
+      { "name": "Scan (Center)", "icon": "Camera", "special": "Elevated circle button, bg-[#FFB5A7] shadow-md -translate-y-4 text-white p-4 rounded-full" },
+      { "name": "Finance", "icon": "PieChart" },
+      { "name": "Profile", "icon": "User" }
+    ]
+  },
+  "empty_states": {
+    "inventory": "Text: 'Your inventory is clean and empty.', Action: 'Add your first item'",
+    "finance": "Text: 'No expenses tracked yet.', Action: 'Log a purchase'",
+    "family": "Text: 'It\\'s quiet here.', Action: 'Invite family members'"
+  },
+  "image_urls": {
+    "onboarding_hero": {
+      "url": "https://images.unsplash.com/photo-1774578341766-081a4996a067?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2ODh8MHwxfHNlYXJjaHwyfHxvcmdhbml6ZWQlMjBwYW50cnklMjBhZXN0aGV0aWN8ZW58MHx8fHwxNzc3NTM4MDEwfDA&ixlib=rb-4.1.0&q=85",
+      "description": "Modern pantry with open shelving and drawers - used for app splash/onboarding."
+    },
+    "category_pantry": {
+      "url": "https://images.unsplash.com/photo-1772475385426-ebd50c772229?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2ODh8MHwxfHNlYXJjaHwzfHxvcmdhbml6ZWQlMjBwYW50cnklMjBhZXN0aGV0aWN8ZW58MHx8fHwxNzc3NTM4MDEwfDA&ixlib=rb-4.1.0&q=85",
+      "description": "Organized kitchen items - used for Food/Pantry category header."
+    },
+    "category_skincare": {
+      "url": "https://images.unsplash.com/photo-1739980034839-513ef5a16b73?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NzB8MHwxfHNlYXJjaHwyfHxza2luY2FyZSUyMHBhc3RlbCUyMGFlc3RoZXRpY3xlbnwwfHx8fDE3Nzc1MzgwMTV8MA&ixlib=rb-4.1.0&q=85",
+      "description": "Pastel skincare bottles - used for Toiletries/Skincare category header."
+    },
+    "finance_hero": {
+      "url": "https://images.unsplash.com/photo-1753802866086-29d2c177c40b?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzF8MHwxfHNlYXJjaHwxfHxtaW5pbWFsaXN0JTIwd2FsbGV0JTIwYWVzdGhldGljfGVufDB8fHx8MTc3NzUzODAxOHww&ixlib=rb-4.1.0&q=85",
+      "description": "Minimalist colorful card wallet - used for Finance empty state or header."
+    }
+  },
+  "category_icons": {
+    "library": "lucide-react-native",
+    "mapping": {
+      "Food": "Refrigerator",
+      "Skincare": "Sparkles",
+      "Closet": "Shirt",
+      "Toiletries": "Bath",
+      "Cleaning": "Wind",
+      "Finance": "Wallet"
+    }
+  },
+  "testing_attributes": {
+    "rule": "All interactive and key informational elements MUST include a data-testid attribute.",
+    "examples": [
+      "data-testid='auth-google-login-button'",
+      "data-testid='home-total-items-card'",
+      "data-testid='inventory-add-item-button'",
+      "data-testid='tabbar-scan-button'"
+    ]
+  },
+  "instructions_to_main_agent": [
+    "Use Tailwind CSS via nativewind for React Native Expo to apply these classes.",
+    "Ensure generous padding (`p-6`) on all screens to maintain the cozy, airy feel.",
+    "Do NOT use pure black for text; always use the specified `#2D3436` text color.",
+    "Implement the Tab Bar as a floating element, not a full-width block attached to the bottom.",
+    "For the Finance dashboard, use soft colors for charts (e.g., Mint Green and Peach) rather than default chart colors.",
+    "When displaying images, use a soft corner radius (`rounded-2xl`) and never let them bleed completely to the screen edges unless it's the top 40% hero of the onboarding screen."
+  ]
+}
