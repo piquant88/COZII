@@ -144,11 +144,11 @@ backend:
 
   - task: "Recurring bills CRUD"
     implemented: true
-    working: false
+    working: true
     file: "/app/backend/server.py"
-    stuck_count: 1
+    stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
       - working: "NA"
         agent: "main"
@@ -186,6 +186,26 @@ backend:
             and price == bill.amount (verified via GET /items)
           - The new item appears in /balance-details breakdown after payment
           - DELETE /bills/{id} removes the bill but leaves historical items intact
+      - working: true
+        agent: "testing"
+        comment: |
+          Re-tested after fix to _compute_bill_state monthly branch (period_start now uses
+          this_month_due.replace(day=1) on line 1157). Verified end-to-end against the
+          public preview URL (today=2026-04-30 UTC):
+          
+          Scenario A — monthly bill with due_day=15 (today > this_month_due):
+            - POST /api/bills (monthly, due_day=15, amount=60) → 200, next_due_date=2026-05-15,
+              is_paid_current_period=false, last_paid_date=null. ✅
+            - POST /api/bills/{id}/pay → 200, is_paid_current_period=TRUE,
+              last_paid_date=2026-04-30, next_due_date=2026-05-15. ✅ (was the bug)
+            - GET /api/bills?space_id=... → same bill returns is_paid_current_period=TRUE,
+              last_paid_date=2026-04-30, next_due_date=2026-05-15. ✅
+          
+          Scenario B — monthly bill with due_day=1 (today=30 also > this_month_due=2026-04-01):
+            - Created, paid, list — all return is_paid_current_period=TRUE,
+              last_paid_date=2026-04-30, next_due_date=2026-05-01. ✅
+          
+          The previous bug (period_start = next month) is resolved. No regressions observed.
 
   - task: "Roommate agreement CRUD + sign"
     implemented: true
@@ -266,8 +286,7 @@ metadata:
   run_ui: false
 
 test_plan:
-  current_focus:
-    - "Recurring bills CRUD"
+  current_focus: []
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -313,3 +332,16 @@ agent_communication:
          The rest of the bills flow (CRUD, pay creates an item with bill name + amount in
          the category, item appears in /balance-details, DELETE keeps historical items) all
          work correctly.
+  - agent: "testing"
+    message: |
+      Re-tested Recurring bills CRUD after the _compute_bill_state fix
+      (period_start now uses this_month_due.replace(day=1)).
+      
+      ✅ Monthly bill due_day=15, today=2026-04-30 (today > this_month_due):
+         POST /api/bills/{id}/pay returns is_paid_current_period=true,
+         last_paid_date=2026-04-30, next_due_date=2026-05-15. GET /api/bills returns the
+         same state. The original bug is fixed.
+      ✅ Edge: monthly bill due_day=1, today=2026-04-30 (today > 2026-04-01) — same flow
+         returns is_paid_current_period=true, next_due_date=2026-05-01. No regression.
+      
+      Marking task working=true, needs_retesting=false. No further bills work needed.

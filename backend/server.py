@@ -1154,7 +1154,7 @@ def _compute_bill_state(bill: dict) -> dict:
         else:
             next_due = this_month_due
         # Paid for the current period if last_paid_date >= start of current period
-        period_start = (next_due.replace(day=1) if next_due >= today else this_month_due.replace(day=1))
+        period_start = this_month_due.replace(day=1)
         is_paid = last_paid_d is not None and last_paid_d >= period_start
     elif freq == "weekly":
         # Next due: next occurrence of due_day-of-week (0=Mon..6=Sun)
