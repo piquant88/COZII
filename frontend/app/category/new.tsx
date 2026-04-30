@@ -1,28 +1,31 @@
 import React, { useState, useEffect } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput,
-  KeyboardAvoidingView, Platform,
+  KeyboardAvoidingView, Platform, Image,
 } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useAuth } from '../../src/AuthContext';
 import { colors, radius, spacing, shadows, tints, tintKeys } from '../../src/theme';
-import { Icon, CATEGORY_ICON_OPTIONS } from '../../src/Icon';
+import { Icon, CATEGORY_ICON_OPTIONS, isImageIcon } from '../../src/Icon';
 import { api } from '../../src/api';
-import type { Category } from '../../src/types';
+import type { Category, User } from '../../src/types';
 
 type FieldType = 'text' | 'number' | 'date' | 'price' | 'select';
 type FieldDraft = { key: string; label: string; type: FieldType; options: string[]; optionInput: string };
 
 export default function CategoryEditor() {
   const router = useRouter();
-  const { activeSpace } = useAuth();
+  const { activeSpace, user } = useAuth();
   const { edit: editId } = useLocalSearchParams<{ edit?: string }>();
   const isEdit = !!editId;
 
   const [name, setName] = useState('');
   const [icon, setIcon] = useState('Box');
   const [tint, setTint] = useState('mint');
+  const [members, setMembers] = useState<User[]>([]);
+  const [sharedWith, setSharedWith] = useState<string[]>([]);
   const [fields, setFields] = useState<FieldDraft[]>([
     { key: 'expiry_date', label: 'Expiry date', type: 'date', options: [], optionInput: '' },
     { key: 'quantity', label: 'Quantity', type: 'number', options: [], optionInput: '' },
@@ -30,6 +33,16 @@ export default function CategoryEditor() {
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [bootLoading, setBootLoading] = useState(isEdit);
+
+  useEffect(() => {
+    if (!activeSpace) return;
+    (async () => {
+      try {
+        const m = await api.get<User[]>(`/spaces/${activeSpace.space_id}/members`);
+        setMembers(m);
+      } catch (e) { console.warn(e); }
+    })();
+  }, [activeSpace]);
 
   useEffect(() => {
     if (!isEdit || !activeSpace) return;
@@ -41,6 +54,7 @@ export default function CategoryEditor() {
         setName(cat.name);
         setIcon(cat.icon);
         setTint(cat.tint);
+        setSharedWith(cat.shared_with || []);
         setFields(cat.fields.map((f) => ({
           key: f.key,
           label: f.label,
@@ -94,12 +108,12 @@ export default function CategoryEditor() {
     try {
       if (isEdit) {
         await api.patch(`/categories/${editId}`, {
-          name: name.trim(), icon, tint, fields: fieldsPayload,
+          name: name.trim(), icon, tint, fields: fieldsPayload, shared_with: sharedWith,
         });
       } else {
         await api.post('/categories', {
           space_id: activeSpace.space_id,
-          name: name.trim(), icon, tint, fields: fieldsPayload,
+          name: name.trim(), icon, tint, fields: fieldsPayload, shared_with: sharedWith,
         });
       }
       router.back();
@@ -107,6 +121,39 @@ export default function CategoryEditor() {
       setErr(e?.message || 'Failed to save');
     } finally { setLoading(false); }
   };
+
+  const pickCustomIcon = async () => {
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.6,
+        base64: true,
+      });
+      if (!result.canceled && result.assets[0]) {
+        const a = result.assets[0];
+        const base64 = a.base64 ? `data:image/jpeg;base64,${a.base64}` : a.uri;
+        setIcon(base64);
+      }
+    } catch (e) { console.warn(e); }
+  };
+
+  const toggleMember = (uid: string) => {
+    setSharedWith((p) => p.includes(uid) ? p.filter((x) => x !== uid) : [...p, uid]);
+  };
+
+  const setShareMode = (mode: 'all' | 'private' | 'custom') => {
+    if (mode === 'all') setSharedWith([]);
+    else if (mode === 'private') setSharedWith(user ? [user.user_id] : []);
+    else if (mode === 'custom' && sharedWith.length === 0 && user) setSharedWith([user.user_id]);
+  };
+
+  const shareMode: 'all' | 'private' | 'custom' = (() => {
+    if (sharedWith.length === 0) return 'all';
+    if (sharedWith.length === 1 && user && sharedWith[0] === user.user_id) return 'private';
+    return 'custom';
+  })();
 
   if (bootLoading) {
     return (
@@ -163,6 +210,17 @@ export default function CategoryEditor() {
           <View style={styles.field}>
             <Text style={styles.label}>Icon</Text>
             <View style={styles.iconRow}>
+              <TouchableOpacity
+                style={[styles.iconPick, isImageIcon(icon) && { backgroundColor: tints[tint].bg, borderColor: tints[tint].icon, borderWidth: 2, overflow: 'hidden' }]}
+                onPress={pickCustomIcon}
+                testID="cat-edit-custom-photo"
+              >
+                {isImageIcon(icon) ? (
+                  <Image source={{ uri: icon }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                ) : (
+                  <Icon name="ImagePlus" size={22} color={colors.textMuted} />
+                )}
+              </TouchableOpacity>
               {CATEGORY_ICON_OPTIONS.map((i) => (
                 <TouchableOpacity
                   key={i}
@@ -174,6 +232,82 @@ export default function CategoryEditor() {
                 </TouchableOpacity>
               ))}
             </View>
+            <Text style={[styles.hint, { marginTop: 8 }]}>
+              Tap the first square to upload your own photo as the icon.
+            </Text>
+          </View>
+
+          <View style={styles.field}>
+            <Text style={styles.label}>Sharing & splits</Text>
+            <View style={styles.shareModeRow}>
+              <TouchableOpacity
+                style={[styles.shareMode, shareMode === 'all' && styles.shareModeActive]}
+                onPress={() => setShareMode('all')}
+                testID="cat-edit-share-all"
+              >
+                <Icon name="Globe" size={16} color={shareMode === 'all' ? '#fff' : colors.textMain} />
+                <Text style={[styles.shareModeTxt, shareMode === 'all' && { color: '#fff' }]}>Shared with all</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.shareMode, shareMode === 'private' && styles.shareModeActive]}
+                onPress={() => setShareMode('private')}
+                testID="cat-edit-share-private"
+              >
+                <Icon name="Lock" size={16} color={shareMode === 'private' ? '#fff' : colors.textMain} />
+                <Text style={[styles.shareModeTxt, shareMode === 'private' && { color: '#fff' }]}>Private</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.shareMode, shareMode === 'custom' && styles.shareModeActive]}
+                onPress={() => setShareMode('custom')}
+                testID="cat-edit-share-custom"
+              >
+                <Icon name="Users" size={16} color={shareMode === 'custom' ? '#fff' : colors.textMain} />
+                <Text style={[styles.shareModeTxt, shareMode === 'custom' && { color: '#fff' }]}>Custom</Text>
+              </TouchableOpacity>
+            </View>
+            {shareMode === 'all' && (
+              <Text style={styles.hint}>Everyone in this space sees this category. Costs are tracked but not split.</Text>
+            )}
+            {shareMode === 'private' && (
+              <Text style={styles.hint}>Only you can see items in this category.</Text>
+            )}
+            {shareMode === 'custom' && (
+              <>
+                <Text style={styles.hint}>Pick who can see and split costs in this category. Items with prices will be split equally.</Text>
+                <View style={styles.memberPicker}>
+                  {members.map((m) => {
+                    const active = sharedWith.includes(m.user_id);
+                    const isMe = user?.user_id === m.user_id;
+                    return (
+                      <TouchableOpacity
+                        key={m.user_id}
+                        style={[styles.memberRow, active && { backgroundColor: tints[tint].bg }]}
+                        onPress={() => toggleMember(m.user_id)}
+                        testID={`cat-edit-member-${m.user_id}`}
+                      >
+                        <View style={[styles.memberAvatar, { backgroundColor: tints[tint].icon }]}>
+                          <Text style={styles.memberAvatarTxt}>{m.name?.[0]?.toUpperCase()}</Text>
+                        </View>
+                        <Text style={styles.memberName}>
+                          {m.name}{isMe ? ' (You)' : ''}
+                        </Text>
+                        <View style={[styles.checkbox, active && { backgroundColor: tints[tint].icon, borderColor: tints[tint].icon }]}>
+                          {active && <Icon name="Check" size={14} color="#fff" />}
+                        </View>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+                {sharedWith.length >= 2 && (
+                  <View style={styles.splitInfo}>
+                    <Text style={styles.splitInfoTxt}>
+                      💸 Each item with a price will be split among {sharedWith.length} people
+                      ({(100 / sharedWith.length).toFixed(0)}% each)
+                    </Text>
+                  </View>
+                )}
+              </>
+            )}
           </View>
 
           <View style={styles.field}>
@@ -304,6 +438,46 @@ const styles = StyleSheet.create({
     borderWidth: 2, borderColor: 'transparent',
     ...shadows.card,
   },
+  shareModeRow: { flexDirection: 'row', gap: 8, marginBottom: 10 },
+  shareMode: {
+    flex: 1,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    paddingVertical: 12, paddingHorizontal: 8,
+    borderRadius: radius.md,
+    backgroundColor: colors.surface,
+    ...shadows.card,
+  },
+  shareModeActive: { backgroundColor: colors.textMain },
+  shareModeTxt: { fontSize: 12, fontWeight: '700', color: colors.textMain },
+  memberPicker: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    overflow: 'hidden',
+    marginTop: 10,
+    ...shadows.card,
+  },
+  memberRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    paddingHorizontal: spacing.md, paddingVertical: 12,
+    borderBottomWidth: 1, borderBottomColor: colors.border,
+  },
+  memberAvatar: {
+    width: 32, height: 32, borderRadius: 16,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  memberAvatarTxt: { color: '#fff', fontWeight: '800', fontSize: 13 },
+  memberName: { flex: 1, fontSize: 14, fontWeight: '600', color: colors.textMain },
+  checkbox: {
+    width: 22, height: 22, borderRadius: 6,
+    borderWidth: 2, borderColor: colors.border,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  splitInfo: {
+    marginTop: 10, padding: 10,
+    backgroundColor: tints.lavender.bg,
+    borderRadius: radius.md,
+  },
+  splitInfoTxt: { fontSize: 13, color: tints.lavender.icon, fontWeight: '700' },
   fieldRow: {
     backgroundColor: colors.surface,
     borderRadius: radius.md,

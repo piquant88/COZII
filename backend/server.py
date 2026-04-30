@@ -13,8 +13,8 @@ import httpx
 import json
 import re
 from pathlib import Path
-from pydantic import BaseModel, Field, EmailStr
-from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field, EmailStr, model_validator
+from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime, timezone, timedelta
 
 ROOT_DIR = Path(__file__).parent
@@ -79,7 +79,19 @@ def gen_session_token() -> str:
 # =========================
 # Pydantic Models
 # =========================
-class User(BaseModel):
+class TZAware(BaseModel):
+    """Base model that converts naive datetimes (from MongoDB) into UTC-aware ones."""
+    @model_validator(mode='before')
+    @classmethod
+    def _ensure_tz_aware(cls, data):
+        if isinstance(data, dict):
+            for k, v in list(data.items()):
+                if isinstance(v, datetime) and v.tzinfo is None:
+                    data[k] = v.replace(tzinfo=timezone.utc)
+        return data
+
+
+class User(TZAware):
     user_id: str
     email: str
     name: str
@@ -108,7 +120,7 @@ class AuthResponse(BaseModel):
     user: User
 
 
-class FamilySpace(BaseModel):
+class FamilySpace(TZAware):
     space_id: str
     name: str
     owner_id: str
@@ -132,13 +144,14 @@ class CategoryField(BaseModel):
     options: List[str] = []  # for select type
 
 
-class Category(BaseModel):
+class Category(TZAware):
     category_id: str
     space_id: str
     name: str
     icon: str
     tint: str  # color tint key
     fields: List[CategoryField]
+    shared_with: List[str] = []  # user_ids that split costs in this category; empty = not shared
     created_by: str
     created_at: datetime
 
@@ -149,6 +162,7 @@ class CreateCategoryRequest(BaseModel):
     icon: str = "Box"
     tint: str = "mint"
     fields: List[CategoryField] = []
+    shared_with: List[str] = []
 
 
 class UpdateCategoryRequest(BaseModel):
@@ -156,9 +170,10 @@ class UpdateCategoryRequest(BaseModel):
     icon: Optional[str] = None
     tint: Optional[str] = None
     fields: Optional[List[CategoryField]] = None
+    shared_with: Optional[List[str]] = None
 
 
-class Item(BaseModel):
+class Item(TZAware):
     item_id: str
     space_id: str
     category_id: str
@@ -207,7 +222,7 @@ class UpdateItemRequest(BaseModel):
     category_id: Optional[str] = None
 
 
-class ActivityItem(BaseModel):
+class ActivityItem(TZAware):
     activity_id: str
     space_id: str
     user_id: str
@@ -491,6 +506,7 @@ async def create_category(body: CreateCategoryRequest, user: User = Depends(get_
         "icon": body.icon,
         "tint": body.tint,
         "fields": [f.dict() for f in body.fields],
+        "shared_with": body.shared_with,
         "created_by": user.user_id,
         "created_at": now_utc(),
     }
@@ -504,8 +520,13 @@ async def create_category(body: CreateCategoryRequest, user: User = Depends(get_
 async def list_categories(space_id: str, user: User = Depends(get_current_user)):
     await assert_space_member(space_id, user.user_id)
     docs = await db.categories.find({"space_id": space_id}, {"_id": 0}).to_list(200)
-    docs.sort(key=lambda d: d["created_at"])
-    return [Category(**d) for d in docs]
+    # Filter: shared_with empty = visible to all; non-empty = only those members
+    accessible = [
+        d for d in docs
+        if not d.get("shared_with") or user.user_id in d.get("shared_with", [])
+    ]
+    accessible.sort(key=lambda d: d["created_at"])
+    return [Category(**d) for d in accessible]
 
 
 @api_router.patch("/categories/{category_id}", response_model=Category)
@@ -523,6 +544,8 @@ async def update_category(category_id: str, body: UpdateCategoryRequest, user: U
         updates["tint"] = body.tint
     if body.fields is not None:
         updates["fields"] = [f.dict() for f in body.fields]
+    if body.shared_with is not None:
+        updates["shared_with"] = body.shared_with
     if updates:
         await db.categories.update_one({"category_id": category_id}, {"$set": updates})
     out = await db.categories.find_one({"category_id": category_id}, {"_id": 0})
@@ -817,6 +840,175 @@ async def bulk_create_items(body: BulkCreateItemsRequest, user: User = Depends(g
         await record_activity(body.space_id, user, "added", "item", out["item_id"], out["name"])
 
     return [Item(**d) for d in created]
+
+
+# =========================
+# Settlements / Splits
+# =========================
+class Settlement(TZAware):
+    settlement_id: str
+    space_id: str
+    from_user_id: str
+    to_user_id: str
+    from_name: str
+    to_name: str
+    amount: float
+    note: Optional[str] = None
+    evidence_photo_base64: Optional[str] = None
+    created_at: datetime
+
+
+class CreateSettlementRequest(BaseModel):
+    space_id: str
+    to_user_id: str
+    amount: float
+    note: Optional[str] = None
+    evidence_photo_base64: Optional[str] = None
+
+
+@api_router.post("/settlements", response_model=Settlement)
+async def create_settlement(body: CreateSettlementRequest, user: User = Depends(get_current_user)):
+    space = await assert_space_member(body.space_id, user.user_id)
+    if body.to_user_id not in space["member_ids"]:
+        raise HTTPException(status_code=400, detail="Recipient must be a member of this space")
+    if body.to_user_id == user.user_id:
+        raise HTTPException(status_code=400, detail="Cannot pay yourself")
+    if body.amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be positive")
+
+    to_user_doc = await db.users.find_one({"user_id": body.to_user_id}, {"_id": 0, "name": 1})
+    to_name = to_user_doc["name"] if to_user_doc else "Unknown"
+
+    doc = {
+        "settlement_id": gen_id("settle"),
+        "space_id": body.space_id,
+        "from_user_id": user.user_id,
+        "to_user_id": body.to_user_id,
+        "from_name": user.name,
+        "to_name": to_name,
+        "amount": round(body.amount, 2),
+        "note": body.note,
+        "evidence_photo_base64": body.evidence_photo_base64,
+        "created_at": now_utc(),
+    }
+    await db.settlements.insert_one(doc)
+    out = await db.settlements.find_one({"settlement_id": doc["settlement_id"]}, {"_id": 0})
+    await record_activity(body.space_id, user, "paid", "settlement", out["settlement_id"], f"{user.name} → {to_name}")
+    return Settlement(**out)
+
+
+@api_router.get("/settlements", response_model=List[Settlement])
+async def list_settlements(space_id: str, user: User = Depends(get_current_user)):
+    await assert_space_member(space_id, user.user_id)
+    docs = await db.settlements.find({"space_id": space_id}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    return [Settlement(**d) for d in docs]
+
+
+@api_router.delete("/settlements/{settlement_id}")
+async def delete_settlement(settlement_id: str, user: User = Depends(get_current_user)):
+    doc = await db.settlements.find_one({"settlement_id": settlement_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Settlement not found")
+    if doc["from_user_id"] != user.user_id:
+        raise HTTPException(status_code=403, detail="Only the payer can delete this settlement")
+    await db.settlements.delete_one({"settlement_id": settlement_id})
+    return {"success": True}
+
+
+@api_router.get("/balances")
+async def get_balances(space_id: str, user: User = Depends(get_current_user)):
+    await assert_space_member(space_id, user.user_id)
+
+    # 1. All shared categories (have 2+ members in shared_with)
+    cat_docs = await db.categories.find({"space_id": space_id}, {"_id": 0}).to_list(500)
+    cat_share_map: Dict[str, List[str]] = {}
+    for c in cat_docs:
+        sw = c.get("shared_with") or []
+        if len(sw) >= 2:
+            cat_share_map[c["category_id"]] = sw
+
+    # 2. All priced items in those categories
+    items = []
+    if cat_share_map:
+        items = await db.items.find({
+            "space_id": space_id,
+            "category_id": {"$in": list(cat_share_map.keys())},
+            "price": {"$ne": None, "$gt": 0},
+        }, {"_id": 0}).to_list(5000)
+
+    # 3. Pairwise debts: (debtor, creditor) -> amount
+    pair_debts: Dict[Tuple[str, str], float] = {}
+    for it in items:
+        members = cat_share_map[it["category_id"]]
+        payer = it.get("created_by")
+        if payer not in members:
+            continue
+        share = it["price"] / len(members)
+        for m in members:
+            if m == payer:
+                continue
+            key = (m, payer)
+            pair_debts[key] = pair_debts.get(key, 0) + share
+
+    # 4. Subtract settlements
+    settlements = await db.settlements.find({"space_id": space_id}, {"_id": 0}).to_list(2000)
+    for s in settlements:
+        key = (s["from_user_id"], s["to_user_id"])
+        if key in pair_debts:
+            pair_debts[key] = max(0.0, pair_debts[key] - s["amount"])
+
+    # 5. Net out reverse pairs
+    nets: Dict[Tuple[str, str], float] = {}
+    seen: set = set()
+    for (debtor, creditor), amount in pair_debts.items():
+        if (debtor, creditor) in seen:
+            continue
+        rev = pair_debts.get((creditor, debtor), 0.0)
+        net = amount - rev
+        seen.add((debtor, creditor))
+        seen.add((creditor, debtor))
+        if net > 0.01:
+            nets[(debtor, creditor)] = net
+        elif net < -0.01:
+            nets[(creditor, debtor)] = -net
+
+    # 6. Names
+    uids = set()
+    for (a, b) in nets.keys():
+        uids.add(a); uids.add(b)
+    users_docs = await db.users.find({"user_id": {"$in": list(uids)}}, {"_id": 0}).to_list(100) if uids else []
+    name_map = {u["user_id"]: u["name"] for u in users_docs}
+
+    you_owe: List[dict] = []
+    owed_to_you: List[dict] = []
+    others: List[dict] = []
+    for (debtor, creditor), amount in nets.items():
+        entry = {
+            "from_user_id": debtor,
+            "from_name": name_map.get(debtor, "Someone"),
+            "to_user_id": creditor,
+            "to_name": name_map.get(creditor, "Someone"),
+            "amount": round(amount, 2),
+        }
+        if debtor == user.user_id:
+            you_owe.append(entry)
+        elif creditor == user.user_id:
+            owed_to_you.append(entry)
+        else:
+            others.append(entry)
+
+    total_you_owe = round(sum(e["amount"] for e in you_owe), 2)
+    total_owed_to_you = round(sum(e["amount"] for e in owed_to_you), 2)
+
+    return {
+        "you_owe": you_owe,
+        "owed_to_you": owed_to_you,
+        "others": others,
+        "total_you_owe": total_you_owe,
+        "total_owed_to_you": total_owed_to_you,
+        "net": round(total_owed_to_you - total_you_owe, 2),
+        "shared_categories_count": len(cat_share_map),
+    }
 
 
 # =========================

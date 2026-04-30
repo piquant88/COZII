@@ -118,6 +118,16 @@ export default function Profile() {
 
         <TouchableOpacity
           style={[styles.card, styles.rowBtn]}
+          onPress={() => router.push('/splits')}
+          testID="profile-splits"
+        >
+          <Icon name="Users" size={20} color={colors.textMain} />
+          <Text style={styles.rowBtnTxt}>Money splits</Text>
+          <Icon name="ChevronRight" size={18} color={colors.textMuted} />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.card, styles.rowBtn]}
           onPress={() => router.push('/space-setup')}
           testID="profile-add-space"
         >

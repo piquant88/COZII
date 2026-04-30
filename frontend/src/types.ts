@@ -27,11 +27,43 @@ export type Category = {
   category_id: string;
   space_id: string;
   name: string;
-  icon: string;
+  icon: string;        // either an icon name OR a "data:image/..." base64 URI
   tint: string;
   fields: CategoryField[];
+  shared_with: string[];
   created_by: string;
   created_at: string;
+};
+
+export type Settlement = {
+  settlement_id: string;
+  space_id: string;
+  from_user_id: string;
+  to_user_id: string;
+  from_name: string;
+  to_name: string;
+  amount: number;
+  note?: string | null;
+  evidence_photo_base64?: string | null;
+  created_at: string;
+};
+
+export type Balance = {
+  from_user_id: string;
+  from_name: string;
+  to_user_id: string;
+  to_name: string;
+  amount: number;
+};
+
+export type Balances = {
+  you_owe: Balance[];
+  owed_to_you: Balance[];
+  others: Balance[];
+  total_you_owe: number;
+  total_owed_to_you: number;
+  net: number;
+  shared_categories_count: number;
 };
 
 export type Item = {
