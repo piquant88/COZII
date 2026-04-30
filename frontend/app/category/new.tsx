@@ -146,7 +146,12 @@ export default function CategoryEditor() {
   const setShareMode = (mode: 'all' | 'private' | 'custom') => {
     if (mode === 'all') setSharedWith([]);
     else if (mode === 'private') setSharedWith(user ? [user.user_id] : []);
-    else if (mode === 'custom' && sharedWith.length === 0 && user) setSharedWith([user.user_id]);
+    else if (mode === 'custom') {
+      // Default Custom to include everyone in the space — user can uncheck
+      const all = members.map((m) => m.user_id);
+      if (all.length >= 2) setSharedWith(all);
+      else if (user) setSharedWith([user.user_id]);
+    }
   };
 
   const shareMode: 'all' | 'private' | 'custom' = (() => {
@@ -266,14 +271,16 @@ export default function CategoryEditor() {
               </TouchableOpacity>
             </View>
             {shareMode === 'all' && (
-              <Text style={styles.hint}>Everyone in this space sees this category. Costs are tracked but not split.</Text>
+              <Text style={styles.hint}>Everyone in this space sees this category. Costs are tracked but not auto-split.</Text>
             )}
             {shareMode === 'private' && (
-              <Text style={styles.hint}>Only you can see items in this category.</Text>
+              <Text style={styles.hint}>Only you can see items in this category. No splitting.</Text>
             )}
             {shareMode === 'custom' && (
               <>
-                <Text style={styles.hint}>Pick who can see and split costs in this category. Items with prices will be split equally.</Text>
+                <Text style={styles.hint}>
+                  ✅ Pick who can <Text style={{ fontWeight: '800' }}>see</Text> this category. If 2+ people are checked, item prices are also <Text style={{ fontWeight: '800' }}>auto-split equally</Text> among them.
+                </Text>
                 <View style={styles.memberPicker}>
                   {members.map((m) => {
                     const active = sharedWith.includes(m.user_id);
