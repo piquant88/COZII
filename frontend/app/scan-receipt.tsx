@@ -18,6 +18,7 @@ type Scanned = {
   price: number | null;
   category_hint: string | null;
   category_id: string;
+  fields: Record<string, any>;
 };
 
 // Map AI category hints to category tint to help auto-assign
@@ -115,7 +116,13 @@ export default function ScanReceipt() {
     setError(null);
     setScanning(true);
     try {
-      const res = await api.post<{ items: any[] }>('/ai/scan-receipt', { image_base64: photo });
+      // When locked to a category, send its custom fields to AI for richer extraction
+      const lockedCat = categories.find((c) => c.category_id === defaultCategoryId);
+      const target_fields = (lockCategory && lockedCat) ? lockedCat.fields : [];
+      const res = await api.post<{ items: any[] }>('/ai/scan-receipt', {
+        image_base64: photo,
+        target_fields,
+      });
       const mapped: Scanned[] = (res.items || []).map((it) => ({
         name: it.name,
         quantity: it.quantity || 1,
@@ -124,6 +131,7 @@ export default function ScanReceipt() {
         category_id: lockCategory
           ? defaultCategoryId
           : (autoMatchCategory(it.category_hint, categories) || defaultCategoryId),
+        fields: (it.fields && typeof it.fields === 'object') ? it.fields : {},
       }));
       if (mapped.length === 0) {
         setError("No items detected. Try a clearer photo or add items manually.");
@@ -144,7 +152,7 @@ export default function ScanReceipt() {
   const removeItem = (i: number) => setItems((p) => p.filter((_, idx) => idx !== i));
 
   const addManual = () => {
-    setItems((p) => [...p, { name: '', quantity: 1, price: null, category_hint: null, category_id: defaultCategoryId }]);
+    setItems((p) => [...p, { name: '', quantity: 1, price: null, category_hint: null, category_id: defaultCategoryId, fields: {} }]);
   };
 
   const save = async () => {
@@ -167,6 +175,7 @@ export default function ScanReceipt() {
           quantity: it.quantity,
           price: it.price,
           category_hint: it.category_hint,
+          fields: it.fields || {},
         })),
         purchase_date: new Date().toISOString().slice(0, 10),
         receipt_photo_base64: photo,

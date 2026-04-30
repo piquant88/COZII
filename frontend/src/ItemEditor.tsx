@@ -281,14 +281,31 @@ export default function ItemEditor({ mode, itemId, preselectCategoryId }: Props)
               {activeCategory.fields.map((f) => (
                 <View key={f.key} style={{ marginBottom: 10 }}>
                   <Text style={[styles.label, { marginBottom: 4, textTransform: 'none' }]}>{f.label}</Text>
-                  <TextInput
-                    style={styles.input}
-                    placeholder={f.type === 'date' ? 'YYYY-MM-DD' : f.type === 'number' || f.type === 'price' ? '0' : ''}
-                    placeholderTextColor="#95A5A6"
-                    keyboardType={f.type === 'number' || f.type === 'price' ? 'decimal-pad' : 'default'}
-                    value={String(fields[f.key] ?? '')}
-                    onChangeText={(v) => setFields((p) => ({ ...p, [f.key]: v }))}
-                  />
+                  {f.type === 'select' && f.options && f.options.length > 0 ? (
+                    <View style={styles.selectChipRow}>
+                      {f.options.map((opt) => {
+                        const active = String(fields[f.key] ?? '') === opt;
+                        return (
+                          <TouchableOpacity
+                            key={opt}
+                            style={[styles.selectChip, active && styles.selectChipActive]}
+                            onPress={() => setFields((p) => ({ ...p, [f.key]: active ? '' : opt }))}
+                          >
+                            <Text style={[styles.selectChipTxt, active && styles.selectChipTxtActive]}>{opt}</Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  ) : (
+                    <TextInput
+                      style={styles.input}
+                      placeholder={f.type === 'date' ? 'YYYY-MM-DD' : f.type === 'number' || f.type === 'price' ? '0' : ''}
+                      placeholderTextColor="#95A5A6"
+                      keyboardType={f.type === 'number' || f.type === 'price' ? 'decimal-pad' : 'default'}
+                      value={String(fields[f.key] ?? '')}
+                      onChangeText={(v) => setFields((p) => ({ ...p, [f.key]: v }))}
+                    />
+                  )}
                 </View>
               ))}
             </View>
@@ -394,4 +411,14 @@ const styles = StyleSheet.create({
     ...shadows.button,
   },
   primaryTxt: { color: '#fff', fontWeight: '800' },
+  selectChipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  selectChip: {
+    paddingHorizontal: 14, paddingVertical: 8,
+    borderRadius: radius.full,
+    backgroundColor: colors.surfaceAlt,
+    borderWidth: 2, borderColor: 'transparent',
+  },
+  selectChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  selectChipTxt: { fontSize: 13, fontWeight: '700', color: colors.textMuted },
+  selectChipTxtActive: { color: '#fff' },
 });

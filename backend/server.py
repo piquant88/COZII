@@ -128,7 +128,8 @@ class JoinSpaceRequest(BaseModel):
 class CategoryField(BaseModel):
     key: str
     label: str
-    type: str  # text | number | date | price
+    type: str  # text | number | date | price | select
+    options: List[str] = []  # for select type
 
 
 class Category(BaseModel):
@@ -638,6 +639,7 @@ async def delete_item(item_id: str, user: User = Depends(get_current_user)):
 # =========================
 class ScanReceiptRequest(BaseModel):
     image_base64: str  # data URI or raw base64
+    target_fields: List[CategoryField] = []  # optional: when scanning into a specific category, fill these
 
 
 class ScannedItem(BaseModel):
@@ -645,6 +647,7 @@ class ScannedItem(BaseModel):
     quantity: float = 1
     price: Optional[float] = None
     category_hint: Optional[str] = None
+    fields: Dict[str, Any] = {}
 
 
 class ScanReceiptResponse(BaseModel):
@@ -685,10 +688,30 @@ async def scan_receipt(body: ScanReceiptRequest, user: User = Depends(get_curren
     system_message = (
         "You are a helpful assistant that extracts shopping items from receipt or product images. "
         "Return STRICT JSON only, no prose, in this schema: "
-        '{"items":[{"name":"string","quantity":number,"price":number_or_null,"category_hint":"food|skincare|toiletries|closet|cleaning|other"}]}. '
+        '{"items":[{"name":"string","quantity":number,"price":number_or_null,"category_hint":"food|skincare|toiletries|closet|cleaning|other","fields":{}}]}. '
         "Skip tax, subtotal, total, fees, change, tip, payment type, and store name. "
-        "Use lowercase category_hint values. If price is unclear, set it to null. Quantity defaults to 1."
+        "Use lowercase category_hint values. If price is unclear, set it to null. Quantity defaults to 1. "
+        "The 'fields' object must contain extra structured details for each item."
     )
+
+    if body.target_fields:
+        # Build instruction for AI to also fill in per-category fields
+        field_instructions = []
+        for f in body.target_fields:
+            if f.type == "select" and f.options:
+                opts = " | ".join(f.options)
+                field_instructions.append(f'  - "{f.key}" (label "{f.label}"): pick exactly one of [{opts}] that best matches this item, or null if uncertain')
+            elif f.type == "date":
+                field_instructions.append(f'  - "{f.key}" (label "{f.label}"): an ISO date string YYYY-MM-DD if visible, else null')
+            elif f.type in ("number", "price"):
+                field_instructions.append(f'  - "{f.key}" (label "{f.label}"): a number if visible, else null')
+            else:
+                field_instructions.append(f'  - "{f.key}" (label "{f.label}"): a short string if visible, else null')
+        if field_instructions:
+            system_message += (
+                " For each detected item, also fill the 'fields' object with these keys (keep keys exact, lowercase): \n"
+                + "\n".join(field_instructions)
+            )
 
     chat = LlmChat(
         api_key=EMERGENT_LLM_KEY,
@@ -738,7 +761,10 @@ async def scan_receipt(body: ScanReceiptRequest, user: User = Depends(get_curren
         hint = it.get("category_hint")
         if hint is not None:
             hint = str(hint).lower().strip() or None
-        items.append(ScannedItem(name=name, quantity=qty, price=price, category_hint=hint))
+        fields = it.get("fields") or {}
+        if not isinstance(fields, dict):
+            fields = {}
+        items.append(ScannedItem(name=name, quantity=qty, price=price, category_hint=hint, fields=fields))
 
     return ScanReceiptResponse(items=items, raw=text[:2000])
 
@@ -779,7 +805,7 @@ async def bulk_create_items(body: BulkCreateItemsRequest, user: User = Depends(g
             "purchase_date": body.purchase_date,
             "expiry_date": None,
             "notes": None,
-            "fields": {},
+            "fields": it.fields or {},
             "created_by": user.user_id,
             "created_by_name": user.name,
             "created_at": now_utc(),

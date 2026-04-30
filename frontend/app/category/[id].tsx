@@ -81,6 +81,13 @@ export default function CategoryDetail() {
           <Icon name={category?.icon || 'Box'} color={tint.icon} size={22} />
         </View>
         <Text style={styles.bannerTitle} numberOfLines={1}>{category?.name || 'Category'}</Text>
+        <TouchableOpacity
+          style={styles.iconBtn}
+          onPress={() => router.push(`/category/new?edit=${id}`)}
+          testID="category-edit"
+        >
+          <Icon name="Edit3" color={colors.textMain} size={20} />
+        </TouchableOpacity>
         <TouchableOpacity style={styles.iconBtn} onPress={confirmDeleteCategory} testID="category-delete">
           <Icon name="Trash2" color={colors.textMain} size={20} />
         </TouchableOpacity>

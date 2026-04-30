@@ -1,6 +1,6 @@
 import React, { useState, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, TextInput,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, TextInput, Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
@@ -14,24 +14,19 @@ export default function Inventory() {
   const { activeSpace } = useAuth();
   const router = useRouter();
   const [categories, setCategories] = useState<Category[]>([]);
-  const [itemCounts, setItemCounts] = useState<Record<string, number>>({});
+  const [items, setItems] = useState<Item[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [search, setSearch] = useState('');
 
   const load = useCallback(async () => {
     if (!activeSpace) return;
     try {
-      const [cats, items] = await Promise.all([
+      const [cats, its] = await Promise.all([
         api.get<Category[]>(`/categories?space_id=${activeSpace.space_id}`),
         api.get<Item[]>(`/items?space_id=${activeSpace.space_id}`),
       ]);
       setCategories(cats);
-      const counts: Record<string, number> = {};
-      items.forEach((it) => {
-        if (it.status === 'finished') return;
-        counts[it.category_id] = (counts[it.category_id] || 0) + 1;
-      });
-      setItemCounts(counts);
+      setItems(its);
     } catch (e) { console.warn(e); }
   }, [activeSpace]);
 
@@ -47,7 +42,31 @@ export default function Inventory() {
     setRefreshing(false);
   };
 
-  const filtered = categories.filter((c) => c.name.toLowerCase().includes(search.toLowerCase()));
+  const itemCounts: Record<string, number> = {};
+  items.forEach((it) => {
+    if (it.status === 'finished') return;
+    itemCounts[it.category_id] = (itemCounts[it.category_id] || 0) + 1;
+  });
+
+  const q = search.trim().toLowerCase();
+  const filteredCategories = q
+    ? categories.filter((c) => c.name.toLowerCase().includes(q))
+    : categories;
+
+  const matchedItems = q
+    ? items
+        .filter((it) => {
+          const inName = it.name.toLowerCase().includes(q);
+          const inFields = Object.values(it.fields || {}).some((v) => String(v).toLowerCase().includes(q));
+          const inNotes = (it.notes || '').toLowerCase().includes(q);
+          return inName || inFields || inNotes;
+        })
+        .slice(0, 30)
+    : [];
+
+  const catName = (id: string) => categories.find((c) => c.category_id === id)?.name || 'Uncategorized';
+  const catTint = (id: string) => categories.find((c) => c.category_id === id)?.tint || 'mint';
+  const catIcon = (id: string) => categories.find((c) => c.category_id === id)?.icon || 'Box';
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -71,15 +90,69 @@ export default function Inventory() {
           <Icon name="Search" size={18} color={colors.textMuted} />
           <TextInput
             style={styles.searchInput}
-            placeholder="Search categories"
+            placeholder="Search items or categories"
             placeholderTextColor={colors.textMuted}
             value={search}
             onChangeText={setSearch}
             testID="inventory-search"
           />
+          {!!q && (
+            <TouchableOpacity onPress={() => setSearch('')}>
+              <Icon name="X" size={16} color={colors.textMuted} />
+            </TouchableOpacity>
+          )}
         </View>
 
-        {filtered.length === 0 ? (
+        {/* Item search results */}
+        {q !== '' && (
+          <>
+            <Text style={styles.sectionTitle}>
+              Items ({matchedItems.length})
+            </Text>
+            {matchedItems.length === 0 ? (
+              <View style={[styles.emptyCard]}>
+                <Text style={{ color: colors.textMuted, fontSize: 13 }}>No items match "{q}"</Text>
+              </View>
+            ) : (
+              matchedItems.map((it) => {
+                const tint = tints[catTint(it.category_id)] || tints.mint;
+                return (
+                  <TouchableOpacity
+                    key={it.item_id}
+                    style={styles.itemRow}
+                    onPress={() => router.push(`/item/${it.item_id}`)}
+                    activeOpacity={0.8}
+                    testID={`search-item-${it.item_id}`}
+                  >
+                    <View style={[styles.itemThumb, { backgroundColor: tint.bg }]}>
+                      {it.photo_base64 ? (
+                        <Image source={{ uri: it.photo_base64 }} style={styles.itemThumbImg} />
+                      ) : (
+                        <Icon name={catIcon(it.category_id)} color={tint.icon} size={20} />
+                      )}
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.itemName, it.status === 'finished' && { textDecorationLine: 'line-through', color: colors.textMuted }]}>
+                        {it.name}
+                      </Text>
+                      <Text style={styles.itemSub}>
+                        {catName(it.category_id)}
+                        {it.status === 'low' ? '  •  Low' : it.status === 'finished' ? '  •  Finished' : ''}
+                        {typeof it.price === 'number' && it.price > 0 ? `  •  $${it.price.toFixed(2)}` : ''}
+                      </Text>
+                    </View>
+                    <Icon name="ChevronRight" size={16} color={colors.textMuted} />
+                  </TouchableOpacity>
+                );
+              })
+            )}
+            <Text style={[styles.sectionTitle, { marginTop: spacing.md }]}>
+              Categories ({filteredCategories.length})
+            </Text>
+          </>
+        )}
+
+        {filteredCategories.length === 0 && q === '' ? (
           <View style={[styles.card, { alignItems: 'center', paddingVertical: 40 }]}>
             <Icon name="Package" color={colors.textMuted} size={32} />
             <Text style={{ color: colors.textMuted, marginTop: 12, textAlign: 'center' }}>
@@ -92,9 +165,13 @@ export default function Inventory() {
               <Text style={styles.emptyBtnTxt}>Create your first category</Text>
             </TouchableOpacity>
           </View>
+        ) : filteredCategories.length === 0 ? (
+          <View style={[styles.emptyCard]}>
+            <Text style={{ color: colors.textMuted, fontSize: 13 }}>No categories match "{q}"</Text>
+          </View>
         ) : (
           <View style={styles.grid}>
-            {filtered.map((c) => {
+            {filteredCategories.map((c) => {
               const tint = tints[c.tint] || tints.mint;
               return (
                 <TouchableOpacity
@@ -142,7 +219,31 @@ const styles = StyleSheet.create({
     ...shadows.card,
   },
   searchInput: { flex: 1, fontSize: 14, color: colors.textMain },
+  sectionTitle: { fontSize: 13, fontWeight: '800', color: colors.textMuted, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 },
+  itemRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    backgroundColor: colors.surface,
+    padding: spacing.md,
+    borderRadius: radius.md,
+    marginBottom: 8,
+    ...shadows.card,
+  },
+  itemThumb: {
+    width: 44, height: 44, borderRadius: radius.md,
+    alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
+  },
+  itemThumbImg: { width: '100%', height: '100%' },
+  itemName: { fontSize: 14, fontWeight: '700', color: colors.textMain },
+  itemSub: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
   card: { backgroundColor: colors.surface, borderRadius: radius.lg, padding: spacing.md, ...shadows.card },
+  emptyCard: {
+    backgroundColor: colors.surface,
+    padding: spacing.md,
+    borderRadius: radius.md,
+    alignItems: 'center',
+    marginBottom: spacing.md,
+    ...shadows.card,
+  },
   emptyBtn: {
     marginTop: 16,
     backgroundColor: colors.primary,

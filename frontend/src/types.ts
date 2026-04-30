@@ -19,7 +19,8 @@ export type FamilySpace = {
 export type CategoryField = {
   key: string;
   label: string;
-  type: 'text' | 'number' | 'date' | 'price';
+  type: 'text' | 'number' | 'date' | 'price' | 'select';
+  options?: string[];
 };
 
 export type Category = {
