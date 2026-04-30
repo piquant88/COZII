@@ -128,6 +128,26 @@ export default function Profile() {
 
         <TouchableOpacity
           style={[styles.card, styles.rowBtn]}
+          onPress={() => router.push('/bills')}
+          testID="profile-bills"
+        >
+          <Icon name="Receipt" size={20} color={colors.textMain} />
+          <Text style={styles.rowBtnTxt}>Recurring bills</Text>
+          <Icon name="ChevronRight" size={18} color={colors.textMuted} />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.card, styles.rowBtn]}
+          onPress={() => router.push('/agreement')}
+          testID="profile-agreement"
+        >
+          <Icon name="FileText" size={20} color={colors.textMain} />
+          <Text style={styles.rowBtnTxt}>Roommate agreement</Text>
+          <Icon name="ChevronRight" size={18} color={colors.textMuted} />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.card, styles.rowBtn]}
           onPress={() => router.push('/space-setup')}
           testID="profile-add-space"
         >

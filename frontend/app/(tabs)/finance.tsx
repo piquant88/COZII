@@ -3,7 +3,7 @@ import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, Image, Dimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { useAuth } from '../../src/AuthContext';
 import { colors, radius, spacing, shadows, tints } from '../../src/theme';
 import { Icon } from '../../src/Icon';
@@ -15,6 +15,7 @@ const TINT_COLORS = ['#3CB4A0', '#9B6FB0', '#E8936F', '#C9A227', '#5FA06A', '#E0
 
 export default function Finance() {
   const { activeSpace } = useAuth();
+  const router = useRouter();
   const [items, setItems] = useState<Item[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [refreshing, setRefreshing] = useState(false);
@@ -119,6 +120,25 @@ export default function Finance() {
         showsVerticalScrollIndicator={false}
       >
         <Text style={styles.title}>Finance</Text>
+
+        <View style={styles.quickRow}>
+          <TouchableOpacity
+            style={[styles.quickCard, { backgroundColor: tints.blue.bg }]}
+            onPress={() => router.push('/bills')}
+            testID="finance-bills-link"
+          >
+            <Icon name="Receipt" size={22} color={tints.blue.icon} />
+            <Text style={styles.quickTxt}>Recurring bills</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.quickCard, { backgroundColor: tints.peach.bg }]}
+            onPress={() => router.push('/splits')}
+            testID="finance-splits-link"
+          >
+            <Icon name="Users" size={22} color={tints.peach.icon} />
+            <Text style={styles.quickTxt}>Money splits</Text>
+          </TouchableOpacity>
+        </View>
 
         <View style={styles.tabs}>
           <TouchableOpacity
@@ -254,6 +274,12 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   scroll: { padding: spacing.lg, paddingBottom: 140 },
   title: { fontSize: 30, fontWeight: '900', color: colors.textMain, letterSpacing: -0.5, marginBottom: spacing.md },
+  quickRow: { flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.md },
+  quickCard: {
+    flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10,
+    paddingHorizontal: spacing.md, paddingVertical: 14, borderRadius: radius.md,
+  },
+  quickTxt: { fontSize: 13, fontWeight: '800', color: colors.textMain },
   tabs: {
     flexDirection: 'row',
     backgroundColor: colors.surfaceAlt,

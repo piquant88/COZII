@@ -10,7 +10,7 @@ import { useAuth } from '../src/AuthContext';
 import { api } from '../src/api';
 import { colors, radius, spacing, shadows, tints } from '../src/theme';
 import { Icon } from '../src/Icon';
-import type { Balances, Settlement, Balance } from '../src/types';
+import type { Balances, Settlement, Balance, BalanceDetails, BalanceItem } from '../src/types';
 
 export default function Splits() {
   const router = useRouter();
@@ -25,6 +25,25 @@ export default function Splits() {
   const [evidence, setEvidence] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  // Expanded breakdown state: key = other_user_id
+  const [expanded, setExpanded] = useState<Record<string, BalanceDetails | 'loading' | 'error'>>({});
+
+  const toggleExpand = async (otherId: string) => {
+    if (!activeSpace) return;
+    const cur = expanded[otherId];
+    if (cur && cur !== 'loading' && cur !== 'error') {
+      setExpanded((s) => { const n = { ...s }; delete n[otherId]; return n; });
+      return;
+    }
+    setExpanded((s) => ({ ...s, [otherId]: 'loading' }));
+    try {
+      const d = await api.get<BalanceDetails>(`/balance-details?space_id=${activeSpace.space_id}&with_user_id=${otherId}`);
+      setExpanded((s) => ({ ...s, [otherId]: d }));
+    } catch (e) {
+      setExpanded((s) => ({ ...s, [otherId]: 'error' }));
+    }
+  };
 
   const load = useCallback(async () => {
     if (!activeSpace) return;
@@ -140,43 +159,127 @@ export default function Splits() {
             {balances.owed_to_you.length > 0 && (
               <>
                 <Text style={styles.sectionTitle}>People who owe you</Text>
-                {balances.owed_to_you.map((b) => (
-                  <View key={`${b.from_user_id}-${b.to_user_id}`} style={styles.balanceRow}>
-                    <View style={[styles.avatar, { backgroundColor: tints.peach.icon }]}>
-                      <Text style={styles.avatarTxt}>{b.from_name?.[0]?.toUpperCase()}</Text>
+                {balances.owed_to_you.map((b) => {
+                  const otherId = b.from_user_id;
+                  const det = expanded[otherId];
+                  const isOpen = !!det && det !== 'loading' && det !== 'error';
+                  return (
+                    <View key={`${b.from_user_id}-${b.to_user_id}`}>
+                      <TouchableOpacity
+                        style={styles.balanceRow}
+                        onPress={() => toggleExpand(otherId)}
+                        activeOpacity={0.7}
+                        testID={`splits-row-owed-${otherId}`}
+                      >
+                        <View style={[styles.avatar, { backgroundColor: tints.peach.icon }]}>
+                          <Text style={styles.avatarTxt}>{b.from_name?.[0]?.toUpperCase()}</Text>
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.balName}>{b.from_name}</Text>
+                          <Text style={styles.balSub}>{isOpen ? 'hide details' : 'tap to see what for'}</Text>
+                        </View>
+                        <Text style={[styles.balAmt, { color: tints.sage.icon }]}>${b.amount.toFixed(2)}</Text>
+                        <Icon name={isOpen ? 'ChevronUp' : 'ChevronDown'} size={16} color={colors.textMuted} />
+                      </TouchableOpacity>
+                      {det === 'loading' && (
+                        <View style={styles.breakdownBox}><ActivityIndicator color={colors.primary} /></View>
+                      )}
+                      {isOpen && (
+                        <View style={styles.breakdownBox}>
+                          {(det as BalanceDetails).breakdown.filter((x) => x.direction === 'they_owe_you').map((it) => (
+                            <View key={it.item_id} style={styles.breakdownRow}>
+                              <View style={[styles.itemImg, { backgroundColor: tints.mint.bg }]}>
+                                {it.photo_base64 ? (
+                                  <Image source={{ uri: it.photo_base64 }} style={styles.itemImgInner} />
+                                ) : (
+                                  <Icon name="Package" size={14} color={tints.mint.icon} />
+                                )}
+                              </View>
+                              <View style={{ flex: 1 }}>
+                                <Text style={styles.itemName} numberOfLines={1}>{it.name}</Text>
+                                <Text style={styles.itemSub}>
+                                  {it.category_name} · ${it.price.toFixed(2)} ÷ {it.split_count}
+                                </Text>
+                              </View>
+                              <Text style={styles.itemAmt}>${it.share_each.toFixed(2)}</Text>
+                            </View>
+                          ))}
+                          {(det as BalanceDetails).breakdown.filter((x) => x.direction === 'they_owe_you').length === 0 && (
+                            <Text style={styles.emptyLine}>No items – possibly offset by their payments.</Text>
+                          )}
+                        </View>
+                      )}
                     </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.balName}>{b.from_name}</Text>
-                      <Text style={styles.balSub}>owes you</Text>
-                    </View>
-                    <Text style={[styles.balAmt, { color: tints.sage.icon }]}>${b.amount.toFixed(2)}</Text>
-                  </View>
-                ))}
+                  );
+                })}
               </>
             )}
 
             {balances.you_owe.length > 0 && (
               <>
                 <Text style={styles.sectionTitle}>You owe</Text>
-                {balances.you_owe.map((b) => (
-                  <View key={`${b.from_user_id}-${b.to_user_id}`} style={styles.balanceRow}>
-                    <View style={[styles.avatar, { backgroundColor: tints.lavender.icon }]}>
-                      <Text style={styles.avatarTxt}>{b.to_name?.[0]?.toUpperCase()}</Text>
+                {balances.you_owe.map((b) => {
+                  const otherId = b.to_user_id;
+                  const det = expanded[otherId];
+                  const isOpen = !!det && det !== 'loading' && det !== 'error';
+                  return (
+                    <View key={`${b.from_user_id}-${b.to_user_id}`}>
+                      <View style={styles.balanceRow}>
+                        <TouchableOpacity
+                          style={styles.rowMain}
+                          onPress={() => toggleExpand(otherId)}
+                          activeOpacity={0.7}
+                          testID={`splits-row-owe-${otherId}`}
+                        >
+                          <View style={[styles.avatar, { backgroundColor: tints.lavender.icon }]}>
+                            <Text style={styles.avatarTxt}>{b.to_name?.[0]?.toUpperCase()}</Text>
+                          </View>
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.balName}>{b.to_name}</Text>
+                            <Text style={styles.balSub}>{isOpen ? 'hide details' : 'tap to see what for'}</Text>
+                          </View>
+                          <Text style={[styles.balAmt, { color: tints.pink.icon }]}>${b.amount.toFixed(2)}</Text>
+                          <Icon name={isOpen ? 'ChevronUp' : 'ChevronDown'} size={16} color={colors.textMuted} />
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={styles.payBtn}
+                          onPress={() => startPay(b)}
+                          testID={`splits-pay-${b.to_user_id}`}
+                        >
+                          <Text style={styles.payTxt}>Mark paid</Text>
+                        </TouchableOpacity>
+                      </View>
+                      {det === 'loading' && (
+                        <View style={styles.breakdownBox}><ActivityIndicator color={colors.primary} /></View>
+                      )}
+                      {isOpen && (
+                        <View style={styles.breakdownBox}>
+                          {(det as BalanceDetails).breakdown.filter((x) => x.direction === 'you_owe_them').map((it) => (
+                            <View key={it.item_id} style={styles.breakdownRow}>
+                              <View style={[styles.itemImg, { backgroundColor: tints.lavender.bg }]}>
+                                {it.photo_base64 ? (
+                                  <Image source={{ uri: it.photo_base64 }} style={styles.itemImgInner} />
+                                ) : (
+                                  <Icon name="Package" size={14} color={tints.lavender.icon} />
+                                )}
+                              </View>
+                              <View style={{ flex: 1 }}>
+                                <Text style={styles.itemName} numberOfLines={1}>{it.name}</Text>
+                                <Text style={styles.itemSub}>
+                                  {it.category_name} · ${it.price.toFixed(2)} ÷ {it.split_count}
+                                </Text>
+                              </View>
+                              <Text style={styles.itemAmt}>${it.share_each.toFixed(2)}</Text>
+                            </View>
+                          ))}
+                          {(det as BalanceDetails).breakdown.filter((x) => x.direction === 'you_owe_them').length === 0 && (
+                            <Text style={styles.emptyLine}>No items – possibly offset by your payments.</Text>
+                          )}
+                        </View>
+                      )}
                     </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.balName}>{b.to_name}</Text>
-                      <Text style={styles.balSub}>you owe</Text>
-                    </View>
-                    <Text style={[styles.balAmt, { color: tints.pink.icon }]}>${b.amount.toFixed(2)}</Text>
-                    <TouchableOpacity
-                      style={styles.payBtn}
-                      onPress={() => startPay(b)}
-                      testID={`splits-pay-${b.to_user_id}`}
-                    >
-                      <Text style={styles.payTxt}>Mark paid</Text>
-                    </TouchableOpacity>
-                  </View>
-                ))}
+                  );
+                })}
               </>
             )}
 
@@ -332,6 +435,29 @@ const styles = StyleSheet.create({
   balName: { fontSize: 15, fontWeight: '700', color: colors.textMain },
   balSub: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
   balAmt: { fontSize: 16, fontWeight: '800', color: colors.textMain },
+  rowMain: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  breakdownBox: {
+    backgroundColor: colors.surfaceAlt,
+    borderRadius: radius.md,
+    padding: 10,
+    marginTop: -6, marginBottom: 10,
+    gap: 6,
+  },
+  breakdownRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    backgroundColor: colors.surface,
+    padding: 10, borderRadius: radius.sm,
+  },
+  itemImg: {
+    width: 32, height: 32, borderRadius: 8,
+    alignItems: 'center', justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  itemImgInner: { width: '100%', height: '100%' },
+  itemName: { fontSize: 13, fontWeight: '700', color: colors.textMain },
+  itemSub: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  itemAmt: { fontSize: 14, fontWeight: '800', color: colors.textMain },
+  emptyLine: { fontSize: 12, color: colors.textMuted, fontStyle: 'italic', padding: 6, textAlign: 'center' },
   payBtn: {
     backgroundColor: colors.primary,
     paddingHorizontal: 12, paddingVertical: 8, borderRadius: radius.full, marginLeft: 8,

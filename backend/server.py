@@ -1011,6 +1011,320 @@ async def get_balances(space_id: str, user: User = Depends(get_current_user)):
     }
 
 
+@api_router.get("/balance-details")
+async def get_balance_details(space_id: str, with_user_id: str, user: User = Depends(get_current_user)):
+    """Detailed breakdown of items contributing to balance between current user and another."""
+    space = await assert_space_member(space_id, user.user_id)
+    if with_user_id not in space["member_ids"]:
+        raise HTTPException(status_code=400, detail="Other user not in this space")
+
+    cat_docs = await db.categories.find({"space_id": space_id}, {"_id": 0}).to_list(500)
+    cat_share_map = {c["category_id"]: c.get("shared_with") or [] for c in cat_docs if len(c.get("shared_with") or []) >= 2}
+    cat_name_map = {c["category_id"]: c["name"] for c in cat_docs}
+
+    # Items where both me and other user are in the split group, paid by either
+    relevant_cats = [cid for cid, members in cat_share_map.items() if user.user_id in members and with_user_id in members]
+    items = []
+    if relevant_cats:
+        items = await db.items.find({
+            "space_id": space_id,
+            "category_id": {"$in": relevant_cats},
+            "price": {"$ne": None, "$gt": 0},
+            "created_by": {"$in": [user.user_id, with_user_id]},
+        }, {"_id": 0}).sort("created_at", -1).to_list(2000)
+
+    breakdown = []
+    for it in items:
+        members = cat_share_map[it["category_id"]]
+        share = it["price"] / len(members)
+        if it["created_by"] == user.user_id:
+            # Other user owes me their share
+            breakdown.append({
+                "item_id": it["item_id"],
+                "name": it["name"],
+                "category_name": cat_name_map.get(it["category_id"], "?"),
+                "category_id": it["category_id"],
+                "price": it["price"],
+                "share_each": round(share, 2),
+                "split_count": len(members),
+                "paid_by": user.user_id,
+                "paid_by_name": user.name,
+                "direction": "they_owe_you",
+                "amount": round(share, 2),
+                "created_at": it["created_at"].isoformat() if hasattr(it["created_at"], "isoformat") else it["created_at"],
+                "photo_base64": it.get("photo_base64"),
+            })
+        else:
+            other_name = next((m["name"] for m in await db.users.find({"user_id": with_user_id}, {"_id": 0}).to_list(1)), "Them")
+            breakdown.append({
+                "item_id": it["item_id"],
+                "name": it["name"],
+                "category_name": cat_name_map.get(it["category_id"], "?"),
+                "category_id": it["category_id"],
+                "price": it["price"],
+                "share_each": round(share, 2),
+                "split_count": len(members),
+                "paid_by": with_user_id,
+                "paid_by_name": other_name,
+                "direction": "you_owe_them",
+                "amount": round(share, 2),
+                "created_at": it["created_at"].isoformat() if hasattr(it["created_at"], "isoformat") else it["created_at"],
+                "photo_base64": it.get("photo_base64"),
+            })
+
+    settlements = await db.settlements.find({
+        "space_id": space_id,
+        "$or": [
+            {"from_user_id": user.user_id, "to_user_id": with_user_id},
+            {"from_user_id": with_user_id, "to_user_id": user.user_id},
+        ],
+    }, {"_id": 0}).sort("created_at", -1).to_list(500)
+
+    return {"breakdown": breakdown, "settlements": [Settlement(**s).model_dump(mode='json') for s in settlements]}
+
+
+# =========================
+# Recurring Bills
+# =========================
+class Bill(TZAware):
+    bill_id: str
+    space_id: str
+    name: str
+    amount: float
+    frequency: str  # monthly | weekly | yearly | once
+    due_day: int  # day of month (1-31) for monthly, weekday (0-6) for weekly
+    category_id: Optional[str] = None
+    shared_with: List[str] = []
+    created_by: str
+    notes: Optional[str] = None
+    icon: str = "Receipt"
+    last_paid_date: Optional[str] = None  # ISO date string
+    next_due_date: Optional[str] = None
+    is_paid_current_period: bool = False
+    created_at: datetime
+
+
+class CreateBillRequest(BaseModel):
+    space_id: str
+    name: str = Field(min_length=1, max_length=80)
+    amount: float = Field(gt=0)
+    frequency: str = "monthly"
+    due_day: int = 1
+    category_id: Optional[str] = None
+    shared_with: List[str] = []
+    notes: Optional[str] = None
+    icon: str = "Receipt"
+
+
+class UpdateBillRequest(BaseModel):
+    name: Optional[str] = None
+    amount: Optional[float] = None
+    frequency: Optional[str] = None
+    due_day: Optional[int] = None
+    category_id: Optional[str] = None
+    shared_with: Optional[List[str]] = None
+    notes: Optional[str] = None
+    icon: Optional[str] = None
+
+
+def _compute_bill_state(bill: dict) -> dict:
+    """Compute next_due_date and is_paid_current_period."""
+    today = now_utc().date()
+    freq = bill.get("frequency", "monthly")
+    due_day = int(bill.get("due_day", 1))
+    last_paid = bill.get("last_paid_date")
+    last_paid_d = None
+    if last_paid:
+        try: last_paid_d = datetime.fromisoformat(last_paid).date()
+        except Exception: last_paid_d = None
+
+    if freq == "monthly":
+        # Next due is the due_day in the current month, or next month if past
+        try:
+            this_month_due = today.replace(day=min(due_day, 28))
+        except Exception:
+            this_month_due = today
+        if today > this_month_due:
+            next_year = today.year + (1 if today.month == 12 else 0)
+            next_month = 1 if today.month == 12 else today.month + 1
+            try:
+                next_due = today.replace(year=next_year, month=next_month, day=min(due_day, 28))
+            except Exception:
+                next_due = this_month_due
+        else:
+            next_due = this_month_due
+        # Paid for the current period if last_paid_date >= start of current period
+        period_start = (next_due.replace(day=1) if next_due >= today else this_month_due.replace(day=1))
+        is_paid = last_paid_d is not None and last_paid_d >= period_start
+    elif freq == "weekly":
+        # Next due: next occurrence of due_day-of-week (0=Mon..6=Sun)
+        days_ahead = (due_day - today.weekday()) % 7
+        next_due = today + timedelta(days=days_ahead if days_ahead > 0 else 7)
+        is_paid = last_paid_d is not None and last_paid_d >= today - timedelta(days=7)
+    elif freq == "yearly":
+        try:
+            this_year_due = today.replace(month=1, day=min(due_day, 28))
+        except Exception:
+            this_year_due = today
+        next_due = this_year_due if today <= this_year_due else this_year_due.replace(year=today.year + 1)
+        is_paid = last_paid_d is not None and last_paid_d.year == today.year
+    else:  # once
+        next_due = today
+        is_paid = last_paid_d is not None
+
+    bill["next_due_date"] = next_due.isoformat()
+    bill["is_paid_current_period"] = is_paid
+    return bill
+
+
+@api_router.post("/bills", response_model=Bill)
+async def create_bill(body: CreateBillRequest, user: User = Depends(get_current_user)):
+    await assert_space_member(body.space_id, user.user_id)
+    doc = {
+        "bill_id": gen_id("bill"),
+        "space_id": body.space_id,
+        "name": body.name.strip(),
+        "amount": body.amount,
+        "frequency": body.frequency,
+        "due_day": body.due_day,
+        "category_id": body.category_id,
+        "shared_with": body.shared_with,
+        "created_by": user.user_id,
+        "notes": body.notes,
+        "icon": body.icon,
+        "last_paid_date": None,
+        "created_at": now_utc(),
+    }
+    await db.bills.insert_one(doc)
+    out = await db.bills.find_one({"bill_id": doc["bill_id"]}, {"_id": 0})
+    return Bill(**_compute_bill_state(out))
+
+
+@api_router.get("/bills", response_model=List[Bill])
+async def list_bills(space_id: str, user: User = Depends(get_current_user)):
+    await assert_space_member(space_id, user.user_id)
+    docs = await db.bills.find({"space_id": space_id}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    return [Bill(**_compute_bill_state(d)) for d in docs]
+
+
+@api_router.patch("/bills/{bill_id}", response_model=Bill)
+async def update_bill(bill_id: str, body: UpdateBillRequest, user: User = Depends(get_current_user)):
+    doc = await db.bills.find_one({"bill_id": bill_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Bill not found")
+    await assert_space_member(doc["space_id"], user.user_id)
+    payload = body.dict(exclude_unset=True)
+    if payload:
+        await db.bills.update_one({"bill_id": bill_id}, {"$set": payload})
+    out = await db.bills.find_one({"bill_id": bill_id}, {"_id": 0})
+    return Bill(**_compute_bill_state(out))
+
+
+@api_router.post("/bills/{bill_id}/pay", response_model=Bill)
+async def pay_bill(bill_id: str, user: User = Depends(get_current_user)):
+    doc = await db.bills.find_one({"bill_id": bill_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Bill not found")
+    await assert_space_member(doc["space_id"], user.user_id)
+    today_iso = now_utc().date().isoformat()
+    await db.bills.update_one({"bill_id": bill_id}, {"$set": {"last_paid_date": today_iso}})
+    # Auto-create an item in the bill's category if set, so it shows in finance & splits
+    if doc.get("category_id"):
+        cat = await db.categories.find_one({"category_id": doc["category_id"]}, {"_id": 0})
+        if cat and cat["space_id"] == doc["space_id"]:
+            await db.items.insert_one({
+                "item_id": gen_id("item"),
+                "space_id": doc["space_id"],
+                "category_id": doc["category_id"],
+                "name": f"{doc['name']} ({today_iso})",
+                "photo_base64": None,
+                "status": "available",
+                "quantity": 1,
+                "unit": None,
+                "price": doc["amount"],
+                "purchase_date": today_iso,
+                "expiry_date": None,
+                "notes": "Recurring bill payment",
+                "fields": {},
+                "created_by": user.user_id,
+                "created_by_name": user.name,
+                "created_at": now_utc(),
+                "updated_at": now_utc(),
+            })
+    out = await db.bills.find_one({"bill_id": bill_id}, {"_id": 0})
+    await record_activity(doc["space_id"], user, "paid", "bill", out["bill_id"], out["name"])
+    return Bill(**_compute_bill_state(out))
+
+
+@api_router.delete("/bills/{bill_id}")
+async def delete_bill(bill_id: str, user: User = Depends(get_current_user)):
+    doc = await db.bills.find_one({"bill_id": bill_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Bill not found")
+    await assert_space_member(doc["space_id"], user.user_id)
+    await db.bills.delete_one({"bill_id": bill_id})
+    return {"success": True}
+
+
+# =========================
+# Roommate Agreement
+# =========================
+class AgreementSignature(BaseModel):
+    user_id: str
+    user_name: str
+    signed_at: datetime
+
+
+class Agreement(TZAware):
+    space_id: str
+    text: str
+    sections: List[Dict[str, Any]] = []  # [{title, body}]
+    signatures: List[AgreementSignature] = []
+    updated_at: datetime
+    updated_by: str
+
+
+class SaveAgreementRequest(BaseModel):
+    text: str = ""
+    sections: List[Dict[str, Any]] = []
+
+
+@api_router.get("/agreement", response_model=Optional[Agreement])
+async def get_agreement(space_id: str, user: User = Depends(get_current_user)):
+    await assert_space_member(space_id, user.user_id)
+    doc = await db.agreements.find_one({"space_id": space_id}, {"_id": 0})
+    return Agreement(**doc) if doc else None
+
+
+@api_router.put("/agreement", response_model=Agreement)
+async def save_agreement(body: SaveAgreementRequest, space_id: str, user: User = Depends(get_current_user)):
+    await assert_space_member(space_id, user.user_id)
+    doc = {
+        "space_id": space_id,
+        "text": body.text,
+        "sections": body.sections,
+        "signatures": [],  # reset on edit
+        "updated_at": now_utc(),
+        "updated_by": user.user_id,
+    }
+    await db.agreements.update_one({"space_id": space_id}, {"$set": doc}, upsert=True)
+    out = await db.agreements.find_one({"space_id": space_id}, {"_id": 0})
+    return Agreement(**out)
+
+
+@api_router.post("/agreement/sign", response_model=Agreement)
+async def sign_agreement(space_id: str, user: User = Depends(get_current_user)):
+    await assert_space_member(space_id, user.user_id)
+    doc = await db.agreements.find_one({"space_id": space_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="No agreement to sign")
+    sigs = [s for s in doc.get("signatures", []) if s["user_id"] != user.user_id]
+    sigs.append({"user_id": user.user_id, "user_name": user.name, "signed_at": now_utc()})
+    await db.agreements.update_one({"space_id": space_id}, {"$set": {"signatures": sigs}})
+    out = await db.agreements.find_one({"space_id": space_id}, {"_id": 0})
+    return Agreement(**out)
+
+
 # =========================
 # Activity / Recent
 # =========================
