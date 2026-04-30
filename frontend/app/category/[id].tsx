@@ -1,6 +1,6 @@
 import React, { useState, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, Image, Alert, Platform,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, Image, Alert, Platform, TextInput,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter, useFocusEffect } from 'expo-router';
@@ -41,7 +41,14 @@ export default function CategoryDetail() {
 
   const onRefresh = async () => { setRefreshing(true); await load(); setRefreshing(false); };
 
-  const filtered = items.filter((it) => filter === 'all' ? true : it.status === filter);
+  const filtered = items.filter((it) => {
+    if (filter !== 'all' && it.status !== filter) return false;
+    const q = search.trim().toLowerCase();
+    if (!q) return true;
+    if (it.name.toLowerCase().includes(q)) return true;
+    if ((it.notes || '').toLowerCase().includes(q)) return true;
+    return Object.values(it.fields || {}).some((v) => String(v).toLowerCase().includes(q));
+  });
   const tint = tints[category?.tint || 'mint'] || tints.mint;
 
   const toggleStatus = async (item: Item, newStatus: 'available' | 'low' | 'finished') => {
@@ -93,19 +100,40 @@ export default function CategoryDetail() {
         </TouchableOpacity>
       </View>
 
-      <View style={styles.filterRow}>
-        {(['all', 'available', 'low', 'finished'] as const).map((f) => (
-          <TouchableOpacity
-            key={f}
-            style={[styles.chip, filter === f && styles.chipActive]}
-            onPress={() => setFilter(f)}
-            testID={`filter-${f}`}
-          >
-            <Text style={[styles.chipTxt, filter === f && styles.chipTxtActive]}>
-              {f === 'all' ? 'All' : STATUS_LABELS[f].label}
-            </Text>
-          </TouchableOpacity>
-        ))}
+      <View style={styles.searchAndFilter}>
+        <View style={styles.searchBox}>
+          <Icon name="Search" size={16} color={colors.textMuted} />
+          <TextInput
+            style={styles.searchInput}
+            placeholder={category?.fields.length
+              ? `Search by name or ${category.fields.slice(0, 2).map(f => f.label.toLowerCase()).join(' / ')}`
+              : 'Search items'}
+            placeholderTextColor={colors.textMuted}
+            value={search}
+            onChangeText={setSearch}
+            testID="category-search"
+          />
+          {!!search && (
+            <TouchableOpacity onPress={() => setSearch('')}>
+              <Icon name="X" size={14} color={colors.textMuted} />
+            </TouchableOpacity>
+          )}
+        </View>
+
+        <View style={styles.filterRow}>
+          {(['all', 'available', 'low', 'finished'] as const).map((f) => (
+            <TouchableOpacity
+              key={f}
+              style={[styles.chip, filter === f && styles.chipActive]}
+              onPress={() => setFilter(f)}
+              testID={`filter-${f}`}
+            >
+              <Text style={[styles.chipTxt, filter === f && styles.chipTxtActive]}>
+                {f === 'all' ? 'All' : STATUS_LABELS[f].label}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
       </View>
 
       <ScrollView
@@ -260,7 +288,16 @@ const styles = StyleSheet.create({
   },
   bannerIconWrap: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
   bannerTitle: { flex: 1, fontSize: 22, fontWeight: '900', color: colors.textMain },
-  filterRow: { flexDirection: 'row', padding: spacing.md, gap: 8, flexWrap: 'wrap' },
+  filterRow: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
+  searchAndFilter: { paddingHorizontal: spacing.md, paddingTop: spacing.md, gap: spacing.sm },
+  searchBox: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: colors.surface,
+    borderRadius: radius.full,
+    paddingHorizontal: spacing.md, paddingVertical: 10,
+    ...shadows.card,
+  },
+  searchInput: { flex: 1, fontSize: 13, color: colors.textMain },
   chip: {
     paddingHorizontal: 14, paddingVertical: 8,
     borderRadius: radius.full,
