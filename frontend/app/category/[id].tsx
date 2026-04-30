@@ -19,6 +19,7 @@ export default function CategoryDetail() {
   const [items, setItems] = useState<Item[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<'all' | 'available' | 'low' | 'finished'>('all');
+  const [showAddSheet, setShowAddSheet] = useState(false);
 
   const load = useCallback(async () => {
     if (!activeSpace || !id) return;
@@ -111,10 +112,10 @@ export default function CategoryDetail() {
             <Text style={{ color: colors.textMuted, marginTop: 10 }}>No items here yet.</Text>
             <TouchableOpacity
               style={styles.addBtn}
-              onPress={() => router.push(`/item/new?category_id=${id}`)}
+              onPress={() => setShowAddSheet(true)}
               testID="category-add-first"
             >
-              <Text style={styles.addBtnTxt}>Add first item</Text>
+              <Text style={styles.addBtnTxt}>Add items</Text>
             </TouchableOpacity>
           </View>
         ) : (
@@ -172,11 +173,67 @@ export default function CategoryDetail() {
 
       <TouchableOpacity
         style={styles.fab}
-        onPress={() => router.push(`/item/new?category_id=${id}`)}
+        onPress={() => setShowAddSheet(true)}
         testID="category-fab-add"
       >
         <Icon name="Plus" color="#fff" size={24} />
       </TouchableOpacity>
+
+      {showAddSheet && (
+        <TouchableOpacity
+          style={styles.sheetOverlay}
+          activeOpacity={1}
+          onPress={() => setShowAddSheet(false)}
+        >
+          <View style={styles.sheet} onStartShouldSetResponder={() => true}>
+            <View style={styles.sheetHandle} />
+            <Text style={styles.sheetTitle}>Add to {category?.name || 'this category'}</Text>
+
+            <TouchableOpacity
+              style={styles.sheetBtn}
+              onPress={() => {
+                setShowAddSheet(false);
+                router.push(`/scan-receipt?category_id=${id}`);
+              }}
+              testID="category-add-scan"
+            >
+              <View style={[styles.sheetIcon, { backgroundColor: tints.pink.bg }]}>
+                <Icon name="Camera" color={tints.pink.icon} size={22} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.sheetBtnTitle}>Scan a receipt</Text>
+                <Text style={styles.sheetBtnSub}>Upload a whole receipt — AI adds every item at once</Text>
+              </View>
+              <Icon name="ChevronRight" color={colors.textMuted} size={18} />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.sheetBtn}
+              onPress={() => {
+                setShowAddSheet(false);
+                router.push(`/item/new?category_id=${id}`);
+              }}
+              testID="category-add-manual"
+            >
+              <View style={[styles.sheetIcon, { backgroundColor: tints.mint.bg }]}>
+                <Icon name="Plus" color={tints.mint.icon} size={22} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.sheetBtnTitle}>Add one item</Text>
+                <Text style={styles.sheetBtnSub}>Type it in manually with a photo</Text>
+              </View>
+              <Icon name="ChevronRight" color={colors.textMuted} size={18} />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.sheetCancel}
+              onPress={() => setShowAddSheet(false)}
+            >
+              <Text style={styles.sheetCancelTxt}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      )}
     </SafeAreaView>
   );
 }
@@ -238,4 +295,45 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
     ...shadows.button,
   },
+  sheetOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    justifyContent: 'flex-end',
+  },
+  sheet: {
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: 32, borderTopRightRadius: 32,
+    paddingHorizontal: spacing.lg,
+    paddingTop: 12,
+    paddingBottom: 32,
+  },
+  sheetHandle: {
+    width: 40, height: 4, borderRadius: 2,
+    backgroundColor: colors.border,
+    alignSelf: 'center',
+    marginBottom: 16,
+  },
+  sheetTitle: {
+    fontSize: 18, fontWeight: '800', color: colors.textMain,
+    marginBottom: spacing.md,
+  },
+  sheetBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 14,
+    backgroundColor: colors.surfaceAlt,
+    padding: spacing.md,
+    borderRadius: radius.md,
+    marginBottom: 10,
+  },
+  sheetIcon: {
+    width: 44, height: 44, borderRadius: 22,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  sheetBtnTitle: { fontSize: 15, fontWeight: '800', color: colors.textMain },
+  sheetBtnSub: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
+  sheetCancel: {
+    paddingVertical: 14,
+    alignItems: 'center',
+    marginTop: 8,
+  },
+  sheetCancelTxt: { color: colors.textMuted, fontWeight: '700' },
 });

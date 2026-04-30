@@ -5,7 +5,7 @@ import {
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useAuth } from '../src/AuthContext';
 import { api } from '../src/api';
 import { colors, radius, spacing, shadows, tints } from '../src/theme';
@@ -37,6 +37,7 @@ function autoMatchCategory(hint: string | null, categories: Category[]): string 
 export default function ScanReceipt() {
   const router = useRouter();
   const { activeSpace } = useAuth();
+  const { category_id: preselectCategoryId } = useLocalSearchParams<{ category_id?: string }>();
   const [categories, setCategories] = useState<Category[]>([]);
   const [defaultCategoryId, setDefaultCategoryId] = useState<string>('');
   const [photo, setPhoto] = useState<string | null>(null);
@@ -45,8 +46,9 @@ export default function ScanReceipt() {
   const [saving, setSaving] = useState(false);
   const [items, setItems] = useState<Scanned[]>([]);
   const [showCategoryPicker, setShowCategoryPicker] = useState(false);
-  const [pickerForIndex, setPickerForIndex] = useState<number | null>(null); // null = default
+  const [pickerForIndex, setPickerForIndex] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [lockCategory, setLockCategory] = useState<boolean>(!!preselectCategoryId);
 
   useEffect(() => {
     (async () => {
@@ -54,10 +56,14 @@ export default function ScanReceipt() {
       try {
         const cats = await api.get<Category[]>(`/categories?space_id=${activeSpace.space_id}`);
         setCategories(cats);
-        if (cats[0]) setDefaultCategoryId(cats[0].category_id);
+        if (preselectCategoryId && cats.find((c) => c.category_id === preselectCategoryId)) {
+          setDefaultCategoryId(preselectCategoryId);
+        } else if (cats[0]) {
+          setDefaultCategoryId(cats[0].category_id);
+        }
       } catch (e) { console.warn(e); }
     })();
-  }, [activeSpace]);
+  }, [activeSpace, preselectCategoryId]);
 
   const pickImage = async (fromCamera: boolean) => {
     setError(null);
@@ -115,7 +121,9 @@ export default function ScanReceipt() {
         quantity: it.quantity || 1,
         price: it.price ?? null,
         category_hint: it.category_hint || null,
-        category_id: autoMatchCategory(it.category_hint, categories) || defaultCategoryId,
+        category_id: lockCategory
+          ? defaultCategoryId
+          : (autoMatchCategory(it.category_hint, categories) || defaultCategoryId),
       }));
       if (mapped.length === 0) {
         setError("No items detected. Try a clearer photo or add items manually.");
@@ -190,9 +198,15 @@ export default function ScanReceipt() {
               <View style={styles.heroIcon}>
                 <Icon name="Camera" color={colors.primary} size={32} />
               </View>
-              <Text style={styles.heroTitle}>Add a whole receipt at once</Text>
+              <Text style={styles.heroTitle}>
+                {lockCategory && defaultCategory
+                  ? `Scan a receipt into ${defaultCategory.name}`
+                  : 'Add a whole receipt at once'}
+              </Text>
               <Text style={styles.heroSub}>
-                Snap or upload a receipt photo and Cozii AI will extract items, prices, and quantities. Edit anything, pick categories, and save all at once.
+                {lockCategory
+                  ? 'Snap or upload a receipt and AI will add every item to this category. You can move individual items later.'
+                  : 'Snap or upload a receipt photo and Cozii AI will extract items, prices, and quantities. Edit anything, pick categories, and save all at once.'}
               </Text>
               <View style={styles.heroActions}>
                 <TouchableOpacity style={styles.primaryBtn} onPress={() => pickImage(true)} testID="scan-take-photo">
@@ -474,6 +488,30 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     backgroundColor: tints.pink.bg,
     paddingHorizontal: 16, paddingVertical: 10,
+    borderRadius: radius.full,
+    marginTop: 4,
+  },
+  addBtnTxt: { color: colors.primary, fontWeight: '700', fontSize: 13 },
+  error: { color: colors.dangerText, marginTop: 10, fontSize: 13, textAlign: 'center' },
+  modalOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    justifyContent: 'flex-end',
+  },
+  modalSheet: {
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: 32, borderTopRightRadius: 32,
+    padding: spacing.lg,
+    paddingBottom: 40,
+  },
+  modalTitle: { fontSize: 18, fontWeight: '800', color: colors.textMain, marginBottom: spacing.md, textAlign: 'center' },
+  modalRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: colors.border,
+  },
+  modalRowTxt: { flex: 1, fontSize: 15, fontWeight: '600', color: colors.textMain },
+});
+,
     borderRadius: radius.full,
     marginTop: 4,
   },
