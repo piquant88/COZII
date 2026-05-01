@@ -115,12 +115,33 @@ user_problem_statement: |
 backend:
   - task: "Space type field (POST/PATCH/GET /api/spaces)"
     implemented: true
-    working: false
+    working: true
     file: "/app/backend/server.py"
     stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          Retested 2026-05-01 after main agent added space_type field to FamilySpace,
+          CreateSpaceRequest, and UpdateSpaceRequest Pydantic models. All 13 scenarios
+          pass against the preview URL:
+            ✅ POST /spaces {name, space_type:"household", currency:"IDR"} → 200,
+               response.space_type="household", response.currency="IDR"
+            ✅ POST /spaces {name only, no space_type} → 200, defaults to
+               space_type="roommates"
+            ✅ POST /spaces {space_type:"garbage"} → 200, falls back to
+               space_type="roommates"
+            ✅ PATCH /spaces/{id} {space_type:"HOUSEHOLD"} → 200, normalised to
+               "household"
+            ✅ PATCH /spaces/{id} {space_type:"foo"} → 200, prior value ("household")
+               left unchanged
+            ✅ GET /spaces → every entry includes a non-empty space_type (existing
+               seeded space = "roommates"; new household/default/garbage entries
+               match expected values)
+            ✅ Non-member PATCH /spaces/{id} → 403
+          No further work needed.
       - working: false
         agent: "testing"
         comment: |
@@ -199,12 +220,27 @@ backend:
 
   - task: "Household Staff (/api/household/staff)"
     implemented: true
-    working: false
+    working: true
     file: "/app/backend/server.py"
     stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          Retested 2026-05-01 after main agent updated create_staff to reuse the
+          dict returned by assert_space_member (server.py:1917,1929). All 3 salary
+          default scenarios pass:
+            ✅ POST /household/staff into USD space, no salary_currency in body →
+               response.salary_currency = "USD"
+            ✅ POST /household/staff into IDR space (new household space,
+               currency=IDR), no salary_currency in body →
+               response.salary_currency = "IDR"
+            ✅ POST /household/staff with explicit salary_currency="EUR" → response
+               returns "EUR" (override wins over space currency)
+          Prior pass remains: GET list with role_name resolved, PATCH phone/notes,
+          DELETE, and non-member 403.
       - working: false
         agent: "testing"
         comment: |
@@ -428,12 +464,33 @@ metadata:
   run_ui: false
 
 test_plan:
-  current_focus:
-    - "Space type field (POST/PATCH/GET /api/spaces)"
-    - "Household Staff (/api/household/staff)"
+  current_focus: []
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Focused retest (2026-05-01) on the two previously-failing tasks. Both PASS.
+      
+      ✅ Space type field (POST/PATCH/GET /api/spaces) — all 13 scenarios pass:
+         - POST {name, space_type:"household", currency:"IDR"} → space_type=household,
+           currency=IDR
+         - POST {name only} → defaults to space_type=roommates
+         - POST {space_type:"garbage"} → falls back to space_type=roommates
+         - PATCH {space_type:"HOUSEHOLD"} → normalised to "household"
+         - PATCH {space_type:"foo"} → prior value unchanged
+         - GET /spaces → every entry has a non-empty space_type (existing rows="roommates")
+         - Non-member PATCH → 403
+      
+      ✅ Household Staff salary_currency default — all 3 scenarios pass:
+         - POST /household/staff into USD space, no salary_currency → "USD"
+         - POST /household/staff into IDR space, no salary_currency → "IDR"
+         - POST with explicit salary_currency="EUR" → "EUR" (override wins)
+      
+      Both tasks updated in test_result.md to working=true, needs_retesting=false.
+      No further backend work required on these two items.
 
 agent_communication:
   - agent: "main"

@@ -127,17 +127,20 @@ class FamilySpace(TZAware):
     member_ids: List[str]
     invite_code: str
     currency: str = "USD"
+    space_type: str = "roommates"
     created_at: datetime
 
 
 class CreateSpaceRequest(BaseModel):
     name: str = Field(min_length=1, max_length=60)
     currency: str = "USD"
+    space_type: str = "roommates"
 
 
 class UpdateSpaceRequest(BaseModel):
     name: Optional[str] = None
     currency: Optional[str] = None
+    space_type: Optional[str] = None
 
 
 class JoinSpaceRequest(BaseModel):
@@ -1911,8 +1914,7 @@ async def list_staff(space_id: str, user: User = Depends(get_current_user)):
 
 @api_router.post("/household/staff", response_model=StaffMember)
 async def create_staff(body: CreateStaffRequest, user: User = Depends(get_current_user)):
-    await assert_space_member(body.space_id, user.user_id)
-    space = await db.family_spaces.find_one({"space_id": body.space_id}, {"_id": 0})
+    space = await assert_space_member(body.space_id, user.user_id)
     doc = {
         "staff_id": gen_id("staff"),
         "space_id": body.space_id,
@@ -1924,7 +1926,7 @@ async def create_staff(body: CreateStaffRequest, user: User = Depends(get_curren
         "id_number": body.id_number,
         "salary": body.salary,
         "pay_cycle": body.pay_cycle or "monthly",
-        "salary_currency": (body.salary_currency or (space.get("currency") if space else "USD")),
+        "salary_currency": body.salary_currency or (space.get("currency") if isinstance(space, dict) else None) or "USD",
         "off_day": body.off_day,
         "start_date": body.start_date,
         "notes": body.notes,
