@@ -108,6 +108,7 @@ export default function Splits() {
     catch (e: any) { console.warn(e); }
   };
 
+  const cur = activeSpace?.currency || 'USD';
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <View style={styles.header}>
@@ -139,11 +140,11 @@ export default function Splits() {
             <View style={styles.summaryRow}>
               <View style={[styles.summaryCard, { backgroundColor: tints.sage.bg }]}>
                 <Text style={[styles.summaryLbl, { color: tints.sage.icon }]}>You're owed</Text>
-                <Text style={styles.summaryAmt} testID="splits-total-owed">${balances.total_owed_to_you.toFixed(2)}</Text>
+                <Text style={styles.summaryAmt} testID="splits-total-owed">{formatMoney(balances.total_owed_to_you, cur)}</Text>
               </View>
               <View style={[styles.summaryCard, { backgroundColor: tints.pink.bg }]}>
                 <Text style={[styles.summaryLbl, { color: tints.pink.icon }]}>You owe</Text>
-                <Text style={styles.summaryAmt} testID="splits-total-owe">${balances.total_you_owe.toFixed(2)}</Text>
+                <Text style={styles.summaryAmt} testID="splits-total-owe">{formatMoney(balances.total_you_owe, cur)}</Text>
               </View>
             </View>
 
@@ -152,7 +153,7 @@ export default function Splits() {
                 Net balance
               </Text>
               <Text style={[styles.netAmt, { color: balances.net >= 0 ? tints.sage.icon : tints.pink.icon }]}>
-                {balances.net >= 0 ? '+' : ''}${balances.net.toFixed(2)}
+                {balances.net >= 0 ? '+' : ''}{formatMoney(balances.net, cur)}
               </Text>
             </View>
 
@@ -178,7 +179,7 @@ export default function Splits() {
                           <Text style={styles.balName}>{b.from_name}</Text>
                           <Text style={styles.balSub}>{isOpen ? 'hide details' : 'tap to see what for'}</Text>
                         </View>
-                        <Text style={[styles.balAmt, { color: tints.sage.icon }]}>${b.amount.toFixed(2)}</Text>
+                        <Text style={[styles.balAmt, { color: tints.sage.icon }]}>{formatMoney(b.amount, cur)}</Text>
                         <Icon name={isOpen ? 'ChevronUp' : 'ChevronDown'} size={16} color={colors.textMuted} />
                       </TouchableOpacity>
                       {det === 'loading' && (
@@ -198,10 +199,10 @@ export default function Splits() {
                               <View style={{ flex: 1 }}>
                                 <Text style={styles.itemName} numberOfLines={1}>{it.name}</Text>
                                 <Text style={styles.itemSub}>
-                                  {it.category_name} · ${it.price.toFixed(2)} ÷ {it.split_count}
+                                  {it.category_name} · {formatMoney(it.price, cur)} ÷ {it.split_count}
                                 </Text>
                               </View>
-                              <Text style={styles.itemAmt}>${it.share_each.toFixed(2)}</Text>
+                              <Text style={styles.itemAmt}>{formatMoney(it.share_each, cur)}</Text>
                             </View>
                           ))}
                           {(det as BalanceDetails).breakdown.filter((x) => x.direction === 'they_owe_you').length === 0 && (
@@ -238,7 +239,7 @@ export default function Splits() {
                             <Text style={styles.balName}>{b.to_name}</Text>
                             <Text style={styles.balSub}>{isOpen ? 'hide details' : 'tap to see what for'}</Text>
                           </View>
-                          <Text style={[styles.balAmt, { color: tints.pink.icon }]}>${b.amount.toFixed(2)}</Text>
+                          <Text style={[styles.balAmt, { color: tints.pink.icon }]}>{formatMoney(b.amount, cur)}</Text>
                           <Icon name={isOpen ? 'ChevronUp' : 'ChevronDown'} size={16} color={colors.textMuted} />
                         </TouchableOpacity>
                         <TouchableOpacity
@@ -266,10 +267,10 @@ export default function Splits() {
                               <View style={{ flex: 1 }}>
                                 <Text style={styles.itemName} numberOfLines={1}>{it.name}</Text>
                                 <Text style={styles.itemSub}>
-                                  {it.category_name} · ${it.price.toFixed(2)} ÷ {it.split_count}
+                                  {it.category_name} · {formatMoney(it.price, cur)} ÷ {it.split_count}
                                 </Text>
                               </View>
-                              <Text style={styles.itemAmt}>${it.share_each.toFixed(2)}</Text>
+                              <Text style={styles.itemAmt}>{formatMoney(it.share_each, cur)}</Text>
                             </View>
                           ))}
                           {(det as BalanceDetails).breakdown.filter((x) => x.direction === 'you_owe_them').length === 0 && (
@@ -289,7 +290,7 @@ export default function Splits() {
                 {balances.others.map((b) => (
                   <View key={`${b.from_user_id}-${b.to_user_id}`} style={styles.balanceRow}>
                     <Text style={[styles.balName, { flex: 1 }]}>{b.from_name} → {b.to_name}</Text>
-                    <Text style={styles.balAmt}>${b.amount.toFixed(2)}</Text>
+                    <Text style={styles.balAmt}>{formatMoney(b.amount, cur)}</Text>
                   </View>
                 ))}
               </>
@@ -316,7 +317,7 @@ export default function Splits() {
                       {s.note ? <Text style={styles.histNote}>{s.note}</Text> : null}
                       <Text style={styles.histDate}>{new Date(s.created_at).toLocaleDateString()}</Text>
                     </View>
-                    <Text style={styles.histAmt}>${s.amount.toFixed(2)}</Text>
+                    <Text style={styles.histAmt}>{formatMoney(s.amount, cur)}</Text>
                     {s.from_user_id === user?.user_id && (
                       <TouchableOpacity onPress={() => removeSettlement(s.settlement_id)} style={{ padding: 4 }}>
                         <Icon name="X" size={14} color={colors.textMuted} />

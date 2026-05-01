@@ -1,6 +1,6 @@
 import React, { useState, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, Platform,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, Platform, Modal,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -9,13 +9,16 @@ import { useAuth } from '../../src/AuthContext';
 import { colors, radius, spacing, shadows } from '../../src/theme';
 import { Icon } from '../../src/Icon';
 import { api } from '../../src/api';
-import type { User } from '../../src/types';
+import { CURRENCIES, getCurrency } from '../../src/currency';
+import type { User, FamilySpace } from '../../src/types';
 
 export default function Profile() {
   const router = useRouter();
-  const { user, logout, activeSpace, spaces, setActiveSpaceId } = useAuth();
+  const { user, logout, activeSpace, spaces, setActiveSpaceId, refreshSpaces } = useAuth() as any;
   const [members, setMembers] = useState<User[]>([]);
   const [copied, setCopied] = useState(false);
+  const [showCurrency, setShowCurrency] = useState(false);
+  const [savingCur, setSavingCur] = useState(false);
 
   const load = useCallback(async () => {
     if (!activeSpace) return;
@@ -44,6 +47,20 @@ export default function Profile() {
     await logout();
     router.replace('/welcome');
   };
+
+  const setSpaceCurrency = async (code: string) => {
+    if (!activeSpace) return;
+    setSavingCur(true);
+    try {
+      await api.patch(`/spaces/${activeSpace.space_id}`, { currency: code });
+      await refreshSpaces?.();
+      setShowCurrency(false);
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Failed to update');
+    } finally { setSavingCur(false); }
+  };
+
+  const currentCur = getCurrency(activeSpace?.currency);
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -118,6 +135,29 @@ export default function Profile() {
 
         <TouchableOpacity
           style={[styles.card, styles.rowBtn]}
+          onPress={() => setShowCurrency(true)}
+          testID="profile-currency"
+        >
+          <Icon name="DollarSign" size={20} color={colors.textMain} />
+          <Text style={styles.rowBtnTxt}>Currency</Text>
+          <Text style={{ color: colors.textMuted, fontWeight: '700', fontSize: 13 }}>
+            {currentCur.code} · {currentCur.symbol}
+          </Text>
+          <Icon name="ChevronRight" size={18} color={colors.textMuted} />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.card, styles.rowBtn]}
+          onPress={() => router.push('/report')}
+          testID="profile-report"
+        >
+          <Icon name="FileText" size={20} color={colors.textMain} />
+          <Text style={styles.rowBtnTxt}>Finance report & export</Text>
+          <Icon name="ChevronRight" size={18} color={colors.textMuted} />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.card, styles.rowBtn]}
           onPress={() => router.push('/splits')}
           testID="profile-splits"
         >
@@ -166,9 +206,62 @@ export default function Profile() {
           <View />
         </TouchableOpacity>
       </ScrollView>
+
+      {/* Currency picker */}
+      <Modal visible={showCurrency} animationType="slide" transparent onRequestClose={() => setShowCurrency(false)}>
+        <View style={profileExtra.modalOverlay}>
+          <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={() => setShowCurrency(false)} />
+          <View style={profileExtra.sheet}>
+            <View style={profileExtra.sheetHandle} />
+            <Text style={profileExtra.sheetTitle}>Pick currency for {activeSpace?.name}</Text>
+            <Text style={profileExtra.sheetSub}>Reports, splits and bills will display in this currency. Existing item prices stay as-is — they were entered in the original currency.</Text>
+            <ScrollView style={{ maxHeight: 420 }}>
+              {CURRENCIES.map((c) => {
+                const active = (activeSpace?.currency || 'USD').toUpperCase() === c.code;
+                return (
+                  <TouchableOpacity
+                    key={c.code}
+                    style={[profileExtra.curRow, active && profileExtra.curRowActive]}
+                    onPress={() => setSpaceCurrency(c.code)}
+                    disabled={savingCur}
+                    testID={`currency-${c.code}`}
+                  >
+                    <View style={profileExtra.curSym}>
+                      <Text style={profileExtra.curSymTxt}>{c.symbol}</Text>
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={profileExtra.curName}>{c.name}</Text>
+                      <Text style={profileExtra.curCode}>{c.code}</Text>
+                    </View>
+                    {active && <Icon name="Check" size={18} color={colors.primary} />}
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
+
+const profileExtra = StyleSheet.create({
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
+  sheet: {
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: 32, borderTopRightRadius: 32,
+    padding: spacing.lg, paddingBottom: 32, maxHeight: '80%',
+  },
+  sheetHandle: { width: 40, height: 4, borderRadius: 2, backgroundColor: colors.border, alignSelf: 'center', marginBottom: 16 },
+  sheetTitle: { fontSize: 18, fontWeight: '800', color: colors.textMain, marginBottom: 4 },
+  sheetSub: { fontSize: 12, color: colors.textMuted, marginBottom: spacing.md, lineHeight: 18 },
+  curRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.border },
+  curRowActive: { backgroundColor: colors.surfaceAlt, borderRadius: radius.md, paddingHorizontal: 12 },
+  curSym: { width: 40, height: 40, borderRadius: 12, backgroundColor: colors.surfaceAlt, alignItems: 'center', justifyContent: 'center' },
+  curSymTxt: { fontSize: 16, fontWeight: '800', color: colors.textMain },
+  curName: { fontSize: 14, fontWeight: '700', color: colors.textMain },
+  curCode: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+});
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },

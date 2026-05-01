@@ -281,8 +281,8 @@ frontend:
 
 metadata:
   created_by: "main_agent"
-  version: "3.0"
-  test_sequence: 3
+  version: "3.1"
+  test_sequence: 4
   run_ui: false
 
 test_plan:
@@ -345,3 +345,56 @@ agent_communication:
          returns is_paid_current_period=true, next_due_date=2026-05-01. No regression.
       
       Marking task working=true, needs_retesting=false. No further bills work needed.
+  - agent: "testing"
+    message: |
+      New-feature backend test run (2026-05-01) via /app/backend_test.py — 47/47 PASS.
+      Covers:
+        1) Currency on Space + PATCH /api/spaces/{space_id}
+           ✅ POST /spaces with currency="CAD" → response currency "CAD"
+           ✅ POST /spaces without currency → defaults to "USD"
+           ✅ PATCH /spaces {currency:"idr"} → normalized to "IDR"
+           ✅ PATCH /spaces name-only → name updates, currency unchanged (still "IDR")
+           ✅ PATCH /spaces by non-member → 403
+           ✅ GET /spaces → every entry contains a `currency` field
+        2) GET /api/reports/finance (new)
+           Pre-seeded: 1 space (currency=EUR), 1 category, 3 items priced 10/20/30
+           with created_at at today, today-2d, today-5d (overridden directly in MongoDB to
+           avoid API-only now_utc() timestamping).
+           Primary shape assertions run against period="ytd" because today (2026-05-01) is
+           the first of the month, so the -2d and -5d items straddle into April (last_month).
+           Using period="ytd" keeps all 3 items in window and lets us assert the full shape.
+           ✅ 200 response with all required top-level keys:
+              period_key, period_label, start, end, currency, totals, by_category,
+              by_member, daily, monthly, top_items, all_items, bills, settlements, insights
+           ✅ currency inherited from space ("EUR")
+           ✅ totals == {total:60, count:3, avg_per_item:20, largest:30, smallest:10}
+           ✅ by_category has 1 entry (Groceries, mint tint, total:60, count:3, pct:100)
+           ✅ by_member has current user at total:60, count:3, pct:100
+           ✅ daily has 3 entries (one per seeded day)
+           ✅ monthly has ≥1 entry (2 in this case: April + May)
+           ✅ top_items sorted desc: 30, 20, 10, each with item_id/name/category_name/price/
+              purchased_by/created_at populated
+           ✅ all_items has 3 entries with item_id, name, category_name, price, quantity,
+              purchased_by, purchase_date, expiry_date, status, created_at
+           ✅ bills == [] initially, settlements == [] initially
+           ✅ insights non-empty; first insight reads
+              "You logged 3 purchases totalling 60.00 EUR."
+           Period filtering:
+           ✅ period=this_month (today.day=1) returned count=1 — proves the -5d item is
+              correctly excluded. On any day≥6 all 3 items would be in-window; on day 3–5 at
+              least the -5d item is filtered out; on day 1–2 only today's item survives. Test
+              adapts to today.day and passed.
+           ✅ period=last_month / last_3_months / ytd / all all return 200.
+           ✅ Non-member receives 403 on /reports/finance for the space.
+        3) Smoke on existing endpoints — all green:
+           ✅ /auth/login (seeded test@cozii.app / test1234)
+           ✅ /spaces GET
+           ✅ /categories: POST / GET / PATCH / DELETE
+           ✅ /items: POST / GET / PATCH / DELETE
+           ✅ /bills: POST / GET / PATCH / POST /pay (is_paid_current_period=true) / DELETE
+           ✅ /agreement: GET / PUT / POST /sign (1 signature)
+           ✅ /balance-details
+           ✅ /balances
+      
+      Conclusion: new currency + finance report features are production-ready. Existing
+      endpoints unaffected. No backend bugs surfaced in this run.

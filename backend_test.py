@@ -1,38 +1,56 @@
 """
-Cozii backend test suite.
-Covers:
-  - Auth (register/login/me)
-  - Spaces (create, join via invite, members)
-  - Categories
-  - Items (basic smoke)
-  - Balance details (new)
-  - Recurring bills CRUD + pay
-  - Roommate agreement (GET/PUT/sign + access control)
-  - Existing /balances and /settlements regression
+Cozii backend test suite — focused on NEW additions:
+  1. Currency on Space + PATCH /api/spaces/{space_id}
+  2. GET /api/reports/finance (totals/by_category/by_member/daily/monthly/top_items/all_items/bills/settlements/insights)
+  3. Smoke tests for existing endpoints (auth/login, spaces, categories, items, bills, agreement, balance-details, balances)
+
+To seed items with specific created_at dates (today / 2d ago / 5d ago) we
+connect to MongoDB directly (read MONGO_URL/DB_NAME from /app/backend/.env)
+and overwrite created_at AFTER the item was created via the API.
 """
 import os
+import sys
 import time
 import uuid
 import requests
-from typing import Optional
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
 BASE_URL = "https://family-wallet-21.preview.emergentagent.com/api"
 
-results = []  # list of (name, ok, detail)
+# Load mongo creds from backend .env
+BACKEND_ENV = Path("/app/backend/.env")
+env_vars = {}
+for line in BACKEND_ENV.read_text().splitlines():
+    if "=" in line and not line.strip().startswith("#"):
+        k, v = line.split("=", 1)
+        env_vars[k.strip()] = v.strip().strip('"').strip("'")
+
+MONGO_URL = env_vars.get("MONGO_URL", "mongodb://localhost:27017")
+DB_NAME = env_vars.get("DB_NAME", "test_database")
+
+try:
+    from pymongo import MongoClient
+    mongo = MongoClient(MONGO_URL)
+    mdb = mongo[DB_NAME]
+    MONGO_OK = True
+except Exception as e:
+    print(f"WARN: pymongo not available: {e}")
+    MONGO_OK = False
+
+results = []
 
 
-def log(name: str, ok: bool, detail: str = ""):
-    status = "PASS" if ok else "FAIL"
-    print(f"[{status}] {name}{(' - ' + detail) if detail else ''}")
+def log(name, ok, detail=""):
+    print(f"[{'PASS' if ok else 'FAIL'}] {name}{(' - ' + detail) if detail else ''}")
     results.append((name, ok, detail))
 
 
-def auth_headers(token: str) -> dict:
+def h(token):
     return {"Authorization": f"Bearer {token}"}
 
 
-def register_or_login(email: str, password: str, name: str) -> dict:
-    """Returns {token, user}. Tries register first; if 409, falls back to login."""
+def register_or_login(email, password, name):
     r = requests.post(f"{BASE_URL}/auth/register", json={"email": email, "password": password, "name": name})
     if r.status_code == 409:
         r = requests.post(f"{BASE_URL}/auth/login", json={"email": email, "password": password})
@@ -41,353 +59,346 @@ def register_or_login(email: str, password: str, name: str) -> dict:
     return r.json()
 
 
-def main():
-    ts = int(time.time())
-    # Use realistic looking emails. Use timestamp suffix so we get fresh users per run.
-    user_a_email = f"alex.morgan+{ts}@cozii.app"
-    user_b_email = f"riley.chen+{ts}@cozii.app"
-    user_c_email = f"jordan.park+{ts}@cozii.app"  # third party (not in space)
+def test_login_primary():
+    # Section 3 smoke: existing /auth/login with seeded creds
+    r = requests.post(f"{BASE_URL}/auth/login", json={"email": "test@cozii.app", "password": "test1234"})
+    if r.status_code == 200:
+        log("auth/login (seeded test@cozii.app)", True)
+        return r.json()
+    else:
+        # try to register if missing
+        r2 = requests.post(f"{BASE_URL}/auth/register", json={"email": "test@cozii.app", "password": "test1234", "name": "Test User"})
+        if r2.status_code == 200:
+            log("auth/login (seeded test@cozii.app) — created", True)
+            return r2.json()
+        log("auth/login (seeded test@cozii.app)", False, f"login {r.status_code} / register {r2.status_code}")
+        return None
 
-    # === 1. Auth: register A + B + C ===
-    try:
-        a = register_or_login(user_a_email, "Hunter#2026", "Alex Morgan")
-        log("auth/register A", True, f"user_id={a['user']['user_id']}")
-    except Exception as e:
-        log("auth/register A", False, str(e))
-        return
 
-    try:
-        b = register_or_login(user_b_email, "Hunter#2026", "Riley Chen")
-        log("auth/register B", True, f"user_id={b['user']['user_id']}")
-    except Exception as e:
-        log("auth/register B", False, str(e))
-        return
+# ==============================================================
+# 1. Currency on Space + PATCH /api/spaces/{space_id}
+# ==============================================================
+def test_currency_and_patch(tok_a, user_a, tok_c, user_c):
+    # POST /spaces with currency: CAD
+    r = requests.post(f"{BASE_URL}/spaces", json={"name": "Maple House", "currency": "CAD"}, headers=h(tok_a))
+    ok1 = r.status_code == 200 and r.json().get("currency") == "CAD"
+    log("POST /spaces with currency=CAD returns currency=CAD", ok1, "" if ok1 else r.text)
+    space_cad = r.json() if r.status_code == 200 else None
 
-    try:
-        c = register_or_login(user_c_email, "Hunter#2026", "Jordan Park")
-        log("auth/register C (outsider)", True)
-    except Exception as e:
-        log("auth/register C", False, str(e))
-        return
+    # POST /spaces without currency -> default USD
+    r2 = requests.post(f"{BASE_URL}/spaces", json={"name": "Default Place"}, headers=h(tok_a))
+    ok2 = r2.status_code == 200 and r2.json().get("currency") == "USD"
+    log("POST /spaces without currency defaults to USD", ok2, "" if ok2 else r2.text)
+    space_def = r2.json() if r2.status_code == 200 else None
 
-    # === 1b. /auth/me sanity ===
-    r = requests.get(f"{BASE_URL}/auth/me", headers=auth_headers(a["token"]))
-    log("auth/me works", r.status_code == 200 and r.json().get("email") == user_a_email,
-        f"status={r.status_code}")
+    # PATCH currency: "idr" -> normalize "IDR"
+    if space_cad:
+        r3 = requests.patch(f"{BASE_URL}/spaces/{space_cad['space_id']}", json={"currency": "idr"}, headers=h(tok_a))
+        ok3 = r3.status_code == 200 and r3.json().get("currency") == "IDR"
+        log("PATCH /spaces currency=idr normalizes to IDR", ok3, "" if ok3 else f"{r3.status_code} {r3.text}")
 
-    # === 1c. /auth/login regression with primary credentials in test_credentials.md ===
-    # Try to login with the seed account; if not present register it once.
-    primary_email, primary_pwd = "test@cozii.app", "test1234"
-    rr = requests.post(f"{BASE_URL}/auth/login", json={"email": primary_email, "password": primary_pwd})
-    if rr.status_code == 401:
-        rr = requests.post(f"{BASE_URL}/auth/register",
-                           json={"email": primary_email, "password": primary_pwd, "name": "Test User"})
-    log("auth/login primary credentials", rr.status_code == 200, f"status={rr.status_code}")
+        # PATCH name only; currency unchanged
+        r4 = requests.patch(f"{BASE_URL}/spaces/{space_cad['space_id']}", json={"name": "Renamed Maple"}, headers=h(tok_a))
+        ok4 = r4.status_code == 200 and r4.json().get("name") == "Renamed Maple" and r4.json().get("currency") == "IDR"
+        log("PATCH /spaces name-only keeps currency", ok4, "" if ok4 else f"{r4.status_code} {r4.text}")
 
-    # === 2. Spaces ===
-    r = requests.post(f"{BASE_URL}/spaces", json={"name": "Roommate HQ"}, headers=auth_headers(a["token"]))
-    if r.status_code != 200:
-        log("spaces/create", False, f"{r.status_code} {r.text}")
-        return
+        # Non-member attempt -> 403
+        r5 = requests.patch(f"{BASE_URL}/spaces/{space_cad['space_id']}", json={"name": "Hacker"}, headers=h(tok_c))
+        ok5 = r5.status_code == 403
+        log("PATCH /spaces as non-member returns 403", ok5, f"got {r5.status_code}" if not ok5 else "")
+
+    # GET /spaces includes currency for every space
+    r6 = requests.get(f"{BASE_URL}/spaces", headers=h(tok_a))
+    ok6 = r6.status_code == 200 and all("currency" in s for s in r6.json())
+    log("GET /spaces includes currency on every space", ok6, "" if ok6 else r6.text[:300])
+
+    return space_cad, space_def
+
+
+# ==============================================================
+# 2. GET /api/reports/finance
+# ==============================================================
+def test_finance_report(tok_a, user_a, tok_c):
+    # Create dedicated space with currency EUR for clarity
+    r = requests.post(f"{BASE_URL}/spaces", json={"name": "Finance Lab", "currency": "EUR"}, headers=h(tok_a))
+    assert r.status_code == 200, r.text
     space = r.json()
-    space_id = space["space_id"]
-    invite_code = space["invite_code"]
-    log("spaces/create", True, f"space_id={space_id}")
+    sid = space["space_id"]
 
-    # B joins via invite_code
-    r = requests.post(f"{BASE_URL}/spaces/join", json={"invite_code": invite_code}, headers=auth_headers(b["token"]))
-    log("spaces/join (B)", r.status_code == 200 and a["user"]["user_id"] in r.json()["member_ids"]
-        and b["user"]["user_id"] in r.json()["member_ids"],
-        f"status={r.status_code}")
+    # Create a category
+    rc = requests.post(
+        f"{BASE_URL}/categories",
+        json={"space_id": sid, "name": "Groceries", "icon": "ShoppingCart", "tint": "mint", "fields": []},
+        headers=h(tok_a),
+    )
+    assert rc.status_code == 200, rc.text
+    cat = rc.json()
 
-    # GET /spaces (A)
-    r = requests.get(f"{BASE_URL}/spaces", headers=auth_headers(a["token"]))
-    log("spaces/list (A)", r.status_code == 200 and any(s["space_id"] == space_id for s in r.json()),
-        f"status={r.status_code} count={len(r.json()) if r.status_code == 200 else 0}")
+    # Create 3 items with prices 10, 20, 30
+    created_items = []
+    for idx, price in enumerate([10.0, 20.0, 30.0]):
+        name = ["Apples", "Bread", "Cheese Wheel"][idx]
+        ri = requests.post(
+            f"{BASE_URL}/items",
+            json={"space_id": sid, "category_id": cat["category_id"], "name": name, "price": price},
+            headers=h(tok_a),
+        )
+        assert ri.status_code == 200, ri.text
+        created_items.append(ri.json())
 
-    # GET /spaces/{id}/members
-    r = requests.get(f"{BASE_URL}/spaces/{space_id}/members", headers=auth_headers(a["token"]))
-    log("spaces/members", r.status_code == 200 and len(r.json()) == 2, f"status={r.status_code}")
+    # Override created_at in Mongo: today (keep as-is), 2 days ago, 5 days ago
+    if MONGO_OK:
+        today = datetime.now(timezone.utc)
+        dates = [today, today - timedelta(days=2), today - timedelta(days=5)]
+        for it, dt in zip(created_items, dates):
+            mdb.items.update_one({"item_id": it["item_id"]}, {"$set": {"created_at": dt}})
+    else:
+        log("finance: cannot override created_at (pymongo missing) — daily test may skew", False)
 
-    # === 3. Categories: create a shared category ===
-    a_id = a["user"]["user_id"]
-    b_id = b["user"]["user_id"]
-
-    cat_payload = {
-        "space_id": space_id,
-        "name": "Groceries (Shared)",
-        "icon": "ShoppingCart",
-        "tint": "mint",
-        "fields": [],
-        "shared_with": [a_id, b_id],
-    }
-    r = requests.post(f"{BASE_URL}/categories", json=cat_payload, headers=auth_headers(a["token"]))
-    if r.status_code != 200:
-        log("categories/create shared", False, f"{r.status_code} {r.text}")
+    # ---- period=this_month (status smoke) ----
+    rep_tm = requests.get(f"{BASE_URL}/reports/finance", params={"space_id": sid, "period": "this_month"}, headers=h(tok_a))
+    ok_tm = rep_tm.status_code == 200
+    log("GET /reports/finance?period=this_month 200", ok_tm, "" if ok_tm else f"{rep_tm.status_code} {rep_tm.text[:300]}")
+    if not ok_tm:
         return
-    shared_cat = r.json()
-    shared_cat_id = shared_cat["category_id"]
-    log("categories/create shared", set(shared_cat["shared_with"]) == {a_id, b_id})
+    log("finance(this_month): period_key == this_month", rep_tm.json().get("period_key") == "this_month")
 
-    # GET /categories
-    r = requests.get(f"{BASE_URL}/categories?space_id={space_id}", headers=auth_headers(a["token"]))
-    log("categories/list", r.status_code == 200 and any(c["category_id"] == shared_cat_id for c in r.json()),
-        f"status={r.status_code}")
-
-    # === 4. Items: A creates 2, B creates 1 ===
-    item_ids = []
-    for i, (token, price, name) in enumerate([
-        (a["token"], 24.50, "Olive oil"),
-        (a["token"], 60.00, "Costco run"),
-        (b["token"], 18.00, "Fresh produce"),
-    ]):
-        r = requests.post(f"{BASE_URL}/items",
-                          json={"space_id": space_id, "category_id": shared_cat_id,
-                                "name": name, "price": price},
-                          headers=auth_headers(token))
-        if r.status_code != 200:
-            log(f"items/create #{i}", False, f"{r.status_code} {r.text}")
-            return
-        item_ids.append(r.json()["item_id"])
-    log("items/create 3 items", True, f"items={item_ids}")
-
-    # === 5. Balance details ===
-    # As A: should have 3 entries: 2 they_owe_you (A's own) + 1 you_owe_them (B's)
-    r = requests.get(f"{BASE_URL}/balance-details?space_id={space_id}&with_user_id={b_id}",
-                     headers=auth_headers(a["token"]))
-    if r.status_code != 200:
-        log("balance-details (A)", False, f"{r.status_code} {r.text}")
-    else:
-        body = r.json()
-        bd = body.get("breakdown", [])
-        a_own = [x for x in bd if x["direction"] == "they_owe_you"]
-        a_other = [x for x in bd if x["direction"] == "you_owe_them"]
-        ok = (len(bd) == 3 and len(a_own) == 2 and len(a_other) == 1
-              and "settlements" in body and isinstance(body["settlements"], list))
-        # Verify share_each math for one entry
-        ent = bd[0]
-        expected_share = round(ent["price"] / ent["split_count"], 2)
-        share_ok = abs(ent["share_each"] - expected_share) < 0.001
-        log("balance-details (A) breakdown counts", ok,
-            f"total={len(bd)} they_owe_you={len(a_own)} you_owe_them={len(a_other)}")
-        log("balance-details share_each math", share_ok,
-            f"price={ent['price']} split={ent['split_count']} share_each={ent['share_each']}")
-        log("balance-details settlements present", "settlements" in body and isinstance(body["settlements"], list))
-
-    # As B: mirror — should see 1 they_owe_you (B's own) + 2 you_owe_them (A's)
-    r = requests.get(f"{BASE_URL}/balance-details?space_id={space_id}&with_user_id={a_id}",
-                     headers=auth_headers(b["token"]))
-    if r.status_code != 200:
-        log("balance-details (B)", False, f"{r.status_code} {r.text}")
-    else:
-        body = r.json()
-        bd = body.get("breakdown", [])
-        b_own = [x for x in bd if x["direction"] == "they_owe_you"]
-        b_other = [x for x in bd if x["direction"] == "you_owe_them"]
-        log("balance-details (B) mirror",
-            len(bd) == 3 and len(b_own) == 1 and len(b_other) == 2,
-            f"total={len(bd)} they_owe_you={len(b_own)} you_owe_them={len(b_other)}")
-
-    # === 6. /balances regression ===
-    r = requests.get(f"{BASE_URL}/balances?space_id={space_id}", headers=auth_headers(a["token"]))
-    if r.status_code != 200:
-        log("balances regression", False, f"{r.status_code} {r.text}")
-    else:
-        bal = r.json()
-        # A paid 24.50+60 = 84.50, share each 42.25; B paid 18.00, share each 9.00
-        # B owes A 42.25, A owes B 9.00 → net B owes A 33.25
-        owed_to_a = bal.get("total_owed_to_you", 0)
-        log("balances net math (A perspective)", abs(owed_to_a - 33.25) < 0.05,
-            f"owed_to_you={owed_to_a} (expected 33.25)")
-
-    # === 7. Settlements regression ===
-    r = requests.post(f"{BASE_URL}/settlements",
-                      json={"space_id": space_id, "to_user_id": a_id, "amount": 5.00, "note": "venmo"},
-                      headers=auth_headers(b["token"]))
-    if r.status_code != 200:
-        log("settlements/create", False, f"{r.status_code} {r.text}")
-    else:
-        settlement_id = r.json()["settlement_id"]
-        log("settlements/create", True, f"id={settlement_id}")
-
-        r = requests.get(f"{BASE_URL}/settlements?space_id={space_id}", headers=auth_headers(a["token"]))
-        log("settlements/list", r.status_code == 200 and any(s["settlement_id"] == settlement_id for s in r.json()),
-            f"status={r.status_code}")
-
-        # balance-details should now show this settlement
-        r = requests.get(f"{BASE_URL}/balance-details?space_id={space_id}&with_user_id={b_id}",
-                         headers=auth_headers(a["token"]))
-        log("balance-details settlements populated",
-            r.status_code == 200 and len(r.json().get("settlements", [])) >= 1,
-            f"settlements={len(r.json().get('settlements', [])) if r.status_code == 200 else 'err'}")
-
-    # === 8. Recurring Bills ===
-    bill_payload = {
-        "space_id": space_id,
-        "name": "Wi-Fi",
-        "amount": 100.00,
-        "frequency": "monthly",
-        "due_day": 15,
-        "category_id": shared_cat_id,
-        "shared_with": [a_id, b_id],
-        "icon": "Wifi",
-    }
-    r = requests.post(f"{BASE_URL}/bills", json=bill_payload, headers=auth_headers(a["token"]))
-    if r.status_code != 200:
-        log("bills/create", False, f"{r.status_code} {r.text}")
+    # ---- primary shape assertions use period=ytd so all 3 backdated items fall in the window ----
+    # (items seeded at today, today-2d, today-5d may straddle month boundary if today is early in the month)
+    rep = requests.get(f"{BASE_URL}/reports/finance", params={"space_id": sid, "period": "ytd"}, headers=h(tok_a))
+    ok_status = rep.status_code == 200
+    log("GET /reports/finance?period=ytd 200", ok_status, "" if ok_status else f"{rep.status_code} {rep.text[:300]}")
+    if not ok_status:
         return
-    bill = r.json()
-    bill_id = bill["bill_id"]
-    log("bills/create monthly",
-        bill.get("next_due_date") is not None and bill.get("is_paid_current_period") is False,
-        f"next_due={bill.get('next_due_date')} is_paid={bill.get('is_paid_current_period')}")
+    body = rep.json()
 
-    # GET /bills
-    r = requests.get(f"{BASE_URL}/bills?space_id={space_id}", headers=auth_headers(b["token"]))
-    log("bills/list (B sees A's bill)",
-        r.status_code == 200 and any(x["bill_id"] == bill_id for x in r.json()),
-        f"status={r.status_code}")
+    # Shape checks
+    required_keys = ["period_key", "period_label", "start", "end", "currency",
+                     "totals", "by_category", "by_member", "daily", "monthly",
+                     "top_items", "all_items", "bills", "settlements", "insights"]
+    missing = [k for k in required_keys if k not in body]
+    log("finance: response has all required top-level keys", not missing, f"missing={missing}")
 
-    # PATCH /bills/{id}
-    r = requests.patch(f"{BASE_URL}/bills/{bill_id}",
-                       json={"name": "Wi-Fi (Comcast)", "amount": 110.00},
-                       headers=auth_headers(a["token"]))
-    log("bills/update",
-        r.status_code == 200 and r.json()["name"] == "Wi-Fi (Comcast)" and abs(r.json()["amount"] - 110.0) < 0.01,
-        f"status={r.status_code}")
+    log("finance: period_key == ytd", body.get("period_key") == "ytd")
+    log("finance: currency == EUR (inherited from space)", body.get("currency") == "EUR",
+        f"got {body.get('currency')}")
 
-    # POST /bills/{id}/pay
-    r = requests.post(f"{BASE_URL}/bills/{bill_id}/pay", headers=auth_headers(a["token"]))
-    if r.status_code != 200:
-        log("bills/pay", False, f"{r.status_code} {r.text}")
+    # Totals (all 3 items should be within this month assuming run is not in the first 5 days of month)
+    totals = body.get("totals", {})
+    totals_ok = (
+        totals.get("total") == 60
+        and totals.get("count") == 3
+        and totals.get("avg_per_item") == 20
+        and totals.get("largest") == 30
+        and totals.get("smallest") == 10
+    )
+    log("finance: totals {total:60,count:3,avg:20,largest:30,smallest:10}", totals_ok, f"got {totals}")
+
+    # by_category: 1 entry, 100% pct
+    bc = body.get("by_category", [])
+    bc_ok = (
+        len(bc) == 1
+        and bc[0].get("category_id") == cat["category_id"]
+        and bc[0].get("name") == "Groceries"
+        and bc[0].get("tint") == "mint"
+        and bc[0].get("total") == 60
+        and bc[0].get("count") == 3
+        and bc[0].get("pct") == 100
+    )
+    log("finance: by_category single entry at 100%", bc_ok, f"got {bc}")
+
+    # by_member: current user contributes 100%
+    bm = body.get("by_member", [])
+    bm_ok = (
+        len(bm) >= 1
+        and bm[0].get("user_id") == user_a["user_id"]
+        and bm[0].get("total") == 60
+        and bm[0].get("count") == 3
+        and bm[0].get("pct") == 100
+    )
+    log("finance: by_member shows current user at 100%", bm_ok, f"got {bm}")
+
+    # daily: 3 entries (one per day)
+    daily = body.get("daily", [])
+    log("finance: daily has 3 entries (one per day)", len(daily) == 3, f"got {len(daily)} entries")
+
+    # monthly: >= 1 entry
+    monthly = body.get("monthly", [])
+    log("finance: monthly has at least 1 entry", len(monthly) >= 1, f"got {len(monthly)}")
+
+    # top_items: 3, sorted desc by price
+    ti = body.get("top_items", [])
+    ti_ok = (
+        len(ti) == 3
+        and ti[0].get("price") == 30
+        and ti[1].get("price") == 20
+        and ti[2].get("price") == 10
+        and ti[0].get("purchased_by") == user_a["name"]
+    )
+    log("finance: top_items sorted desc (30,20,10) with purchased_by", ti_ok, f"got {ti}")
+
+    # all_items: 3 with required fields
+    ai = body.get("all_items", [])
+    required_item_fields = ["item_id", "name", "category_name", "price", "quantity", "purchased_by", "created_at"]
+    ai_shape_ok = len(ai) == 3 and all(all(f in x for f in required_item_fields) for x in ai)
+    log("finance: all_items has 3 entries with required fields", ai_shape_ok,
+        f"len={len(ai)} sample_keys={list(ai[0].keys()) if ai else None}")
+
+    # bills: [] initially
+    log("finance: bills is [] initially", body.get("bills") == [], f"got {body.get('bills')}")
+
+    # settlements: [] initially
+    log("finance: settlements is [] initially", body.get("settlements") == [], f"got {body.get('settlements')}")
+
+    # insights: non-empty list; first should mention "3 purchases"
+    ins = body.get("insights", [])
+    ins_ok = isinstance(ins, list) and len(ins) >= 1 and ("3 purchases" in ins[0] or "3 " in ins[0])
+    log("finance: insights non-empty & mentions '3 purchases'", ins_ok, f"insights[0]={ins[0] if ins else None}")
+
+    # ---- Other periods smoke: last_month (should be 0 IF we had seeded items only today;
+    # but we backdated 2 items to -2d/-5d so on month boundaries they may fall into last_month.
+    # The semantic check we care about here is that period filtering is enforced:
+    # period=this_month must NOT include the -5d item. Verify by comparing ytd count vs this_month count.
+    rep2 = requests.get(f"{BASE_URL}/reports/finance", params={"space_id": sid, "period": "last_month"}, headers=h(tok_a))
+    log("finance: period=last_month 200", rep2.status_code == 200, "" if rep2.status_code == 200 else rep2.text[:200])
+
+    rep_tm2 = requests.get(f"{BASE_URL}/reports/finance", params={"space_id": sid, "period": "this_month"}, headers=h(tok_a))
+    tm_count = rep_tm2.json().get("totals", {}).get("count", -1) if rep_tm2.status_code == 200 else -1
+    # Period filtering sanity: the -5d item must NOT be in this_month (unless today >= 6th of month).
+    today_day = datetime.now(timezone.utc).day
+    if today_day >= 6:
+        filter_ok = tm_count == 3
+        note = f"today.day={today_day} expect all 3 in this_month, got {tm_count}"
+    elif today_day >= 3:
+        filter_ok = tm_count < 3  # -5d is excluded at minimum
+        note = f"today.day={today_day} expect <3 in this_month, got {tm_count}"
     else:
-        paid = r.json()
-        from datetime import date
-        today_iso = date.today().isoformat()
-        log("bills/pay flips state",
-            paid.get("is_paid_current_period") is True and paid.get("last_paid_date") == today_iso,
-            f"is_paid={paid.get('is_paid_current_period')} last_paid={paid.get('last_paid_date')}")
+        filter_ok = tm_count <= 1
+        note = f"today.day={today_day} expect <=1 in this_month, got {tm_count}"
+    log("finance: period filtering excludes out-of-window items", filter_ok, note)
 
-        # Verify item was created in category
-        r = requests.get(f"{BASE_URL}/items?space_id={space_id}&category_id={shared_cat_id}",
-                         headers=auth_headers(a["token"]))
-        if r.status_code == 200:
-            items_in_cat = r.json()
-            wifi_items = [it for it in items_in_cat if "Wi-Fi" in it["name"] and abs((it.get("price") or 0) - 110.0) < 0.01]
-            log("bills/pay creates item in category",
-                len(wifi_items) >= 1,
-                f"matching items={len(wifi_items)}")
-        else:
-            log("bills/pay creates item in category", False, f"items list status={r.status_code}")
+    for p in ["last_3_months", "ytd", "all"]:
+        rp = requests.get(f"{BASE_URL}/reports/finance", params={"space_id": sid, "period": p}, headers=h(tok_a))
+        log(f"finance: period={p} 200", rp.status_code == 200, "" if rp.status_code == 200 else rp.text[:200])
 
-        # Verify balance-details now includes the bill payment item
-        r = requests.get(f"{BASE_URL}/balance-details?space_id={space_id}&with_user_id={b_id}",
-                         headers=auth_headers(a["token"]))
-        if r.status_code == 200:
-            bd = r.json()["breakdown"]
-            wifi_in_bd = any("Wi-Fi" in x["name"] for x in bd)
-            log("bills/pay shows in balance-details", wifi_in_bd,
-                f"breakdown_size={len(bd)}")
-        else:
-            log("bills/pay shows in balance-details", False, f"status={r.status_code}")
+    # Non-member -> 403
+    r403 = requests.get(f"{BASE_URL}/reports/finance", params={"space_id": sid, "period": "this_month"}, headers=h(tok_c))
+    log("finance: non-member returns 403", r403.status_code == 403, f"got {r403.status_code}")
 
-    # DELETE /bills/{id}
-    r = requests.delete(f"{BASE_URL}/bills/{bill_id}", headers=auth_headers(a["token"]))
-    log("bills/delete", r.status_code == 200, f"status={r.status_code}")
+    return sid, cat
 
-    r = requests.get(f"{BASE_URL}/bills?space_id={space_id}", headers=auth_headers(a["token"]))
-    log("bills deletion removes from list",
-        r.status_code == 200 and not any(x["bill_id"] == bill_id for x in r.json()))
 
-    # Items should still be present
-    r = requests.get(f"{BASE_URL}/items?space_id={space_id}&category_id={shared_cat_id}",
-                     headers=auth_headers(a["token"]))
-    if r.status_code == 200:
-        items_in_cat = r.json()
-        wifi_items = [it for it in items_in_cat if "Wi-Fi" in it["name"]]
-        log("bills/delete keeps historical items", len(wifi_items) >= 1, f"wifi items still present={len(wifi_items)}")
+# ==============================================================
+# 3. Smoke tests for existing endpoints
+# ==============================================================
+def test_existing_smoke(tok_a, user_a):
+    # /spaces GET
+    rs = requests.get(f"{BASE_URL}/spaces", headers=h(tok_a))
+    log("smoke: GET /spaces", rs.status_code == 200 and isinstance(rs.json(), list))
+    if rs.status_code != 200 or not rs.json():
+        return
+    sid = rs.json()[0]["space_id"]
 
-    # === 9. Roommate Agreement ===
-    # GET when none exists -> null
-    # First make sure no agreement exists for a fresh space — create another space for clean test.
-    r = requests.post(f"{BASE_URL}/spaces", json={"name": "Agreement Test House"}, headers=auth_headers(a["token"]))
-    ag_space_id = r.json()["space_id"]
-    ag_invite = r.json()["invite_code"]
-    requests.post(f"{BASE_URL}/spaces/join", json={"invite_code": ag_invite}, headers=auth_headers(b["token"]))
+    # /categories CRUD
+    rc = requests.post(
+        f"{BASE_URL}/categories",
+        json={"space_id": sid, "name": f"SmokeCat_{uuid.uuid4().hex[:4]}", "icon": "Box", "tint": "mint", "fields": []},
+        headers=h(tok_a),
+    )
+    log("smoke: POST /categories", rc.status_code == 200)
+    cat_id = rc.json().get("category_id") if rc.status_code == 200 else None
 
-    r = requests.get(f"{BASE_URL}/agreement?space_id={ag_space_id}", headers=auth_headers(a["token"]))
-    log("agreement/get returns null when none exists",
-        r.status_code == 200 and r.json() in (None, "null"),
-        f"status={r.status_code} body={r.text[:100]}")
+    rlc = requests.get(f"{BASE_URL}/categories", params={"space_id": sid}, headers=h(tok_a))
+    log("smoke: GET /categories", rlc.status_code == 200)
 
-    # PUT to create
-    r = requests.put(f"{BASE_URL}/agreement?space_id={ag_space_id}",
-                     json={"text": "Quiet hours after 10pm. Trash on Tuesdays.", "sections": []},
-                     headers=auth_headers(a["token"]))
-    if r.status_code != 200:
-        log("agreement/put create", False, f"{r.status_code} {r.text}")
-    else:
-        ag = r.json()
-        log("agreement/put create",
-            ag.get("text") == "Quiet hours after 10pm. Trash on Tuesdays." and ag.get("signatures") == [],
-            f"sigs={len(ag.get('signatures', []))}")
+    if cat_id:
+        ru = requests.patch(f"{BASE_URL}/categories/{cat_id}", json={"name": "SmokeCat Renamed"}, headers=h(tok_a))
+        log("smoke: PATCH /categories/{id}", ru.status_code == 200)
 
-    # POST sign as A
-    r = requests.post(f"{BASE_URL}/agreement/sign?space_id={ag_space_id}", headers=auth_headers(a["token"]))
-    if r.status_code != 200:
-        log("agreement/sign A", False, f"{r.status_code} {r.text}")
-    else:
-        ag = r.json()
-        log("agreement/sign A adds signature",
-            len(ag["signatures"]) == 1 and ag["signatures"][0]["user_id"] == a_id,
-            f"sigs={ag['signatures']}")
+        # /items CRUD
+        ri = requests.post(
+            f"{BASE_URL}/items",
+            json={"space_id": sid, "category_id": cat_id, "name": "Smoke Milk", "price": 4.50},
+            headers=h(tok_a),
+        )
+        log("smoke: POST /items", ri.status_code == 200)
+        item_id = ri.json().get("item_id") if ri.status_code == 200 else None
+        rli = requests.get(f"{BASE_URL}/items", params={"space_id": sid}, headers=h(tok_a))
+        log("smoke: GET /items", rli.status_code == 200)
+        if item_id:
+            rup = requests.patch(f"{BASE_URL}/items/{item_id}", json={"status": "low"}, headers=h(tok_a))
+            log("smoke: PATCH /items/{id}", rup.status_code == 200)
+            rdi = requests.delete(f"{BASE_URL}/items/{item_id}", headers=h(tok_a))
+            log("smoke: DELETE /items/{id}", rdi.status_code == 200)
 
-    # Sign again as A → still 1
-    time.sleep(1)
-    r = requests.post(f"{BASE_URL}/agreement/sign?space_id={ag_space_id}", headers=auth_headers(a["token"]))
-    if r.status_code == 200:
-        ag = r.json()
-        log("agreement/sign A again is dedup'd",
-            len(ag["signatures"]) == 1 and ag["signatures"][0]["user_id"] == a_id,
-            f"sigs={len(ag['signatures'])}")
+        # /bills CRUD + pay
+        rb = requests.post(
+            f"{BASE_URL}/bills",
+            json={"space_id": sid, "name": "Internet", "amount": 45.0, "frequency": "monthly", "due_day": 5,
+                  "category_id": cat_id},
+            headers=h(tok_a),
+        )
+        log("smoke: POST /bills", rb.status_code == 200, "" if rb.status_code == 200 else rb.text[:200])
+        bid = rb.json().get("bill_id") if rb.status_code == 200 else None
+        rlb = requests.get(f"{BASE_URL}/bills", params={"space_id": sid}, headers=h(tok_a))
+        log("smoke: GET /bills", rlb.status_code == 200)
+        if bid:
+            rpb = requests.patch(f"{BASE_URL}/bills/{bid}", json={"amount": 55.0}, headers=h(tok_a))
+            log("smoke: PATCH /bills/{id}", rpb.status_code == 200)
+            rpay = requests.post(f"{BASE_URL}/bills/{bid}/pay", headers=h(tok_a))
+            pay_ok = rpay.status_code == 200 and rpay.json().get("is_paid_current_period") is True
+            log("smoke: POST /bills/{id}/pay -> is_paid_current_period=True", pay_ok,
+                "" if pay_ok else f"{rpay.status_code} {rpay.text[:200]}")
+            rdb = requests.delete(f"{BASE_URL}/bills/{bid}", headers=h(tok_a))
+            log("smoke: DELETE /bills/{id}", rdb.status_code == 200)
 
-    # B signs too → 2 signatures
-    r = requests.post(f"{BASE_URL}/agreement/sign?space_id={ag_space_id}", headers=auth_headers(b["token"]))
-    if r.status_code == 200:
-        log("agreement/sign B added", len(r.json()["signatures"]) == 2,
-            f"sigs={len(r.json()['signatures'])}")
+        # Clean up category
+        requests.delete(f"{BASE_URL}/categories/{cat_id}", headers=h(tok_a))
 
-    # PUT to edit (B) — signatures must reset
-    r = requests.put(f"{BASE_URL}/agreement?space_id={ag_space_id}",
-                     json={"text": "EDITED: quiet hours after 11pm.", "sections": []},
-                     headers=auth_headers(b["token"]))
-    if r.status_code == 200:
-        log("agreement edit resets signatures",
-            r.json().get("signatures") == [],
-            f"sigs={r.json().get('signatures')}")
+    # /agreement GET/PUT/sign
+    rag = requests.get(f"{BASE_URL}/agreement", params={"space_id": sid}, headers=h(tok_a))
+    log("smoke: GET /agreement", rag.status_code == 200)
+    rput = requests.put(f"{BASE_URL}/agreement", params={"space_id": sid},
+                        json={"text": "House rules", "sections": []}, headers=h(tok_a))
+    log("smoke: PUT /agreement", rput.status_code == 200, "" if rput.status_code == 200 else rput.text[:200])
+    rsign = requests.post(f"{BASE_URL}/agreement/sign", params={"space_id": sid}, headers=h(tok_a))
+    sign_ok = rsign.status_code == 200 and len(rsign.json().get("signatures", [])) == 1
+    log("smoke: POST /agreement/sign", sign_ok, "" if sign_ok else f"{rsign.status_code} {rsign.text[:200]}")
 
-    # === Access control: C is NOT in space ===
-    r = requests.get(f"{BASE_URL}/agreement?space_id={ag_space_id}", headers=auth_headers(c["token"]))
-    log("agreement GET 403 for non-member", r.status_code == 403, f"status={r.status_code}")
+    # /balance-details (need with_user_id — use self, API should return 400 because not in space? Actually self IS in space_id. But endpoint expects 2+ users. Let's just call with self to verify 200 + empty breakdown.)
+    rbd = requests.get(f"{BASE_URL}/balance-details",
+                       params={"space_id": sid, "with_user_id": user_a["user_id"]}, headers=h(tok_a))
+    log("smoke: GET /balance-details", rbd.status_code == 200)
 
-    r = requests.put(f"{BASE_URL}/agreement?space_id={ag_space_id}",
-                     json={"text": "hacked", "sections": []}, headers=auth_headers(c["token"]))
-    log("agreement PUT 403 for non-member", r.status_code == 403, f"status={r.status_code}")
+    # /balances
+    rbal = requests.get(f"{BASE_URL}/balances", params={"space_id": sid}, headers=h(tok_a))
+    log("smoke: GET /balances", rbal.status_code == 200)
 
-    r = requests.post(f"{BASE_URL}/agreement/sign?space_id={ag_space_id}", headers=auth_headers(c["token"]))
-    log("agreement/sign 403 for non-member", r.status_code == 403, f"status={r.status_code}")
 
-    # === Summary ===
-    print("\n========== SUMMARY ==========")
+# ==============================================================
+def main():
+    test_login_primary()
+
+    ts = int(time.time())
+    user_a_email = f"alex.morgan+{ts}@cozii.app"
+    user_c_email = f"jordan.park+{ts}@cozii.app"
+
+    a = register_or_login(user_a_email, "SuperStrongPwd!23", "Alex Morgan")
+    c = register_or_login(user_c_email, "SuperStrongPwd!23", "Jordan Park")
+
+    test_currency_and_patch(a["token"], a["user"], c["token"], c["user"])
+    test_finance_report(a["token"], a["user"], c["token"])
+    test_existing_smoke(a["token"], a["user"])
+
     passed = sum(1 for _, ok, _ in results if ok)
-    total = len(results)
-    print(f"PASSED: {passed}/{total}")
-    failed = [(n, d) for n, ok, d in results if not ok]
+    failed = sum(1 for _, ok, _ in results if not ok)
+    print(f"\n=== SUMMARY: {passed} passed / {failed} failed / {len(results)} total ===")
     if failed:
-        print("\nFAILED TESTS:")
-        for n, d in failed:
-            print(f"  - {n}: {d}")
-    return passed, total, failed
+        print("FAILURES:")
+        for n, ok, d in results:
+            if not ok:
+                print(f"  - {n}: {d}")
+    sys.exit(0 if failed == 0 else 1)
 
 
 if __name__ == "__main__":

@@ -126,11 +126,18 @@ class FamilySpace(TZAware):
     owner_id: str
     member_ids: List[str]
     invite_code: str
+    currency: str = "USD"
     created_at: datetime
 
 
 class CreateSpaceRequest(BaseModel):
     name: str = Field(min_length=1, max_length=60)
+    currency: str = "USD"
+
+
+class UpdateSpaceRequest(BaseModel):
+    name: Optional[str] = None
+    currency: Optional[str] = None
 
 
 class JoinSpaceRequest(BaseModel):
@@ -422,6 +429,7 @@ async def create_space(body: CreateSpaceRequest, user: User = Depends(get_curren
         "owner_id": user.user_id,
         "member_ids": [user.user_id],
         "invite_code": gen_invite_code(),
+        "currency": (body.currency or "USD").upper().strip()[:6] or "USD",
         "created_at": now_utc(),
     }
     await db.family_spaces.insert_one(space)
@@ -491,6 +499,23 @@ async def space_members(space_id: str, user: User = Depends(get_current_user)):
         {"_id": 0, "password_hash": 0},
     ).to_list(100)
     return [User(**m) for m in members]
+
+
+@api_router.patch("/spaces/{space_id}", response_model=FamilySpace)
+async def update_space(space_id: str, body: UpdateSpaceRequest, user: User = Depends(get_current_user)):
+    await assert_space_member(space_id, user.user_id)
+    updates: Dict[str, Any] = {}
+    if body.name is not None:
+        updates["name"] = body.name.strip()
+    if body.currency is not None:
+        cur = (body.currency or "USD").upper().strip()[:6]
+        updates["currency"] = cur or "USD"
+    if updates:
+        await db.family_spaces.update_one({"space_id": space_id}, {"$set": updates})
+    out = await db.family_spaces.find_one({"space_id": space_id}, {"_id": 0})
+    if "currency" not in out:
+        out["currency"] = "USD"
+    return FamilySpace(**out)
 
 
 # =========================
@@ -1323,6 +1348,224 @@ async def sign_agreement(space_id: str, user: User = Depends(get_current_user)):
     await db.agreements.update_one({"space_id": space_id}, {"$set": {"signatures": sigs}})
     out = await db.agreements.find_one({"space_id": space_id}, {"_id": 0})
     return Agreement(**out)
+
+
+# =========================
+# Finance Report (rich) + Raw data export
+# =========================
+def _period_range(period: str) -> Tuple[datetime, datetime, str]:
+    now = now_utc()
+    label = "All time"
+    if period == "this_month":
+        start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+        end = now
+        label = start.strftime("%B %Y")
+    elif period == "last_month":
+        if now.month == 1:
+            start = datetime(now.year - 1, 12, 1, tzinfo=timezone.utc)
+            end = datetime(now.year, 1, 1, tzinfo=timezone.utc)
+        else:
+            start = datetime(now.year, now.month - 1, 1, tzinfo=timezone.utc)
+            end = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+        label = start.strftime("%B %Y")
+    elif period == "last_3_months":
+        m = now.month - 3
+        y = now.year
+        while m <= 0:
+            m += 12; y -= 1
+        start = datetime(y, m, 1, tzinfo=timezone.utc)
+        end = now
+        label = f"{start.strftime('%b %Y')} – {now.strftime('%b %Y')}"
+    elif period == "ytd":
+        start = datetime(now.year, 1, 1, tzinfo=timezone.utc)
+        end = now
+        label = f"Year-to-date {now.year}"
+    else:  # all
+        start = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        end = now
+        label = "All time"
+    return start, end, label
+
+
+@api_router.get("/reports/finance")
+async def finance_report(space_id: str, period: str = "this_month", user: User = Depends(get_current_user)):
+    space = await assert_space_member(space_id, user.user_id)
+    currency = space.get("currency", "USD")
+    start, end, label = _period_range(period)
+
+    # Items with prices in window
+    items = await db.items.find({
+        "space_id": space_id,
+        "created_at": {"$gte": start, "$lt": end} if period != "all" else {"$lte": end},
+        "price": {"$ne": None, "$gt": 0},
+    }, {"_id": 0}).to_list(20000)
+
+    cats = await db.categories.find({"space_id": space_id}, {"_id": 0}).to_list(500)
+    cat_name = {c["category_id"]: c["name"] for c in cats}
+    cat_tint = {c["category_id"]: c.get("tint", "mint") for c in cats}
+
+    members = await db.users.find({"user_id": {"$in": space["member_ids"]}}, {"_id": 0, "password_hash": 0}).to_list(100)
+    member_name = {m["user_id"]: m["name"] for m in members}
+
+    total = sum(float(it["price"]) for it in items)
+    count = len(items)
+    avg_per_item = (total / count) if count else 0
+    largest = max((float(it["price"]) for it in items), default=0)
+    smallest = min((float(it["price"]) for it in items), default=0)
+
+    # By category
+    by_cat: Dict[str, Dict[str, Any]] = {}
+    for it in items:
+        cid = it["category_id"]
+        d = by_cat.setdefault(cid, {"category_id": cid, "name": cat_name.get(cid, "?"), "tint": cat_tint.get(cid, "mint"), "total": 0.0, "count": 0})
+        d["total"] += float(it["price"]); d["count"] += 1
+    by_cat_list = sorted(by_cat.values(), key=lambda d: d["total"], reverse=True)
+    for d in by_cat_list:
+        d["pct"] = round((d["total"] / total) * 100, 1) if total else 0
+        d["total"] = round(d["total"], 2)
+
+    # By member (who paid)
+    by_mem: Dict[str, Dict[str, Any]] = {}
+    for it in items:
+        mid = it.get("created_by")
+        d = by_mem.setdefault(mid, {"user_id": mid, "name": member_name.get(mid, "Someone"), "total": 0.0, "count": 0})
+        d["total"] += float(it["price"]); d["count"] += 1
+    by_mem_list = sorted(by_mem.values(), key=lambda d: d["total"], reverse=True)
+    for d in by_mem_list:
+        d["pct"] = round((d["total"] / total) * 100, 1) if total else 0
+        d["total"] = round(d["total"], 2)
+
+    # Daily trend (date -> total) only for periods <= 6 months
+    daily: Dict[str, float] = {}
+    for it in items:
+        d = it.get("created_at")
+        if isinstance(d, datetime):
+            key = d.date().isoformat()
+        else:
+            try: key = datetime.fromisoformat(str(d)).date().isoformat()
+            except Exception: continue
+        daily[key] = daily.get(key, 0) + float(it["price"])
+    daily_list = [{"date": k, "total": round(v, 2)} for k, v in sorted(daily.items())]
+
+    # Monthly trend (last 12 months relative to end)
+    monthly: Dict[str, float] = {}
+    for it in items:
+        d = it.get("created_at")
+        if not isinstance(d, datetime): continue
+        key = d.strftime("%Y-%m")
+        monthly[key] = monthly.get(key, 0) + float(it["price"])
+    monthly_list = [{"month": k, "total": round(v, 2)} for k, v in sorted(monthly.items())]
+
+    # Top items
+    items_sorted = sorted(items, key=lambda it: float(it["price"]), reverse=True)
+    top_items = [{
+        "item_id": it["item_id"],
+        "name": it["name"],
+        "category_name": cat_name.get(it["category_id"], "?"),
+        "price": round(float(it["price"]), 2),
+        "purchased_by": member_name.get(it.get("created_by"), "Someone"),
+        "created_at": it["created_at"].isoformat() if isinstance(it["created_at"], datetime) else str(it["created_at"]),
+    } for it in items_sorted[:20]]
+
+    # All items (raw data for sheets export)
+    all_items_raw = [{
+        "item_id": it["item_id"],
+        "name": it["name"],
+        "category_name": cat_name.get(it["category_id"], "?"),
+        "price": round(float(it["price"]), 2),
+        "quantity": it.get("quantity") or 1,
+        "purchased_by": member_name.get(it.get("created_by"), "Someone"),
+        "purchase_date": it.get("purchase_date") or "",
+        "expiry_date": it.get("expiry_date") or "",
+        "status": it.get("status", "available"),
+        "created_at": it["created_at"].isoformat() if isinstance(it["created_at"], datetime) else str(it["created_at"]),
+    } for it in items_sorted]
+
+    # Bills in window (all visible)
+    bill_docs = await db.bills.find({"space_id": space_id}, {"_id": 0}).to_list(500)
+    bills_out = []
+    for b in bill_docs:
+        b = _compute_bill_state(b)
+        bills_out.append({
+            "bill_id": b["bill_id"],
+            "name": b["name"],
+            "amount": round(float(b["amount"]), 2),
+            "frequency": b["frequency"],
+            "due_day": b["due_day"],
+            "is_paid_current_period": b["is_paid_current_period"],
+            "next_due_date": b.get("next_due_date"),
+            "last_paid_date": b.get("last_paid_date"),
+            "category_name": cat_name.get(b.get("category_id"), "") if b.get("category_id") else "",
+        })
+
+    # Settlements in window
+    settle_docs = await db.settlements.find({
+        "space_id": space_id,
+        "created_at": {"$gte": start, "$lt": end} if period != "all" else {"$lte": end},
+    }, {"_id": 0}).sort("created_at", -1).to_list(500)
+    settle_out = [{
+        "settlement_id": s["settlement_id"],
+        "from_name": s["from_name"],
+        "to_name": s["to_name"],
+        "amount": round(float(s["amount"]), 2),
+        "note": s.get("note") or "",
+        "created_at": s["created_at"].isoformat() if isinstance(s["created_at"], datetime) else str(s["created_at"]),
+    } for s in settle_docs]
+
+    # Insights (plain English)
+    insights: List[str] = []
+    if count == 0:
+        insights.append("No spending logged in this period yet. Start scanning receipts or adding items with prices to unlock insights.")
+    else:
+        insights.append(f"You logged {count} purchases totalling {total:.2f} {currency}.")
+        if by_cat_list:
+            top = by_cat_list[0]
+            insights.append(f"{top['name']} was your top category at {top['pct']}% of spend.")
+        if by_mem_list and len(by_mem_list) > 1:
+            top_m = by_mem_list[0]
+            insights.append(f"{top_m['name']} paid the most ({top_m['pct']}%). Use the Splits view to see what's owed.")
+        if avg_per_item > 0:
+            insights.append(f"Average item price was {avg_per_item:.2f} {currency}.")
+        # Compare to previous equivalent period
+        if period in ("this_month",):
+            prev_start = (start.replace(year=start.year - 1, month=12, day=1)
+                          if start.month == 1 else start.replace(month=start.month - 1))
+            prev_total = 0.0
+            async for r in db.items.aggregate([
+                {"$match": {"space_id": space_id, "created_at": {"$gte": prev_start, "$lt": start}, "price": {"$ne": None, "$gt": 0}}},
+                {"$group": {"_id": None, "total": {"$sum": "$price"}}},
+            ]):
+                prev_total = float(r.get("total") or 0)
+            if prev_total > 0:
+                delta = total - prev_total
+                pct = (delta / prev_total) * 100
+                if abs(pct) >= 5:
+                    direction = "up" if delta > 0 else "down"
+                    insights.append(f"Spending is {direction} {abs(pct):.0f}% vs last month ({prev_total:.2f} {currency}).")
+
+    return {
+        "period_key": period,
+        "period_label": label,
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "currency": currency,
+        "totals": {
+            "total": round(total, 2),
+            "count": count,
+            "avg_per_item": round(avg_per_item, 2),
+            "largest": round(largest, 2),
+            "smallest": round(smallest, 2),
+        },
+        "by_category": by_cat_list,
+        "by_member": by_mem_list,
+        "daily": daily_list,
+        "monthly": monthly_list,
+        "top_items": top_items,
+        "all_items": all_items_raw,
+        "bills": bills_out,
+        "settlements": settle_out,
+        "insights": insights,
+    }
 
 
 # =========================

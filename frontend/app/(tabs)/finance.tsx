@@ -8,6 +8,7 @@ import { useAuth } from '../../src/AuthContext';
 import { colors, radius, spacing, shadows, tints } from '../../src/theme';
 import { Icon } from '../../src/Icon';
 import { api } from '../../src/api';
+import { formatMoney } from '../../src/currency';
 import type { Item, Category } from '../../src/types';
 import { PieChart, PieLegend, BarChart } from '../../src/Charts';
 
@@ -105,6 +106,7 @@ export default function Finance() {
   const chartW = Math.min(screenW - 64, 360);
 
   const monthLabel = new Date().toLocaleString('default', { month: 'long', year: 'numeric' });
+  const cur = activeSpace?.currency || 'USD';
 
   // Top items this month
   const topPurchases = monthAgg.monthItems
@@ -123,12 +125,20 @@ export default function Finance() {
 
         <View style={styles.quickRow}>
           <TouchableOpacity
+            style={[styles.quickCard, { backgroundColor: tints.lavender.bg }]}
+            onPress={() => router.push('/report')}
+            testID="finance-report-link"
+          >
+            <Icon name="FileText" size={22} color={tints.lavender.icon} />
+            <Text style={styles.quickTxt}>Report & export</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
             style={[styles.quickCard, { backgroundColor: tints.blue.bg }]}
             onPress={() => router.push('/bills')}
             testID="finance-bills-link"
           >
             <Icon name="Receipt" size={22} color={tints.blue.icon} />
-            <Text style={styles.quickTxt}>Recurring bills</Text>
+            <Text style={styles.quickTxt}>Bills</Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={[styles.quickCard, { backgroundColor: tints.peach.bg }]}
@@ -136,7 +146,7 @@ export default function Finance() {
             testID="finance-splits-link"
           >
             <Icon name="Users" size={22} color={tints.peach.icon} />
-            <Text style={styles.quickTxt}>Money splits</Text>
+            <Text style={styles.quickTxt}>Splits</Text>
           </TouchableOpacity>
         </View>
 
@@ -161,7 +171,7 @@ export default function Finance() {
           <>
             <View style={styles.heroCard}>
               <Text style={styles.heroLabel}>{monthLabel}</Text>
-              <Text style={styles.heroAmount} testID="finance-total">${monthAgg.total.toFixed(2)}</Text>
+              <Text style={styles.heroAmount} testID="finance-total">{formatMoney(monthAgg.total, cur)}</Text>
               <View style={styles.diffRow}>
                 {monthAgg.last > 0 ? (
                   <>
@@ -170,7 +180,7 @@ export default function Finance() {
                         {diff > 0 ? '+' : ''}{diffPct.toFixed(0)}%
                       </Text>
                     </View>
-                    <Text style={styles.diffLabel}>vs last month (${monthAgg.last.toFixed(2)})</Text>
+                    <Text style={styles.diffLabel}>vs last month ({formatMoney(monthAgg.last, cur)})</Text>
                   </>
                 ) : (
                   <Text style={styles.diffLabel}>Log items with a price to track spending</Text>
@@ -190,7 +200,7 @@ export default function Finance() {
                   <View style={styles.pieWrap}>
                     <PieChart slices={pieSlices} size={200} hole={70} />
                     <View style={styles.pieCenter} pointerEvents="none">
-                      <Text style={styles.pieCenterAmount}>${monthAgg.total.toFixed(0)}</Text>
+                      <Text style={styles.pieCenterAmount}>{formatMoney(monthAgg.total, cur)}</Text>
                       <Text style={styles.pieCenterLbl}>spent</Text>
                     </View>
                   </View>
@@ -218,7 +228,7 @@ export default function Finance() {
                     <Text style={styles.txnName} numberOfLines={1}>{it.name}</Text>
                     <Text style={styles.txnCat}>{catName(it.category_id)}</Text>
                   </View>
-                  <Text style={styles.txnAmt}>${(it.price || 0).toFixed(2)}</Text>
+                  <Text style={styles.txnAmt}>{formatMoney(it.price || 0, cur)}</Text>
                 </View>
               ))
             )}
@@ -227,8 +237,8 @@ export default function Finance() {
           <>
             <View style={styles.heroCard}>
               <Text style={styles.heroLabel}>Last 6 months</Text>
-              <Text style={styles.heroAmount}>${sixMonthTotal.toFixed(2)}</Text>
-              <Text style={styles.diffLabel}>Average ${sixMonthAvg.toFixed(2)} per month</Text>
+              <Text style={styles.heroAmount}>{formatMoney(sixMonthTotal, cur)}</Text>
+              <Text style={styles.diffLabel}>Average {formatMoney(sixMonthAvg, cur)} per month</Text>
             </View>
 
             <Text style={styles.sectionTitle}>Monthly trend</Text>
@@ -237,7 +247,7 @@ export default function Finance() {
               <View style={styles.barLabels}>
                 {sixMonths.map((m, i) => (
                   <View key={i} style={styles.barLabelCol}>
-                    <Text style={styles.barAmt}>${m.value > 999 ? `${(m.value / 1000).toFixed(1)}k` : m.value.toFixed(0)}</Text>
+                    <Text style={styles.barAmt}>{m.value > 999 ? `${(m.value / 1000).toFixed(1)}k` : Math.round(m.value)}</Text>
                     <Text style={styles.barLbl}>{m.label}</Text>
                   </View>
                 ))}
@@ -252,9 +262,9 @@ export default function Finance() {
                 const peak = sixMonths.find((m) => m.value === max);
                 const low = sixMonths.find((m) => m.value === min && m.value > 0);
                 const lines = [];
-                if (peak && max > 0) lines.push(`📈 Highest spend was in ${peak.label} ($${peak.value.toFixed(2)})`);
-                if (low && low !== peak) lines.push(`📉 Lightest month: ${low.label} ($${low.value.toFixed(2)})`);
-                if (sixMonthAvg > 0) lines.push(`💡 You typically spend around $${sixMonthAvg.toFixed(0)}/month`);
+                if (peak && max > 0) lines.push(`📈 Highest spend was in ${peak.label} (${formatMoney(peak.value, cur)})`);
+                if (low && low !== peak) lines.push(`📉 Lightest month: ${low.label} (${formatMoney(low.value, cur)})`);
+                if (sixMonthAvg > 0) lines.push(`💡 You typically spend around ${formatMoney(sixMonthAvg, cur)}/month`);
                 if (sixMonths[5].value > sixMonthAvg * 1.2) lines.push(`⚠️ This month is trending higher than usual`);
                 else if (sixMonths[5].value < sixMonthAvg * 0.8 && sixMonths[5].value > 0) lines.push(`✨ This month is trending lower than usual`);
                 if (lines.length === 0) lines.push('Keep adding items with prices to unlock insights.');

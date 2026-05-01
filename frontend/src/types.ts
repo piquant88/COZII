@@ -13,6 +13,7 @@ export type FamilySpace = {
   owner_id: string;
   member_ids: string[];
   invite_code: string;
+  currency?: string;
   created_at: string;
 };
 

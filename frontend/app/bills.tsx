@@ -81,6 +81,7 @@ export default function Bills() {
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   const onRefresh = async () => { setRefreshing(true); await load(); setRefreshing(false); };
+  const cur = activeSpace?.currency || 'USD';
 
   const openForm = (b?: Bill) => {
     if (b) {
@@ -182,7 +183,7 @@ export default function Bills() {
           )}
         </View>
         <View style={styles.billRight}>
-          <Text style={styles.billAmt}>${b.amount.toFixed(2)}</Text>
+          <Text style={styles.billAmt}>{formatMoney(b.amount, cur)}</Text>
           {!b.is_paid_current_period && (
             <TouchableOpacity
               style={styles.payBtn}
@@ -410,7 +411,7 @@ export default function Bills() {
             </View>
             <Text style={styles.confirmTitle}>Mark {payTarget?.name} as paid?</Text>
             <Text style={styles.confirmSub}>
-              This logs <Text style={{ fontWeight: '800', color: colors.textMain }}>${payTarget?.amount.toFixed(2)}</Text>
+              This logs <Text style={{ fontWeight: '800', color: colors.textMain }}>{payTarget ? formatMoney(payTarget.amount, cur) : ''}</Text>
               {payTarget?.category_id ? ` into ${catName(payTarget.category_id)}` : ''}
               {(payTarget?.shared_with.length || 0) > 1 ? ` and splits it with ${payTarget?.shared_with.length} people.` : '.'}
             </Text>
