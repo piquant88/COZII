@@ -13,7 +13,7 @@ type AuthState = {
   logout: () => Promise<void>;
   refreshSpaces: () => Promise<FamilySpace[]>;
   setActiveSpaceId: (id: string) => Promise<void>;
-  createSpace: (name: string) => Promise<FamilySpace>;
+  createSpace: (name: string, opts?: { space_type?: 'roommates' | 'household'; currency?: string }) => Promise<FamilySpace>;
   joinSpace: (inviteCode: string) => Promise<FamilySpace>;
 };
 
@@ -91,8 +91,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  const createSpace = async (name: string) => {
-    const s = await api.post<FamilySpace>('/spaces', { name });
+  const createSpace = async (name: string, opts?: { space_type?: 'roommates' | 'household'; currency?: string }) => {
+    const s = await api.post<FamilySpace>('/spaces', {
+      name,
+      space_type: opts?.space_type || 'roommates',
+      currency: opts?.currency || 'USD',
+    });
     await refreshSpaces();
     await activeSpaceStorage.set(s.space_id);
     setActiveSpace(s);

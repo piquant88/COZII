@@ -423,6 +423,9 @@ async def logout(request: Request, response: Response):
 # =========================
 @api_router.post("/spaces", response_model=FamilySpace)
 async def create_space(body: CreateSpaceRequest, user: User = Depends(get_current_user)):
+    stype = (body.space_type or "roommates").lower().strip()
+    if stype not in ("roommates", "household"):
+        stype = "roommates"
     space = {
         "space_id": gen_id("space"),
         "name": body.name.strip(),
@@ -430,6 +433,7 @@ async def create_space(body: CreateSpaceRequest, user: User = Depends(get_curren
         "member_ids": [user.user_id],
         "invite_code": gen_invite_code(),
         "currency": (body.currency or "USD").upper().strip()[:6] or "USD",
+        "space_type": stype,
         "created_at": now_utc(),
     }
     await db.family_spaces.insert_one(space)
@@ -510,11 +514,17 @@ async def update_space(space_id: str, body: UpdateSpaceRequest, user: User = Dep
     if body.currency is not None:
         cur = (body.currency or "USD").upper().strip()[:6]
         updates["currency"] = cur or "USD"
+    if body.space_type is not None:
+        st = body.space_type.lower().strip()
+        if st in ("roommates", "household"):
+            updates["space_type"] = st
     if updates:
         await db.family_spaces.update_one({"space_id": space_id}, {"$set": updates})
     out = await db.family_spaces.find_one({"space_id": space_id}, {"_id": 0})
     if "currency" not in out:
         out["currency"] = "USD"
+    if "space_type" not in out:
+        out["space_type"] = "roommates"
     return FamilySpace(**out)
 
 
@@ -1566,6 +1576,449 @@ async def finance_report(space_id: str, period: str = "this_month", user: User =
         "settlements": settle_out,
         "insights": insights,
     }
+
+
+# =========================
+# Household Phase 1 — Roles, Family members, Staff, Handbook
+# =========================
+DEFAULT_HOUSEHOLD_ROLES = [
+    {"key": "owner",     "name": "Owner",     "icon": "Star",    "color": "peach",    "category": "family", "is_default": True},
+    {"key": "spouse",    "name": "Spouse",    "icon": "Heart",   "color": "pink",     "category": "family", "is_default": True},
+    {"key": "child",     "name": "Child",     "icon": "Apple",   "color": "yellow",   "category": "family", "is_default": True},
+    {"key": "parent",    "name": "Parent",    "icon": "BookOpen","color": "lavender", "category": "family", "is_default": True},
+    {"key": "maid",      "name": "Maid",      "icon": "Sparkles","color": "sage",     "category": "staff",  "is_default": True},
+    {"key": "driver",    "name": "Driver",    "icon": "ArrowRight","color": "blue",   "category": "staff",  "is_default": True},
+    {"key": "nanny",     "name": "Nanny",     "icon": "Heart",   "color": "pink",     "category": "staff",  "is_default": True},
+    {"key": "cook",      "name": "Cook",      "icon": "Refrigerator","color": "peach","category": "staff",  "is_default": True},
+    {"key": "gardener",  "name": "Gardener",  "icon": "Droplet", "color": "mint",     "category": "staff",  "is_default": True},
+    {"key": "security",  "name": "Security",  "icon": "Lock",    "color": "lavender", "category": "staff",  "is_default": True},
+]
+
+
+class HouseholdRole(BaseModel):
+    role_id: str
+    space_id: str
+    key: str
+    name: str
+    icon: str = "User"
+    color: str = "mint"
+    category: str = "family"  # 'family' | 'staff'
+    is_default: bool = False
+    perms: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class CreateRoleRequest(BaseModel):
+    space_id: str
+    name: str
+    icon: str = "User"
+    color: str = "mint"
+    category: str = "family"
+    perms: Dict[str, Any] = Field(default_factory=dict)
+
+
+class UpdateRoleRequest(BaseModel):
+    name: Optional[str] = None
+    icon: Optional[str] = None
+    color: Optional[str] = None
+    category: Optional[str] = None
+    perms: Optional[Dict[str, Any]] = None
+
+
+class FamilyMember(BaseModel):
+    member_id: str
+    space_id: str
+    name: str
+    role_id: Optional[str] = None
+    role_name: Optional[str] = None
+    photo_base64: Optional[str] = None
+    age: Optional[int] = None
+    birthday: Optional[str] = None
+    school: Optional[str] = None
+    allergies: Optional[str] = None
+    medical_notes: Optional[str] = None
+    notes: Optional[str] = None
+    created_at: datetime
+
+
+class CreateFamilyMemberRequest(BaseModel):
+    space_id: str
+    name: str
+    role_id: Optional[str] = None
+    photo_base64: Optional[str] = None
+    age: Optional[int] = None
+    birthday: Optional[str] = None
+    school: Optional[str] = None
+    allergies: Optional[str] = None
+    medical_notes: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class UpdateFamilyMemberRequest(BaseModel):
+    name: Optional[str] = None
+    role_id: Optional[str] = None
+    photo_base64: Optional[str] = None
+    age: Optional[int] = None
+    birthday: Optional[str] = None
+    school: Optional[str] = None
+    allergies: Optional[str] = None
+    medical_notes: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class StaffMember(BaseModel):
+    staff_id: str
+    space_id: str
+    name: str
+    role_id: Optional[str] = None
+    role_name: Optional[str] = None
+    photo_base64: Optional[str] = None
+    phone: Optional[str] = None
+    emergency_contact: Optional[str] = None
+    id_number: Optional[str] = None
+    salary: Optional[float] = None
+    pay_cycle: str = "monthly"  # monthly | weekly | daily
+    salary_currency: Optional[str] = None
+    off_day: Optional[str] = None
+    start_date: Optional[str] = None
+    notes: Optional[str] = None
+    user_id: Optional[str] = None  # set when staff signs up to the app
+    created_at: datetime
+
+
+class CreateStaffRequest(BaseModel):
+    space_id: str
+    name: str
+    role_id: Optional[str] = None
+    photo_base64: Optional[str] = None
+    phone: Optional[str] = None
+    emergency_contact: Optional[str] = None
+    id_number: Optional[str] = None
+    salary: Optional[float] = None
+    pay_cycle: str = "monthly"
+    salary_currency: Optional[str] = None
+    off_day: Optional[str] = None
+    start_date: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class UpdateStaffRequest(BaseModel):
+    name: Optional[str] = None
+    role_id: Optional[str] = None
+    photo_base64: Optional[str] = None
+    phone: Optional[str] = None
+    emergency_contact: Optional[str] = None
+    id_number: Optional[str] = None
+    salary: Optional[float] = None
+    pay_cycle: Optional[str] = None
+    salary_currency: Optional[str] = None
+    off_day: Optional[str] = None
+    start_date: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class HandbookEntry(BaseModel):
+    entry_id: str
+    space_id: str
+    title: str
+    body: str
+    icon: str = "BookOpen"
+    color: str = "mint"
+    sort: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class CreateHandbookEntryRequest(BaseModel):
+    space_id: str
+    title: str
+    body: str
+    icon: str = "BookOpen"
+    color: str = "mint"
+    sort: int = 0
+
+
+class UpdateHandbookEntryRequest(BaseModel):
+    title: Optional[str] = None
+    body: Optional[str] = None
+    icon: Optional[str] = None
+    color: Optional[str] = None
+    sort: Optional[int] = None
+
+
+async def _ensure_default_roles(space_id: str):
+    existing = await db.household_roles.count_documents({"space_id": space_id})
+    if existing > 0:
+        return
+    docs = []
+    for r in DEFAULT_HOUSEHOLD_ROLES:
+        docs.append({
+            "role_id": gen_id("role"),
+            "space_id": space_id,
+            "key": r["key"],
+            "name": r["name"],
+            "icon": r["icon"],
+            "color": r["color"],
+            "category": r["category"],
+            "is_default": True,
+            "perms": {},
+            "created_at": now_utc(),
+        })
+    if docs:
+        await db.household_roles.insert_many(docs)
+
+
+# ----- Roles -----
+@api_router.get("/household/roles", response_model=List[HouseholdRole])
+async def list_roles(space_id: str, user: User = Depends(get_current_user)):
+    await assert_space_member(space_id, user.user_id)
+    await _ensure_default_roles(space_id)
+    docs = await db.household_roles.find({"space_id": space_id}, {"_id": 0}).sort("created_at", 1).to_list(200)
+    return [HouseholdRole(**d) for d in docs]
+
+
+@api_router.post("/household/roles", response_model=HouseholdRole)
+async def create_role(body: CreateRoleRequest, user: User = Depends(get_current_user)):
+    await assert_space_member(body.space_id, user.user_id)
+    cat = body.category if body.category in ("family", "staff") else "family"
+    doc = {
+        "role_id": gen_id("role"),
+        "space_id": body.space_id,
+        "key": body.name.lower().replace(" ", "_")[:20],
+        "name": body.name.strip(),
+        "icon": body.icon or "User",
+        "color": body.color or "mint",
+        "category": cat,
+        "is_default": False,
+        "perms": body.perms or {},
+        "created_at": now_utc(),
+    }
+    await db.household_roles.insert_one(doc)
+    doc.pop("_id", None)
+    return HouseholdRole(**doc)
+
+
+@api_router.patch("/household/roles/{role_id}", response_model=HouseholdRole)
+async def update_role(role_id: str, body: UpdateRoleRequest, user: User = Depends(get_current_user)):
+    role = await db.household_roles.find_one({"role_id": role_id}, {"_id": 0})
+    if not role:
+        raise HTTPException(404, "Role not found")
+    await assert_space_member(role["space_id"], user.user_id)
+    updates: Dict[str, Any] = {}
+    for k in ("name", "icon", "color", "category", "perms"):
+        v = getattr(body, k)
+        if v is not None:
+            updates[k] = v
+    if updates:
+        await db.household_roles.update_one({"role_id": role_id}, {"$set": updates})
+    out = await db.household_roles.find_one({"role_id": role_id}, {"_id": 0})
+    return HouseholdRole(**out)
+
+
+@api_router.delete("/household/roles/{role_id}")
+async def delete_role(role_id: str, user: User = Depends(get_current_user)):
+    role = await db.household_roles.find_one({"role_id": role_id}, {"_id": 0})
+    if not role:
+        raise HTTPException(404, "Role not found")
+    await assert_space_member(role["space_id"], user.user_id)
+    if role.get("is_default"):
+        raise HTTPException(400, "Default roles cannot be deleted; rename or hide instead.")
+    # detach from family + staff
+    await db.family_members.update_many({"role_id": role_id}, {"$set": {"role_id": None, "role_name": None}})
+    await db.staff_members.update_many({"role_id": role_id}, {"$set": {"role_id": None, "role_name": None}})
+    await db.household_roles.delete_one({"role_id": role_id})
+    return {"ok": True}
+
+
+async def _attach_role_name(doc: Dict[str, Any]) -> Dict[str, Any]:
+    rid = doc.get("role_id")
+    if rid:
+        r = await db.household_roles.find_one({"role_id": rid}, {"_id": 0, "name": 1})
+        doc["role_name"] = r["name"] if r else None
+    else:
+        doc["role_name"] = None
+    return doc
+
+
+# ----- Family members -----
+@api_router.get("/household/family", response_model=List[FamilyMember])
+async def list_family(space_id: str, user: User = Depends(get_current_user)):
+    await assert_space_member(space_id, user.user_id)
+    docs = await db.family_members.find({"space_id": space_id}, {"_id": 0}).sort("created_at", 1).to_list(500)
+    out = [await _attach_role_name(d) for d in docs]
+    return [FamilyMember(**d) for d in out]
+
+
+@api_router.post("/household/family", response_model=FamilyMember)
+async def create_family_member(body: CreateFamilyMemberRequest, user: User = Depends(get_current_user)):
+    await assert_space_member(body.space_id, user.user_id)
+    doc = {
+        "member_id": gen_id("fam"),
+        "space_id": body.space_id,
+        "name": body.name.strip(),
+        "role_id": body.role_id,
+        "photo_base64": body.photo_base64,
+        "age": body.age,
+        "birthday": body.birthday,
+        "school": body.school,
+        "allergies": body.allergies,
+        "medical_notes": body.medical_notes,
+        "notes": body.notes,
+        "created_at": now_utc(),
+    }
+    await db.family_members.insert_one(doc)
+    doc.pop("_id", None)
+    await _attach_role_name(doc)
+    return FamilyMember(**doc)
+
+
+@api_router.patch("/household/family/{member_id}", response_model=FamilyMember)
+async def update_family_member(member_id: str, body: UpdateFamilyMemberRequest, user: User = Depends(get_current_user)):
+    fm = await db.family_members.find_one({"member_id": member_id}, {"_id": 0})
+    if not fm:
+        raise HTTPException(404, "Family member not found")
+    await assert_space_member(fm["space_id"], user.user_id)
+    updates: Dict[str, Any] = {}
+    for k in ("name", "role_id", "photo_base64", "age", "birthday", "school", "allergies", "medical_notes", "notes"):
+        v = getattr(body, k)
+        if v is not None:
+            updates[k] = v
+    if updates:
+        await db.family_members.update_one({"member_id": member_id}, {"$set": updates})
+    out = await db.family_members.find_one({"member_id": member_id}, {"_id": 0})
+    await _attach_role_name(out)
+    return FamilyMember(**out)
+
+
+@api_router.delete("/household/family/{member_id}")
+async def delete_family_member(member_id: str, user: User = Depends(get_current_user)):
+    fm = await db.family_members.find_one({"member_id": member_id}, {"_id": 0})
+    if not fm:
+        raise HTTPException(404, "Family member not found")
+    await assert_space_member(fm["space_id"], user.user_id)
+    await db.family_members.delete_one({"member_id": member_id})
+    return {"ok": True}
+
+
+# ----- Staff -----
+@api_router.get("/household/staff", response_model=List[StaffMember])
+async def list_staff(space_id: str, user: User = Depends(get_current_user)):
+    await assert_space_member(space_id, user.user_id)
+    docs = await db.staff_members.find({"space_id": space_id}, {"_id": 0}).sort("created_at", 1).to_list(500)
+    out = [await _attach_role_name(d) for d in docs]
+    return [StaffMember(**d) for d in out]
+
+
+@api_router.post("/household/staff", response_model=StaffMember)
+async def create_staff(body: CreateStaffRequest, user: User = Depends(get_current_user)):
+    await assert_space_member(body.space_id, user.user_id)
+    space = await db.family_spaces.find_one({"space_id": body.space_id}, {"_id": 0})
+    doc = {
+        "staff_id": gen_id("staff"),
+        "space_id": body.space_id,
+        "name": body.name.strip(),
+        "role_id": body.role_id,
+        "photo_base64": body.photo_base64,
+        "phone": body.phone,
+        "emergency_contact": body.emergency_contact,
+        "id_number": body.id_number,
+        "salary": body.salary,
+        "pay_cycle": body.pay_cycle or "monthly",
+        "salary_currency": (body.salary_currency or (space.get("currency") if space else "USD")),
+        "off_day": body.off_day,
+        "start_date": body.start_date,
+        "notes": body.notes,
+        "user_id": None,
+        "created_at": now_utc(),
+    }
+    await db.staff_members.insert_one(doc)
+    doc.pop("_id", None)
+    await _attach_role_name(doc)
+    return StaffMember(**doc)
+
+
+@api_router.patch("/household/staff/{staff_id}", response_model=StaffMember)
+async def update_staff(staff_id: str, body: UpdateStaffRequest, user: User = Depends(get_current_user)):
+    s = await db.staff_members.find_one({"staff_id": staff_id}, {"_id": 0})
+    if not s:
+        raise HTTPException(404, "Staff member not found")
+    await assert_space_member(s["space_id"], user.user_id)
+    updates: Dict[str, Any] = {}
+    for k in ("name", "role_id", "photo_base64", "phone", "emergency_contact", "id_number", "salary", "pay_cycle", "salary_currency", "off_day", "start_date", "notes"):
+        v = getattr(body, k)
+        if v is not None:
+            updates[k] = v
+    if updates:
+        await db.staff_members.update_one({"staff_id": staff_id}, {"$set": updates})
+    out = await db.staff_members.find_one({"staff_id": staff_id}, {"_id": 0})
+    await _attach_role_name(out)
+    return StaffMember(**out)
+
+
+@api_router.delete("/household/staff/{staff_id}")
+async def delete_staff(staff_id: str, user: User = Depends(get_current_user)):
+    s = await db.staff_members.find_one({"staff_id": staff_id}, {"_id": 0})
+    if not s:
+        raise HTTPException(404, "Staff member not found")
+    await assert_space_member(s["space_id"], user.user_id)
+    await db.staff_members.delete_one({"staff_id": staff_id})
+    return {"ok": True}
+
+
+# ----- Handbook -----
+@api_router.get("/household/handbook", response_model=List[HandbookEntry])
+async def list_handbook(space_id: str, user: User = Depends(get_current_user)):
+    await assert_space_member(space_id, user.user_id)
+    docs = await db.handbook_entries.find({"space_id": space_id}, {"_id": 0}).sort([("sort", 1), ("created_at", 1)]).to_list(500)
+    return [HandbookEntry(**d) for d in docs]
+
+
+@api_router.post("/household/handbook", response_model=HandbookEntry)
+async def create_handbook(body: CreateHandbookEntryRequest, user: User = Depends(get_current_user)):
+    await assert_space_member(body.space_id, user.user_id)
+    now = now_utc()
+    doc = {
+        "entry_id": gen_id("hb"),
+        "space_id": body.space_id,
+        "title": body.title.strip(),
+        "body": body.body,
+        "icon": body.icon or "BookOpen",
+        "color": body.color or "mint",
+        "sort": body.sort or 0,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.handbook_entries.insert_one(doc)
+    doc.pop("_id", None)
+    return HandbookEntry(**doc)
+
+
+@api_router.patch("/household/handbook/{entry_id}", response_model=HandbookEntry)
+async def update_handbook(entry_id: str, body: UpdateHandbookEntryRequest, user: User = Depends(get_current_user)):
+    e = await db.handbook_entries.find_one({"entry_id": entry_id}, {"_id": 0})
+    if not e:
+        raise HTTPException(404, "Handbook entry not found")
+    await assert_space_member(e["space_id"], user.user_id)
+    updates: Dict[str, Any] = {}
+    for k in ("title", "body", "icon", "color", "sort"):
+        v = getattr(body, k)
+        if v is not None:
+            updates[k] = v
+    if updates:
+        updates["updated_at"] = now_utc()
+        await db.handbook_entries.update_one({"entry_id": entry_id}, {"$set": updates})
+    out = await db.handbook_entries.find_one({"entry_id": entry_id}, {"_id": 0})
+    return HandbookEntry(**out)
+
+
+@api_router.delete("/household/handbook/{entry_id}")
+async def delete_handbook(entry_id: str, user: User = Depends(get_current_user)):
+    e = await db.handbook_entries.find_one({"entry_id": entry_id}, {"_id": 0})
+    if not e:
+        raise HTTPException(404, "Handbook entry not found")
+    await assert_space_member(e["space_id"], user.user_id)
+    await db.handbook_entries.delete_one({"entry_id": entry_id})
+    return {"ok": True}
 
 
 # =========================

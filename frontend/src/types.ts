@@ -14,7 +14,69 @@ export type FamilySpace = {
   member_ids: string[];
   invite_code: string;
   currency?: string;
+  space_type?: 'roommates' | 'household';
   created_at: string;
+};
+
+export type HouseholdRole = {
+  role_id: string;
+  space_id: string;
+  key: string;
+  name: string;
+  icon: string;
+  color: string;
+  category: 'family' | 'staff';
+  is_default: boolean;
+  perms: Record<string, any>;
+  created_at: string;
+};
+
+export type FamilyMember = {
+  member_id: string;
+  space_id: string;
+  name: string;
+  role_id?: string | null;
+  role_name?: string | null;
+  photo_base64?: string | null;
+  age?: number | null;
+  birthday?: string | null;
+  school?: string | null;
+  allergies?: string | null;
+  medical_notes?: string | null;
+  notes?: string | null;
+  created_at: string;
+};
+
+export type StaffMember = {
+  staff_id: string;
+  space_id: string;
+  name: string;
+  role_id?: string | null;
+  role_name?: string | null;
+  photo_base64?: string | null;
+  phone?: string | null;
+  emergency_contact?: string | null;
+  id_number?: string | null;
+  salary?: number | null;
+  pay_cycle: 'monthly' | 'weekly' | 'daily';
+  salary_currency?: string | null;
+  off_day?: string | null;
+  start_date?: string | null;
+  notes?: string | null;
+  user_id?: string | null;
+  created_at: string;
+};
+
+export type HandbookEntry = {
+  entry_id: string;
+  space_id: string;
+  title: string;
+  body: string;
+  icon: string;
+  color: string;
+  sort: number;
+  created_at: string;
+  updated_at: string;
 };
 
 export type CategoryField = {

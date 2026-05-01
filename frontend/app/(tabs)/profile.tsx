@@ -60,6 +60,28 @@ export default function Profile() {
     } finally { setSavingCur(false); }
   };
 
+  const flipSpaceType = () => {
+    if (!activeSpace) return;
+    const next = activeSpace.space_type === 'household' ? 'roommates' : 'household';
+    Alert.alert(
+      next === 'household' ? 'Switch to Household?' : 'Switch to Roommates?',
+      next === 'household'
+        ? 'You\'ll see a Household tab to manage family + staff (maids, drivers, nannies), with roles & a house handbook.'
+        : 'The Household tab will be hidden. Your staff/family/handbook data is kept and will return if you switch back.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Switch', onPress: async () => {
+            try {
+              await api.patch(`/spaces/${activeSpace.space_id}`, { space_type: next });
+              await refreshSpaces?.();
+            } catch (e: any) { Alert.alert('Error', e?.message || ''); }
+          }
+        },
+      ],
+    );
+  };
+
   const currentCur = getCurrency(activeSpace?.currency);
 
   return (
@@ -132,6 +154,19 @@ export default function Profile() {
             </View>
           </>
         )}
+
+        <TouchableOpacity
+          style={[styles.card, styles.rowBtn]}
+          onPress={flipSpaceType}
+          testID="profile-space-type"
+        >
+          <Icon name={activeSpace?.space_type === 'household' ? 'Home' : 'Users'} size={20} color={colors.textMain} />
+          <Text style={styles.rowBtnTxt}>Space type</Text>
+          <Text style={{ color: colors.textMuted, fontWeight: '700', fontSize: 13 }}>
+            {activeSpace?.space_type === 'household' ? 'Household' : 'Roommates'}
+          </Text>
+          <Icon name="ChevronRight" size={18} color={colors.textMuted} />
+        </TouchableOpacity>
 
         <TouchableOpacity
           style={[styles.card, styles.rowBtn]}

@@ -13,6 +13,7 @@ export default function SpaceSetup() {
   const router = useRouter();
   const { createSpace, joinSpace, logout, spaces } = useAuth();
   const [mode, setMode] = useState<'create' | 'join'>('create');
+  const [step, setStep] = useState<'form' | 'pickType'>('form');
   const [spaceName, setSpaceName] = useState('');
   const [inviteCode, setInviteCode] = useState('');
   const [loading, setLoading] = useState(false);
@@ -21,36 +22,42 @@ export default function SpaceSetup() {
   const hasExistingSpace = spaces.length > 0;
 
   const goBack = () => {
+    if (step === 'pickType') {
+      setStep('form');
+      return;
+    }
     if (hasExistingSpace) {
       router.back();
     }
   };
 
-  const onSubmit = async () => {
+  const onContinue = () => {
     setErr(null);
-    setLoading(true);
-    try {
-      if (mode === 'create') {
-        if (!spaceName.trim()) {
-          setErr('Give your home a name');
-          setLoading(false);
-          return;
-        }
-        await createSpace(spaceName.trim());
-      } else {
-        if (!inviteCode.trim()) {
-          setErr('Enter an invite code');
-          setLoading(false);
-          return;
-        }
-        await joinSpace(inviteCode.trim());
-      }
-      router.replace('/(tabs)/home');
-    } catch (e: any) {
-      setErr(e?.message || 'Something went wrong');
-    } finally {
-      setLoading(false);
+    if (mode === 'join') {
+      if (!inviteCode.trim()) { setErr('Enter an invite code'); return; }
+      onJoin();
+      return;
     }
+    if (!spaceName.trim()) { setErr('Give your home a name'); return; }
+    setStep('pickType');
+  };
+
+  const onJoin = async () => {
+    setErr(null); setLoading(true);
+    try {
+      await joinSpace(inviteCode.trim());
+      router.replace('/(tabs)/home');
+    } catch (e: any) { setErr(e?.message || 'Something went wrong'); }
+    finally { setLoading(false); }
+  };
+
+  const onCreate = async (space_type: 'roommates' | 'household') => {
+    setErr(null); setLoading(true);
+    try {
+      await createSpace(spaceName.trim(), { space_type });
+      router.replace('/(tabs)/home');
+    } catch (e: any) { setErr(e?.message || 'Something went wrong'); }
+    finally { setLoading(false); }
   };
 
   return (
@@ -77,29 +84,33 @@ export default function SpaceSetup() {
             )}
           </View>
 
-          <Text style={styles.title}>Set up your space</Text>
+          <Text style={styles.title}>{step === 'pickType' ? 'What kind of space?' : 'Set up your space'}</Text>
           <Text style={styles.subtitle}>
-            A space is a shared home — pantry, toiletries, budget — synced with the people you live with.
+            {step === 'pickType'
+              ? `For "${spaceName}", pick the experience that fits best. You can change this later.`
+              : 'A space is a shared home — pantry, toiletries, budget — synced with the people you live with.'}
           </Text>
 
-          <View style={styles.tabRow}>
-            <TouchableOpacity
-              style={[styles.tab, mode === 'create' && styles.tabActive]}
-              onPress={() => setMode('create')}
-              testID="space-setup-tab-create"
-            >
-              <Text style={[styles.tabTxt, mode === 'create' && styles.tabTxtActive]}>Create</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.tab, mode === 'join' && styles.tabActive]}
-              onPress={() => setMode('join')}
-              testID="space-setup-tab-join"
-            >
-              <Text style={[styles.tabTxt, mode === 'join' && styles.tabTxtActive]}>Join</Text>
-            </TouchableOpacity>
-          </View>
+          {step === 'form' && (
+            <View style={styles.tabRow}>
+              <TouchableOpacity
+                style={[styles.tab, mode === 'create' && styles.tabActive]}
+                onPress={() => setMode('create')}
+                testID="space-setup-tab-create"
+              >
+                <Text style={[styles.tabTxt, mode === 'create' && styles.tabTxtActive]}>Create</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.tab, mode === 'join' && styles.tabActive]}
+                onPress={() => setMode('join')}
+                testID="space-setup-tab-join"
+              >
+                <Text style={[styles.tabTxt, mode === 'join' && styles.tabTxtActive]}>Join</Text>
+              </TouchableOpacity>
+            </View>
+          )}
 
-          {mode === 'create' ? (
+          {step === 'form' && mode === 'create' && (
             <View style={styles.field}>
               <Text style={styles.label}>Home name</Text>
               <TextInput
@@ -112,7 +123,8 @@ export default function SpaceSetup() {
               />
               <Text style={styles.hint}>We'll create starter categories (Food, Skincare, Closet...) you can customize.</Text>
             </View>
-          ) : (
+          )}
+          {step === 'form' && mode === 'join' && (
             <View style={styles.field}>
               <Text style={styles.label}>Invite code</Text>
               <TextInput
@@ -129,19 +141,62 @@ export default function SpaceSetup() {
             </View>
           )}
 
+          {step === 'pickType' && (
+            <View style={{ gap: spacing.md, marginTop: spacing.sm }}>
+              <TouchableOpacity
+                style={styles.typeCard}
+                onPress={() => onCreate('roommates')}
+                disabled={loading}
+                testID="space-setup-type-roommates"
+                activeOpacity={0.85}
+              >
+                <View style={[styles.typeIcon, { backgroundColor: '#FFE4DC' }]}>
+                  <Icon name="Users" color="#D45B43" size={28} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.typeTitle}>Roommates</Text>
+                  <Text style={styles.typeSub}>Shared rent + groceries with friends or housemates. Focus on splitting costs and shared inventory.</Text>
+                </View>
+                <Icon name="ChevronRight" size={18} color={colors.textMuted} />
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.typeCard}
+                onPress={() => onCreate('household')}
+                disabled={loading}
+                testID="space-setup-type-household"
+                activeOpacity={0.85}
+              >
+                <View style={[styles.typeIcon, { backgroundColor: '#E8F0FA' }]}>
+                  <Icon name="Home" color="#5079A8" size={28} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.typeTitle}>Household</Text>
+                  <Text style={styles.typeSub}>You manage a home with family + helpers (maids, drivers, nannies). Adds Family directory, Staff roster, Roles & Handbook.</Text>
+                </View>
+                <Icon name="ChevronRight" size={18} color={colors.textMuted} />
+              </TouchableOpacity>
+            </View>
+          )}
+
           {err && <Text style={styles.error} testID="space-setup-error">{err}</Text>}
 
-          <TouchableOpacity
-            style={[styles.primaryBtn, loading && { opacity: 0.6 }]}
-            onPress={onSubmit}
-            disabled={loading}
-            activeOpacity={0.85}
-            testID="space-setup-submit"
-          >
-            <Text style={styles.primaryText}>
-              {loading ? 'Please wait...' : mode === 'create' ? 'Create space' : 'Join space'}
-            </Text>
-          </TouchableOpacity>
+          {step === 'form' && (
+            <TouchableOpacity
+              style={[styles.primaryBtn, loading && { opacity: 0.6 }]}
+              onPress={onContinue}
+              disabled={loading}
+              activeOpacity={0.85}
+              testID="space-setup-submit"
+            >
+              <Text style={styles.primaryText}>
+                {loading ? 'Please wait...' : mode === 'create' ? 'Continue' : 'Join space'}
+              </Text>
+            </TouchableOpacity>
+          )}
+          {step === 'pickType' && loading && (
+            <Text style={[styles.hint, { textAlign: 'center', marginTop: spacing.md }]}>Creating space…</Text>
+          )}
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -193,4 +248,13 @@ const styles = StyleSheet.create({
     ...shadows.button,
   },
   primaryText: { color: '#fff', fontWeight: '800', fontSize: 15 },
+  typeCard: {
+    flexDirection: 'row', alignItems: 'center', gap: 14,
+    backgroundColor: colors.surface, borderRadius: radius.lg,
+    padding: spacing.md, borderWidth: 1, borderColor: colors.border,
+    ...shadows.card,
+  },
+  typeIcon: { width: 56, height: 56, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
+  typeTitle: { fontSize: 16, fontWeight: '800', color: colors.textMain },
+  typeSub: { fontSize: 12, color: colors.textMuted, marginTop: 4, lineHeight: 18 },
 });

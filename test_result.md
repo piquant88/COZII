@@ -113,6 +113,148 @@ user_problem_statement: |
        editing resets signatures so everyone re-agrees.
 
 backend:
+  - task: "Space type field (POST/PATCH/GET /api/spaces)"
+    implemented: true
+    working: false
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: false
+        agent: "testing"
+        comment: |
+          CRITICAL — POST /api/spaces and PATCH /api/spaces/{id} are completely broken
+          (both return 500 Internal Server Error on every call, including payloads that
+          don't mention space_type).
+
+          Root cause: `CreateSpaceRequest` (server.py:133-135) and `UpdateSpaceRequest`
+          (server.py:138-140) Pydantic models are missing the `space_type` field, but
+          the handlers reference `body.space_type`:
+            - create_space line 426:  `stype = (body.space_type or "roommates")...`
+            - update_space line 517:  `if body.space_type is not None:`
+          In Pydantic v2, accessing an undeclared attribute on a BaseModel instance
+          raises `AttributeError: 'CreateSpaceRequest' object has no attribute
+          'space_type'`. Confirmed in /var/log/supervisor/backend.err.log.
+
+          Additional issue: `FamilySpace` response model (server.py:123-130) also has no
+          `space_type` field, so every GET /spaces entry is missing `space_type` (even
+          the fallback-to-"roommates" rewrite on line 527 is stripped by response_model
+          serialisation).
+
+          Fix required in main agent code (3 places):
+            1. Add `space_type: str = "roommates"` to CreateSpaceRequest
+            2. Add `space_type: Optional[str] = None` to UpdateSpaceRequest
+            3. Add `space_type: str = "roommates"` to FamilySpace
+
+          Test output (4 fails):
+            FAIL POST /spaces {space_type: household} -> 500
+            FAIL POST /spaces (no space_type) defaults to roommates -> 500
+            FAIL PATCH /spaces {space_type: HOUSEHOLD} -> skipped (no space id, PATCH also 500 on direct curl)
+            FAIL GET /spaces each entry has space_type -> space_type key missing
+
+          Because POST is broken, cannot create a fresh "household" space with currency=IDR
+          for the rest of the tests — had to fall back to an existing USD space which is
+          owned by test@cozii.app.
+
+  - task: "Household Roles (/api/household/roles)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          All 6 scenarios pass against the live preview URL:
+            - GET on a space auto-seeds 10 defaults (Owner, Spouse, Child, Parent, Maid,
+              Driver, Nanny, Cook, Gardener, Security), all is_default=true
+            - POST custom role {name:"Tutor", icon:"BookOpen", color:"lavender",
+              category:"staff"} returns is_default=false
+            - PATCH role updates name/icon/color
+            - DELETE on a default role returns 400
+            - DELETE on custom role returns 200 and disappears from GET
+            - Non-member GET returns 403
+
+  - task: "Household Family members (/api/household/family)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          All 5 scenarios pass:
+            - POST {name:"Maya", role_id:<Child>, age:8, school:"Bali Primary",
+              allergies:"peanuts"} returns FamilyMember with role_name="Child"
+            - GET lists it with role_name resolved
+            - PATCH name + photo_base64 persisted
+            - DELETE removes (GET no longer returns it)
+            - Non-member GET returns 403
+
+  - task: "Household Staff (/api/household/staff)"
+    implemented: true
+    working: false
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: false
+        agent: "testing"
+        comment: |
+          4/5 scenarios pass, but salary_currency default is broken.
+
+          POST /household/staff without salary_currency returns `salary_currency: null`
+          instead of defaulting to the space's currency. Verified via curl:
+            Space space_13322312d867476a has currency="USD" (confirmed via GET /spaces).
+            POST /household/staff {name,salary,pay_cycle,off_day} on that space returns
+            `"salary_currency": null`. Expected: `"USD"` (or `"IDR"` for a household
+            space using that currency).
+
+          The line looks correct:
+            server.py:1927
+            "salary_currency": (body.salary_currency or (space.get("currency") if space else "USD"))
+          but the returned value is null. Main agent should debug whether `space` is
+          actually being fetched (the `assert_space_member` call happens before the
+          find_one, and returns the space doc — but the new find_one here could be
+          returning None if `body.space_id` is ever re-assigned or projected oddly). A
+          safer fix is to re-use the dict returned by `assert_space_member`:
+
+            space = await assert_space_member(body.space_id, user.user_id)
+            ...
+            "salary_currency": body.salary_currency or space.get("currency") or "USD",
+
+          Other staff flows pass:
+            - GET list returns new staff with role_name resolved
+            - PATCH phone + notes updates correctly
+            - DELETE removes it
+            - Non-member GET returns 403
+
+  - task: "Household Handbook (/api/household/handbook)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          All 5 scenarios pass:
+            - POST {title:"Wifi", body:"Network:...\nPassword:12345", icon:"Star",
+              color:"sage"} returns HandbookEntry with sort=0
+            - GET list includes the entry (sorted by sort, created_at)
+            - PATCH title/body changes `updated_at` (confirmed before != after)
+            - DELETE removes it
+            - Non-member GET returns 403
+
   - task: "Itemized balance breakdown endpoint"
     implemented: true
     working: true
@@ -286,7 +428,9 @@ metadata:
   run_ui: false
 
 test_plan:
-  current_focus: []
+  current_focus:
+    - "Space type field (POST/PATCH/GET /api/spaces)"
+    - "Household Staff (/api/household/staff)"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -350,6 +494,54 @@ agent_communication:
       New-feature backend test run (2026-05-01) via /app/backend_test.py — 47/47 PASS.
       Covers:
         1) Currency on Space + PATCH /api/spaces/{space_id}
+  - agent: "testing"
+    message: |
+      Household Phase 1 backend testing complete (2026-05-01). 20/24 PASS.
+
+      ❌ CRITICAL — Space type field (POST /api/spaces and PATCH /api/spaces) is
+         completely broken: every request returns 500 Internal Server Error.
+         Root cause: `CreateSpaceRequest` and `UpdateSpaceRequest` Pydantic models
+         are missing the `space_type` field, but handlers at server.py:426 and :517
+         access `body.space_type`, raising `AttributeError: 'CreateSpaceRequest'
+         object has no attribute 'space_type'`. Additionally `FamilySpace` response
+         model is missing `space_type`, so GET /spaces entries never include it.
+
+         Fix (3 model additions, no logic changes):
+           class CreateSpaceRequest:   space_type: str = "roommates"
+           class UpdateSpaceRequest:   space_type: Optional[str] = None
+           class FamilySpace:          space_type: str = "roommates"
+
+         This blocks the ability to create new spaces of any kind right now, not
+         just household ones. It is a regression on existing /spaces behaviour.
+
+      ❌ Staff salary_currency default is null, not space.currency.
+         POST /household/staff without salary_currency returns
+         `"salary_currency": null` on a space whose currency is "USD".
+         Reproduction (curl) shown in task status_history. Suggested fix:
+         reuse the dict returned by `assert_space_member` instead of a second
+         find_one, and guard against None currency:
+           space = await assert_space_member(body.space_id, user.user_id)
+           ...
+           "salary_currency": body.salary_currency or space.get("currency") or "USD",
+
+      ✅ Roles (/api/household/roles) — 6/6 scenarios pass (auto-seed of 10
+         defaults, POST custom, PATCH, DELETE default→400, DELETE custom→200,
+         non-member→403).
+      ✅ Family (/api/household/family) — 5/5 scenarios pass (create with
+         role_name resolved to "Child", list, PATCH name+photo_base64, DELETE,
+         non-member→403).
+      ✅ Handbook (/api/household/handbook) — 5/5 scenarios pass (POST with
+         sort=0, GET list, PATCH changes updated_at, DELETE, non-member→403).
+      ✅ Staff (/api/household/staff) — 4/5 scenarios pass (GET with role_name
+         "Maid", PATCH phone+notes, DELETE, non-member→403). Only salary_currency
+         default failed (see above).
+
+      NOTE: Because POST /spaces is broken I could not create a fresh household
+      space with currency=IDR; the household tests were run against the existing
+      USD space owned by test@cozii.app (space_13322312d867476a). Once POST/PATCH
+      /spaces are fixed, the review test will be able to verify the IDR default
+      for salary_currency end-to-end.
+
            ✅ POST /spaces with currency="CAD" → response currency "CAD"
            ✅ POST /spaces without currency → defaults to "USD"
            ✅ PATCH /spaces {currency:"idr"} → normalized to "IDR"

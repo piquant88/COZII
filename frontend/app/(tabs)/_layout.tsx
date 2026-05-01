@@ -5,18 +5,29 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { colors, radius, shadows } from '../../src/theme';
 import { Icon } from '../../src/Icon';
+import { useAuth } from '../../src/AuthContext';
 
 function CustomTabBar({ state, navigation }: any) {
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const { activeSpace } = useAuth();
+  const isHousehold = activeSpace?.space_type === 'household';
 
-  const tabs = [
-    { name: 'home', label: 'Home', icon: 'Home' },
-    { name: 'inventory', label: 'Inventory', icon: 'Package' },
-    { name: 'scan', label: 'Scan', icon: 'Camera', center: true },
-    { name: 'finance', label: 'Finance', icon: 'PieChart' },
-    { name: 'profile', label: 'Profile', icon: 'User' },
-  ];
+  const tabs = isHousehold
+    ? [
+        { name: 'home', label: 'Home', icon: 'Home' },
+        { name: 'inventory', label: 'Inventory', icon: 'Package' },
+        { name: 'household', label: 'Household', icon: 'Users', center: true },
+        { name: 'finance', label: 'Finance', icon: 'PieChart' },
+        { name: 'profile', label: 'Profile', icon: 'User' },
+      ]
+    : [
+        { name: 'home', label: 'Home', icon: 'Home' },
+        { name: 'inventory', label: 'Inventory', icon: 'Package' },
+        { name: 'scan', label: 'Scan', icon: 'Camera', center: true },
+        { name: 'finance', label: 'Finance', icon: 'PieChart' },
+        { name: 'profile', label: 'Profile', icon: 'User' },
+      ];
 
   return (
     <View
@@ -32,6 +43,10 @@ function CustomTabBar({ state, navigation }: any) {
           const onPress = () => {
             if (t.name === 'scan') {
               router.push('/scan-receipt');
+              return;
+            }
+            if (t.name === 'household') {
+              router.push('/household');
               return;
             }
             const event = navigation.emit({ type: 'tabPress', target: state.routes.find((r: any) => r.name === t.name)?.key, canPreventDefault: true });
@@ -81,6 +96,7 @@ export default function TabsLayout() {
       <Tabs.Screen name="home" options={{ title: 'Home' }} />
       <Tabs.Screen name="inventory" options={{ title: 'Inventory' }} />
       <Tabs.Screen name="scan" options={{ title: 'Scan' }} />
+      <Tabs.Screen name="household" options={{ title: 'Household' }} />
       <Tabs.Screen name="finance" options={{ title: 'Finance' }} />
       <Tabs.Screen name="profile" options={{ title: 'Profile' }} />
     </Tabs>

@@ -1,404 +1,444 @@
 """
-Cozii backend test suite — focused on NEW additions:
-  1. Currency on Space + PATCH /api/spaces/{space_id}
-  2. GET /api/reports/finance (totals/by_category/by_member/daily/monthly/top_items/all_items/bills/settlements/insights)
-  3. Smoke tests for existing endpoints (auth/login, spaces, categories, items, bills, agreement, balance-details, balances)
+Cozii Household Phase 1 Backend Tests.
 
-To seed items with specific created_at dates (today / 2d ago / 5d ago) we
-connect to MongoDB directly (read MONGO_URL/DB_NAME from /app/backend/.env)
-and overwrite created_at AFTER the item was created via the API.
+Focus: new endpoints only.
+- Space type field (POST/PATCH/GET /api/spaces)
+- Roles      /api/household/roles
+- Family     /api/household/family
+- Staff      /api/household/staff
+- Handbook   /api/household/handbook
 """
 import os
-import sys
 import time
 import uuid
+import json
 import requests
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
 
-BASE_URL = "https://family-wallet-21.preview.emergentagent.com/api"
+BASE = "https://family-wallet-21.preview.emergentagent.com/api"
 
-# Load mongo creds from backend .env
-BACKEND_ENV = Path("/app/backend/.env")
-env_vars = {}
-for line in BACKEND_ENV.read_text().splitlines():
-    if "=" in line and not line.strip().startswith("#"):
-        k, v = line.split("=", 1)
-        env_vars[k.strip()] = v.strip().strip('"').strip("'")
+PRIMARY_EMAIL = "test@cozii.app"
+PRIMARY_PASSWORD = "test1234"
 
-MONGO_URL = env_vars.get("MONGO_URL", "mongodb://localhost:27017")
-DB_NAME = env_vars.get("DB_NAME", "test_database")
 
-try:
-    from pymongo import MongoClient
-    mongo = MongoClient(MONGO_URL)
-    mdb = mongo[DB_NAME]
-    MONGO_OK = True
-except Exception as e:
-    print(f"WARN: pymongo not available: {e}")
-    MONGO_OK = False
+def _auth_header(token):
+    return {"Authorization": f"Bearer {token}"}
+
+
+def login(email, password):
+    r = requests.post(f"{BASE}/auth/login",
+                      json={"email": email, "password": password}, timeout=30)
+    r.raise_for_status()
+    return r.json()["token"], r.json()["user"]
+
+
+def register(email, password, name):
+    r = requests.post(f"{BASE}/auth/register",
+                      json={"email": email, "password": password, "name": name},
+                      timeout=30)
+    r.raise_for_status()
+    return r.json()["token"], r.json()["user"]
+
 
 results = []
 
 
-def log(name, ok, detail=""):
-    print(f"[{'PASS' if ok else 'FAIL'}] {name}{(' - ' + detail) if detail else ''}")
-    results.append((name, ok, detail))
+def rec(section, name, ok, detail=""):
+    status = "PASS" if ok else "FAIL"
+    results.append((section, name, ok, detail))
+    print(f"[{status}] [{section}] {name}  {detail if not ok else ''}")
 
 
-def h(token):
-    return {"Authorization": f"Bearer {token}"}
-
-
-def register_or_login(email, password, name):
-    r = requests.post(f"{BASE_URL}/auth/register", json={"email": email, "password": password, "name": name})
-    if r.status_code == 409:
-        r = requests.post(f"{BASE_URL}/auth/login", json={"email": email, "password": password})
+# -------- 1. Space type field --------
+def test_space_type(token):
+    S = "SpaceType"
+    r = requests.post(f"{BASE}/spaces",
+                      headers=_auth_header(token),
+                      json={"name": "Big Home", "currency": "IDR", "space_type": "household"},
+                      timeout=30)
     if r.status_code != 200:
-        raise RuntimeError(f"auth failed for {email}: {r.status_code} {r.text}")
-    return r.json()
-
-
-def test_login_primary():
-    # Section 3 smoke: existing /auth/login with seeded creds
-    r = requests.post(f"{BASE_URL}/auth/login", json={"email": "test@cozii.app", "password": "test1234"})
-    if r.status_code == 200:
-        log("auth/login (seeded test@cozii.app)", True)
-        return r.json()
+        rec(S, "POST /spaces {space_type: household}", False,
+            f"status={r.status_code} body={r.text[:200]}")
+        household_space_id = None
     else:
-        # try to register if missing
-        r2 = requests.post(f"{BASE_URL}/auth/register", json={"email": "test@cozii.app", "password": "test1234", "name": "Test User"})
-        if r2.status_code == 200:
-            log("auth/login (seeded test@cozii.app) — created", True)
-            return r2.json()
-        log("auth/login (seeded test@cozii.app)", False, f"login {r.status_code} / register {r2.status_code}")
+        body = r.json()
+        ok = body.get("space_type") == "household" and body.get("currency") == "IDR"
+        rec(S, "POST /spaces {space_type: household}", ok, f"body={body}")
+        household_space_id = body.get("space_id")
+
+    r = requests.post(f"{BASE}/spaces",
+                      headers=_auth_header(token),
+                      json={"name": "Default Space " + uuid.uuid4().hex[:4]},
+                      timeout=30)
+    default_space_id = None
+    if r.status_code != 200:
+        rec(S, "POST /spaces (no space_type) defaults to roommates", False,
+            f"status={r.status_code} body={r.text[:200]}")
+    else:
+        body = r.json()
+        rec(S, "POST /spaces (no space_type) defaults to roommates",
+            body.get("space_type") == "roommates",
+            f"space_type={body.get('space_type')}")
+        default_space_id = body.get("space_id")
+
+    target_id = household_space_id or default_space_id
+    if target_id:
+        r = requests.patch(f"{BASE}/spaces/{target_id}",
+                           headers=_auth_header(token),
+                           json={"space_type": "HOUSEHOLD"}, timeout=30)
+        if r.status_code != 200:
+            rec(S, "PATCH /spaces {space_type: HOUSEHOLD} -> 'household'", False,
+                f"status={r.status_code} body={r.text[:200]}")
+        else:
+            body = r.json()
+            rec(S, "PATCH /spaces {space_type: HOUSEHOLD} -> 'household'",
+                body.get("space_type") == "household",
+                f"space_type={body.get('space_type')}")
+
+        before_r = requests.get(f"{BASE}/spaces", headers=_auth_header(token), timeout=30)
+        before_val = None
+        if before_r.status_code == 200:
+            for s in before_r.json():
+                if s["space_id"] == target_id:
+                    before_val = s.get("space_type")
+                    break
+        r = requests.patch(f"{BASE}/spaces/{target_id}",
+                           headers=_auth_header(token),
+                           json={"space_type": "foo"}, timeout=30)
+        if r.status_code != 200:
+            rec(S, "PATCH /spaces invalid space_type ignored", False,
+                f"status={r.status_code} body={r.text[:200]}")
+        else:
+            body = r.json()
+            rec(S, "PATCH /spaces invalid space_type ignored",
+                body.get("space_type") == before_val,
+                f"before={before_val} after={body.get('space_type')}")
+
+    r = requests.get(f"{BASE}/spaces", headers=_auth_header(token), timeout=30)
+    if r.status_code != 200:
+        rec(S, "GET /spaces each entry has space_type", False,
+            f"status={r.status_code}")
+    else:
+        spaces = r.json()
+        missing = [s["space_id"] for s in spaces if "space_type" not in s]
+        rec(S, "GET /spaces each entry has space_type",
+            len(missing) == 0 and len(spaces) > 0,
+            f"missing in: {missing} count={len(spaces)}")
+
+    return household_space_id
+
+
+def get_or_make_household_space(token):
+    r = requests.get(f"{BASE}/spaces", headers=_auth_header(token), timeout=30)
+    if r.status_code == 200 and r.json():
+        spaces = r.json()
+        for s in spaces:
+            if s.get("space_type") == "household":
+                return s["space_id"], s.get("currency", "USD")
+        s = spaces[0]
+        return s["space_id"], s.get("currency", "USD")
+    return None, None
+
+
+def test_roles(token, space_id, non_member_token):
+    S = "Roles"
+
+    r = requests.get(f"{BASE}/household/roles",
+                     headers=_auth_header(token),
+                     params={"space_id": space_id}, timeout=30)
+    if r.status_code != 200:
+        rec(S, "GET roles auto-seeds 10 defaults", False,
+            f"status={r.status_code} body={r.text[:200]}")
         return None
+    roles = r.json()
+    expected = {"Owner", "Spouse", "Child", "Parent", "Maid", "Driver",
+                "Nanny", "Cook", "Gardener", "Security"}
+    names = {r_["name"] for r_ in roles}
+    ok_default = expected.issubset(names) and all(
+        r_["is_default"] for r_ in roles if r_["name"] in expected)
+    rec(S, "GET roles auto-seeds 10 defaults (is_default=true)",
+        ok_default, f"names={names}")
 
+    child_role_id = next((r_["role_id"] for r_ in roles if r_["name"] == "Child"), None)
+    maid_role_id = next((r_["role_id"] for r_ in roles if r_["name"] == "Maid"), None)
+    owner_role_id = next((r_["role_id"] for r_ in roles if r_["name"] == "Owner"), None)
 
-# ==============================================================
-# 1. Currency on Space + PATCH /api/spaces/{space_id}
-# ==============================================================
-def test_currency_and_patch(tok_a, user_a, tok_c, user_c):
-    # POST /spaces with currency: CAD
-    r = requests.post(f"{BASE_URL}/spaces", json={"name": "Maple House", "currency": "CAD"}, headers=h(tok_a))
-    ok1 = r.status_code == 200 and r.json().get("currency") == "CAD"
-    log("POST /spaces with currency=CAD returns currency=CAD", ok1, "" if ok1 else r.text)
-    space_cad = r.json() if r.status_code == 200 else None
-
-    # POST /spaces without currency -> default USD
-    r2 = requests.post(f"{BASE_URL}/spaces", json={"name": "Default Place"}, headers=h(tok_a))
-    ok2 = r2.status_code == 200 and r2.json().get("currency") == "USD"
-    log("POST /spaces without currency defaults to USD", ok2, "" if ok2 else r2.text)
-    space_def = r2.json() if r2.status_code == 200 else None
-
-    # PATCH currency: "idr" -> normalize "IDR"
-    if space_cad:
-        r3 = requests.patch(f"{BASE_URL}/spaces/{space_cad['space_id']}", json={"currency": "idr"}, headers=h(tok_a))
-        ok3 = r3.status_code == 200 and r3.json().get("currency") == "IDR"
-        log("PATCH /spaces currency=idr normalizes to IDR", ok3, "" if ok3 else f"{r3.status_code} {r3.text}")
-
-        # PATCH name only; currency unchanged
-        r4 = requests.patch(f"{BASE_URL}/spaces/{space_cad['space_id']}", json={"name": "Renamed Maple"}, headers=h(tok_a))
-        ok4 = r4.status_code == 200 and r4.json().get("name") == "Renamed Maple" and r4.json().get("currency") == "IDR"
-        log("PATCH /spaces name-only keeps currency", ok4, "" if ok4 else f"{r4.status_code} {r4.text}")
-
-        # Non-member attempt -> 403
-        r5 = requests.patch(f"{BASE_URL}/spaces/{space_cad['space_id']}", json={"name": "Hacker"}, headers=h(tok_c))
-        ok5 = r5.status_code == 403
-        log("PATCH /spaces as non-member returns 403", ok5, f"got {r5.status_code}" if not ok5 else "")
-
-    # GET /spaces includes currency for every space
-    r6 = requests.get(f"{BASE_URL}/spaces", headers=h(tok_a))
-    ok6 = r6.status_code == 200 and all("currency" in s for s in r6.json())
-    log("GET /spaces includes currency on every space", ok6, "" if ok6 else r6.text[:300])
-
-    return space_cad, space_def
-
-
-# ==============================================================
-# 2. GET /api/reports/finance
-# ==============================================================
-def test_finance_report(tok_a, user_a, tok_c):
-    # Create dedicated space with currency EUR for clarity
-    r = requests.post(f"{BASE_URL}/spaces", json={"name": "Finance Lab", "currency": "EUR"}, headers=h(tok_a))
-    assert r.status_code == 200, r.text
-    space = r.json()
-    sid = space["space_id"]
-
-    # Create a category
-    rc = requests.post(
-        f"{BASE_URL}/categories",
-        json={"space_id": sid, "name": "Groceries", "icon": "ShoppingCart", "tint": "mint", "fields": []},
-        headers=h(tok_a),
-    )
-    assert rc.status_code == 200, rc.text
-    cat = rc.json()
-
-    # Create 3 items with prices 10, 20, 30
-    created_items = []
-    for idx, price in enumerate([10.0, 20.0, 30.0]):
-        name = ["Apples", "Bread", "Cheese Wheel"][idx]
-        ri = requests.post(
-            f"{BASE_URL}/items",
-            json={"space_id": sid, "category_id": cat["category_id"], "name": name, "price": price},
-            headers=h(tok_a),
-        )
-        assert ri.status_code == 200, ri.text
-        created_items.append(ri.json())
-
-    # Override created_at in Mongo: today (keep as-is), 2 days ago, 5 days ago
-    if MONGO_OK:
-        today = datetime.now(timezone.utc)
-        dates = [today, today - timedelta(days=2), today - timedelta(days=5)]
-        for it, dt in zip(created_items, dates):
-            mdb.items.update_one({"item_id": it["item_id"]}, {"$set": {"created_at": dt}})
+    r = requests.post(f"{BASE}/household/roles",
+                      headers=_auth_header(token),
+                      json={"space_id": space_id, "name": "Tutor",
+                            "icon": "BookOpen", "color": "lavender",
+                            "category": "staff"}, timeout=30)
+    if r.status_code != 200:
+        rec(S, "POST custom role Tutor", False,
+            f"status={r.status_code} body={r.text[:200]}")
+        custom_role_id = None
     else:
-        log("finance: cannot override created_at (pymongo missing) — daily test may skew", False)
+        body = r.json()
+        ok = (body.get("name") == "Tutor" and body.get("icon") == "BookOpen"
+              and body.get("color") == "lavender"
+              and body.get("category") == "staff"
+              and body.get("is_default") is False)
+        rec(S, "POST custom role Tutor (is_default=false)", ok, f"body={body}")
+        custom_role_id = body.get("role_id")
 
-    # ---- period=this_month (status smoke) ----
-    rep_tm = requests.get(f"{BASE_URL}/reports/finance", params={"space_id": sid, "period": "this_month"}, headers=h(tok_a))
-    ok_tm = rep_tm.status_code == 200
-    log("GET /reports/finance?period=this_month 200", ok_tm, "" if ok_tm else f"{rep_tm.status_code} {rep_tm.text[:300]}")
-    if not ok_tm:
+    rid_to_patch = custom_role_id or child_role_id
+    if rid_to_patch:
+        r = requests.patch(f"{BASE}/household/roles/{rid_to_patch}",
+                           headers=_auth_header(token),
+                           json={"name": "Tutor Sr", "icon": "Star",
+                                 "color": "peach"}, timeout=30)
+        if r.status_code != 200:
+            rec(S, "PATCH role updates name/icon/color", False,
+                f"status={r.status_code} body={r.text[:200]}")
+        else:
+            body = r.json()
+            ok = (body.get("name") == "Tutor Sr"
+                  and body.get("icon") == "Star"
+                  and body.get("color") == "peach")
+            rec(S, "PATCH role updates name/icon/color", ok, f"body={body}")
+
+    if owner_role_id:
+        r = requests.delete(f"{BASE}/household/roles/{owner_role_id}",
+                            headers=_auth_header(token), timeout=30)
+        rec(S, "DELETE default role returns 400",
+            r.status_code == 400, f"status={r.status_code} body={r.text[:200]}")
+
+    if custom_role_id:
+        r = requests.delete(f"{BASE}/household/roles/{custom_role_id}",
+                            headers=_auth_header(token), timeout=30)
+        ok_del = r.status_code == 200
+        r2 = requests.get(f"{BASE}/household/roles",
+                          headers=_auth_header(token),
+                          params={"space_id": space_id}, timeout=30)
+        still_there = False
+        if r2.status_code == 200:
+            still_there = any(rl["role_id"] == custom_role_id for rl in r2.json())
+        rec(S, "DELETE custom role 200 and disappears",
+            ok_del and not still_there,
+            f"del_status={r.status_code} still_there={still_there}")
+
+    r = requests.get(f"{BASE}/household/roles",
+                     headers=_auth_header(non_member_token),
+                     params={"space_id": space_id}, timeout=30)
+    rec(S, "GET roles as non-member returns 403",
+        r.status_code == 403, f"status={r.status_code}")
+
+    return {"child": child_role_id, "maid": maid_role_id}
+
+
+def test_family(token, space_id, child_role_id, non_member_token):
+    S = "Family"
+
+    r = requests.post(f"{BASE}/household/family",
+                      headers=_auth_header(token),
+                      json={"space_id": space_id, "name": "Maya",
+                            "role_id": child_role_id, "age": 8,
+                            "school": "Bali Primary",
+                            "allergies": "peanuts"}, timeout=30)
+    if r.status_code != 200:
+        rec(S, "POST family member with role_name resolved", False,
+            f"status={r.status_code} body={r.text[:200]}")
         return
-    log("finance(this_month): period_key == this_month", rep_tm.json().get("period_key") == "this_month")
+    body = r.json()
+    ok = (body.get("name") == "Maya" and body.get("age") == 8
+          and body.get("school") == "Bali Primary"
+          and body.get("allergies") == "peanuts"
+          and body.get("role_name") == "Child")
+    rec(S, "POST family with role_name resolved", ok, f"body={body}")
+    member_id = body.get("member_id")
 
-    # ---- primary shape assertions use period=ytd so all 3 backdated items fall in the window ----
-    # (items seeded at today, today-2d, today-5d may straddle month boundary if today is early in the month)
-    rep = requests.get(f"{BASE_URL}/reports/finance", params={"space_id": sid, "period": "ytd"}, headers=h(tok_a))
-    ok_status = rep.status_code == 200
-    log("GET /reports/finance?period=ytd 200", ok_status, "" if ok_status else f"{rep.status_code} {rep.text[:300]}")
-    if not ok_status:
+    r = requests.get(f"{BASE}/household/family",
+                     headers=_auth_header(token),
+                     params={"space_id": space_id}, timeout=30)
+    ok = (r.status_code == 200
+          and any(m["member_id"] == member_id and m.get("role_name") == "Child"
+                  for m in (r.json() if r.status_code == 200 else [])))
+    rec(S, "GET family list returns new member with role_name", ok,
+        f"status={r.status_code}")
+
+    photo = "data:image/png;base64,iVBORw0KGgo"
+    r = requests.patch(f"{BASE}/household/family/{member_id}",
+                       headers=_auth_header(token),
+                       json={"name": "Maya Chen", "photo_base64": photo},
+                       timeout=30)
+    ok = (r.status_code == 200
+          and r.json().get("name") == "Maya Chen"
+          and r.json().get("photo_base64") == photo)
+    rec(S, "PATCH family update name + photo_base64", ok,
+        f"status={r.status_code}")
+
+    r = requests.delete(f"{BASE}/household/family/{member_id}",
+                        headers=_auth_header(token), timeout=30)
+    ok_del = r.status_code == 200
+    r2 = requests.get(f"{BASE}/household/family",
+                      headers=_auth_header(token),
+                      params={"space_id": space_id}, timeout=30)
+    still = any(m["member_id"] == member_id for m in r2.json()) if r2.status_code == 200 else True
+    rec(S, "DELETE family removes it", ok_del and not still,
+        f"del_status={r.status_code} still={still}")
+
+    r = requests.get(f"{BASE}/household/family",
+                     headers=_auth_header(non_member_token),
+                     params={"space_id": space_id}, timeout=30)
+    rec(S, "GET family as non-member returns 403",
+        r.status_code == 403, f"status={r.status_code}")
+
+
+def test_staff(token, space_id, maid_role_id, space_currency, non_member_token):
+    S = "Staff"
+
+    r = requests.post(f"{BASE}/household/staff",
+                      headers=_auth_header(token),
+                      json={"space_id": space_id, "name": "Mbak Rina",
+                            "role_id": maid_role_id, "salary": 3500000,
+                            "pay_cycle": "monthly", "off_day": "Sunday"},
+                      timeout=30)
+    if r.status_code != 200:
+        rec(S, "POST staff with role + salary + off_day", False,
+            f"status={r.status_code} body={r.text[:200]}")
         return
-    body = rep.json()
+    body = r.json()
+    ok = (body.get("name") == "Mbak Rina" and body.get("salary") == 3500000
+          and body.get("pay_cycle") == "monthly"
+          and body.get("off_day") == "Sunday"
+          and body.get("role_name") == "Maid"
+          and body.get("salary_currency") == space_currency)
+    rec(S, f"POST staff (salary_currency defaults to space.currency='{space_currency}')",
+        ok, f"body={body}")
+    staff_id = body.get("staff_id")
 
-    # Shape checks
-    required_keys = ["period_key", "period_label", "start", "end", "currency",
-                     "totals", "by_category", "by_member", "daily", "monthly",
-                     "top_items", "all_items", "bills", "settlements", "insights"]
-    missing = [k for k in required_keys if k not in body]
-    log("finance: response has all required top-level keys", not missing, f"missing={missing}")
+    r = requests.get(f"{BASE}/household/staff",
+                     headers=_auth_header(token),
+                     params={"space_id": space_id}, timeout=30)
+    ok = (r.status_code == 200
+          and any(s["staff_id"] == staff_id and s.get("role_name") == "Maid"
+                  for s in (r.json() if r.status_code == 200 else [])))
+    rec(S, "GET staff list returns new staff with role_name", ok,
+        f"status={r.status_code}")
 
-    log("finance: period_key == ytd", body.get("period_key") == "ytd")
-    log("finance: currency == EUR (inherited from space)", body.get("currency") == "EUR",
-        f"got {body.get('currency')}")
+    r = requests.patch(f"{BASE}/household/staff/{staff_id}",
+                       headers=_auth_header(token),
+                       json={"phone": "+62-812-0000-1234",
+                             "notes": "Reliable, speaks English"},
+                       timeout=30)
+    ok = (r.status_code == 200
+          and r.json().get("phone") == "+62-812-0000-1234"
+          and r.json().get("notes") == "Reliable, speaks English")
+    rec(S, "PATCH staff phone + notes", ok, f"status={r.status_code}")
 
-    # Totals (all 3 items should be within this month assuming run is not in the first 5 days of month)
-    totals = body.get("totals", {})
-    totals_ok = (
-        totals.get("total") == 60
-        and totals.get("count") == 3
-        and totals.get("avg_per_item") == 20
-        and totals.get("largest") == 30
-        and totals.get("smallest") == 10
-    )
-    log("finance: totals {total:60,count:3,avg:20,largest:30,smallest:10}", totals_ok, f"got {totals}")
+    r = requests.delete(f"{BASE}/household/staff/{staff_id}",
+                        headers=_auth_header(token), timeout=30)
+    ok_del = r.status_code == 200
+    r2 = requests.get(f"{BASE}/household/staff",
+                      headers=_auth_header(token),
+                      params={"space_id": space_id}, timeout=30)
+    still = any(s["staff_id"] == staff_id for s in r2.json()) if r2.status_code == 200 else True
+    rec(S, "DELETE staff removes it", ok_del and not still,
+        f"del_status={r.status_code} still={still}")
 
-    # by_category: 1 entry, 100% pct
-    bc = body.get("by_category", [])
-    bc_ok = (
-        len(bc) == 1
-        and bc[0].get("category_id") == cat["category_id"]
-        and bc[0].get("name") == "Groceries"
-        and bc[0].get("tint") == "mint"
-        and bc[0].get("total") == 60
-        and bc[0].get("count") == 3
-        and bc[0].get("pct") == 100
-    )
-    log("finance: by_category single entry at 100%", bc_ok, f"got {bc}")
+    r = requests.get(f"{BASE}/household/staff",
+                     headers=_auth_header(non_member_token),
+                     params={"space_id": space_id}, timeout=30)
+    rec(S, "GET staff as non-member returns 403",
+        r.status_code == 403, f"status={r.status_code}")
 
-    # by_member: current user contributes 100%
-    bm = body.get("by_member", [])
-    bm_ok = (
-        len(bm) >= 1
-        and bm[0].get("user_id") == user_a["user_id"]
-        and bm[0].get("total") == 60
-        and bm[0].get("count") == 3
-        and bm[0].get("pct") == 100
-    )
-    log("finance: by_member shows current user at 100%", bm_ok, f"got {bm}")
 
-    # daily: 3 entries (one per day)
-    daily = body.get("daily", [])
-    log("finance: daily has 3 entries (one per day)", len(daily) == 3, f"got {len(daily)} entries")
+def test_handbook(token, space_id, non_member_token):
+    S = "Handbook"
 
-    # monthly: >= 1 entry
-    monthly = body.get("monthly", [])
-    log("finance: monthly has at least 1 entry", len(monthly) >= 1, f"got {len(monthly)}")
+    r = requests.post(f"{BASE}/household/handbook",
+                      headers=_auth_header(token),
+                      json={"space_id": space_id, "title": "Wifi",
+                            "body": "Network: HomeNet\nPassword: 12345",
+                            "icon": "Star", "color": "sage"}, timeout=30)
+    if r.status_code != 200:
+        rec(S, "POST handbook entry", False,
+            f"status={r.status_code} body={r.text[:200]}")
+        return
+    body = r.json()
+    ok = (body.get("title") == "Wifi"
+          and body.get("body") == "Network: HomeNet\nPassword: 12345"
+          and body.get("icon") == "Star"
+          and body.get("color") == "sage"
+          and body.get("sort") == 0)
+    rec(S, "POST handbook entry (sort defaults 0)", ok, f"body={body}")
+    entry_id = body.get("entry_id")
+    created_updated_at = body.get("updated_at")
 
-    # top_items: 3, sorted desc by price
-    ti = body.get("top_items", [])
-    ti_ok = (
-        len(ti) == 3
-        and ti[0].get("price") == 30
-        and ti[1].get("price") == 20
-        and ti[2].get("price") == 10
-        and ti[0].get("purchased_by") == user_a["name"]
-    )
-    log("finance: top_items sorted desc (30,20,10) with purchased_by", ti_ok, f"got {ti}")
+    r = requests.get(f"{BASE}/household/handbook",
+                     headers=_auth_header(token),
+                     params={"space_id": space_id}, timeout=30)
+    ok = (r.status_code == 200
+          and any(e["entry_id"] == entry_id for e in r.json()))
+    rec(S, "GET handbook list includes entry", ok,
+        f"status={r.status_code}")
 
-    # all_items: 3 with required fields
-    ai = body.get("all_items", [])
-    required_item_fields = ["item_id", "name", "category_name", "price", "quantity", "purchased_by", "created_at"]
-    ai_shape_ok = len(ai) == 3 and all(all(f in x for f in required_item_fields) for x in ai)
-    log("finance: all_items has 3 entries with required fields", ai_shape_ok,
-        f"len={len(ai)} sample_keys={list(ai[0].keys()) if ai else None}")
-
-    # bills: [] initially
-    log("finance: bills is [] initially", body.get("bills") == [], f"got {body.get('bills')}")
-
-    # settlements: [] initially
-    log("finance: settlements is [] initially", body.get("settlements") == [], f"got {body.get('settlements')}")
-
-    # insights: non-empty list; first should mention "3 purchases"
-    ins = body.get("insights", [])
-    ins_ok = isinstance(ins, list) and len(ins) >= 1 and ("3 purchases" in ins[0] or "3 " in ins[0])
-    log("finance: insights non-empty & mentions '3 purchases'", ins_ok, f"insights[0]={ins[0] if ins else None}")
-
-    # ---- Other periods smoke: last_month (should be 0 IF we had seeded items only today;
-    # but we backdated 2 items to -2d/-5d so on month boundaries they may fall into last_month.
-    # The semantic check we care about here is that period filtering is enforced:
-    # period=this_month must NOT include the -5d item. Verify by comparing ytd count vs this_month count.
-    rep2 = requests.get(f"{BASE_URL}/reports/finance", params={"space_id": sid, "period": "last_month"}, headers=h(tok_a))
-    log("finance: period=last_month 200", rep2.status_code == 200, "" if rep2.status_code == 200 else rep2.text[:200])
-
-    rep_tm2 = requests.get(f"{BASE_URL}/reports/finance", params={"space_id": sid, "period": "this_month"}, headers=h(tok_a))
-    tm_count = rep_tm2.json().get("totals", {}).get("count", -1) if rep_tm2.status_code == 200 else -1
-    # Period filtering sanity: the -5d item must NOT be in this_month (unless today >= 6th of month).
-    today_day = datetime.now(timezone.utc).day
-    if today_day >= 6:
-        filter_ok = tm_count == 3
-        note = f"today.day={today_day} expect all 3 in this_month, got {tm_count}"
-    elif today_day >= 3:
-        filter_ok = tm_count < 3  # -5d is excluded at minimum
-        note = f"today.day={today_day} expect <3 in this_month, got {tm_count}"
+    time.sleep(1.1)
+    r = requests.patch(f"{BASE}/household/handbook/{entry_id}",
+                       headers=_auth_header(token),
+                       json={"title": "Wifi (Guest)",
+                             "body": "Network: HomeNet-Guest\nPassword: guest123"},
+                       timeout=30)
+    if r.status_code != 200:
+        rec(S, "PATCH handbook title/body updates updated_at", False,
+            f"status={r.status_code} body={r.text[:200]}")
     else:
-        filter_ok = tm_count <= 1
-        note = f"today.day={today_day} expect <=1 in this_month, got {tm_count}"
-    log("finance: period filtering excludes out-of-window items", filter_ok, note)
+        body = r.json()
+        ok = (body.get("title") == "Wifi (Guest)"
+              and body.get("body") == "Network: HomeNet-Guest\nPassword: guest123"
+              and body.get("updated_at") != created_updated_at)
+        rec(S, "PATCH handbook title/body updates updated_at", ok,
+            f"before={created_updated_at} after={body.get('updated_at')}")
 
-    for p in ["last_3_months", "ytd", "all"]:
-        rp = requests.get(f"{BASE_URL}/reports/finance", params={"space_id": sid, "period": p}, headers=h(tok_a))
-        log(f"finance: period={p} 200", rp.status_code == 200, "" if rp.status_code == 200 else rp.text[:200])
+    r = requests.delete(f"{BASE}/household/handbook/{entry_id}",
+                        headers=_auth_header(token), timeout=30)
+    ok_del = r.status_code == 200
+    r2 = requests.get(f"{BASE}/household/handbook",
+                      headers=_auth_header(token),
+                      params={"space_id": space_id}, timeout=30)
+    still = any(e["entry_id"] == entry_id for e in r2.json()) if r2.status_code == 200 else True
+    rec(S, "DELETE handbook removes it", ok_del and not still,
+        f"del_status={r.status_code} still={still}")
 
-    # Non-member -> 403
-    r403 = requests.get(f"{BASE_URL}/reports/finance", params={"space_id": sid, "period": "this_month"}, headers=h(tok_c))
-    log("finance: non-member returns 403", r403.status_code == 403, f"got {r403.status_code}")
-
-    return sid, cat
-
-
-# ==============================================================
-# 3. Smoke tests for existing endpoints
-# ==============================================================
-def test_existing_smoke(tok_a, user_a):
-    # /spaces GET
-    rs = requests.get(f"{BASE_URL}/spaces", headers=h(tok_a))
-    log("smoke: GET /spaces", rs.status_code == 200 and isinstance(rs.json(), list))
-    if rs.status_code != 200 or not rs.json():
-        return
-    sid = rs.json()[0]["space_id"]
-
-    # /categories CRUD
-    rc = requests.post(
-        f"{BASE_URL}/categories",
-        json={"space_id": sid, "name": f"SmokeCat_{uuid.uuid4().hex[:4]}", "icon": "Box", "tint": "mint", "fields": []},
-        headers=h(tok_a),
-    )
-    log("smoke: POST /categories", rc.status_code == 200)
-    cat_id = rc.json().get("category_id") if rc.status_code == 200 else None
-
-    rlc = requests.get(f"{BASE_URL}/categories", params={"space_id": sid}, headers=h(tok_a))
-    log("smoke: GET /categories", rlc.status_code == 200)
-
-    if cat_id:
-        ru = requests.patch(f"{BASE_URL}/categories/{cat_id}", json={"name": "SmokeCat Renamed"}, headers=h(tok_a))
-        log("smoke: PATCH /categories/{id}", ru.status_code == 200)
-
-        # /items CRUD
-        ri = requests.post(
-            f"{BASE_URL}/items",
-            json={"space_id": sid, "category_id": cat_id, "name": "Smoke Milk", "price": 4.50},
-            headers=h(tok_a),
-        )
-        log("smoke: POST /items", ri.status_code == 200)
-        item_id = ri.json().get("item_id") if ri.status_code == 200 else None
-        rli = requests.get(f"{BASE_URL}/items", params={"space_id": sid}, headers=h(tok_a))
-        log("smoke: GET /items", rli.status_code == 200)
-        if item_id:
-            rup = requests.patch(f"{BASE_URL}/items/{item_id}", json={"status": "low"}, headers=h(tok_a))
-            log("smoke: PATCH /items/{id}", rup.status_code == 200)
-            rdi = requests.delete(f"{BASE_URL}/items/{item_id}", headers=h(tok_a))
-            log("smoke: DELETE /items/{id}", rdi.status_code == 200)
-
-        # /bills CRUD + pay
-        rb = requests.post(
-            f"{BASE_URL}/bills",
-            json={"space_id": sid, "name": "Internet", "amount": 45.0, "frequency": "monthly", "due_day": 5,
-                  "category_id": cat_id},
-            headers=h(tok_a),
-        )
-        log("smoke: POST /bills", rb.status_code == 200, "" if rb.status_code == 200 else rb.text[:200])
-        bid = rb.json().get("bill_id") if rb.status_code == 200 else None
-        rlb = requests.get(f"{BASE_URL}/bills", params={"space_id": sid}, headers=h(tok_a))
-        log("smoke: GET /bills", rlb.status_code == 200)
-        if bid:
-            rpb = requests.patch(f"{BASE_URL}/bills/{bid}", json={"amount": 55.0}, headers=h(tok_a))
-            log("smoke: PATCH /bills/{id}", rpb.status_code == 200)
-            rpay = requests.post(f"{BASE_URL}/bills/{bid}/pay", headers=h(tok_a))
-            pay_ok = rpay.status_code == 200 and rpay.json().get("is_paid_current_period") is True
-            log("smoke: POST /bills/{id}/pay -> is_paid_current_period=True", pay_ok,
-                "" if pay_ok else f"{rpay.status_code} {rpay.text[:200]}")
-            rdb = requests.delete(f"{BASE_URL}/bills/{bid}", headers=h(tok_a))
-            log("smoke: DELETE /bills/{id}", rdb.status_code == 200)
-
-        # Clean up category
-        requests.delete(f"{BASE_URL}/categories/{cat_id}", headers=h(tok_a))
-
-    # /agreement GET/PUT/sign
-    rag = requests.get(f"{BASE_URL}/agreement", params={"space_id": sid}, headers=h(tok_a))
-    log("smoke: GET /agreement", rag.status_code == 200)
-    rput = requests.put(f"{BASE_URL}/agreement", params={"space_id": sid},
-                        json={"text": "House rules", "sections": []}, headers=h(tok_a))
-    log("smoke: PUT /agreement", rput.status_code == 200, "" if rput.status_code == 200 else rput.text[:200])
-    rsign = requests.post(f"{BASE_URL}/agreement/sign", params={"space_id": sid}, headers=h(tok_a))
-    sign_ok = rsign.status_code == 200 and len(rsign.json().get("signatures", [])) == 1
-    log("smoke: POST /agreement/sign", sign_ok, "" if sign_ok else f"{rsign.status_code} {rsign.text[:200]}")
-
-    # /balance-details (need with_user_id — use self, API should return 400 because not in space? Actually self IS in space_id. But endpoint expects 2+ users. Let's just call with self to verify 200 + empty breakdown.)
-    rbd = requests.get(f"{BASE_URL}/balance-details",
-                       params={"space_id": sid, "with_user_id": user_a["user_id"]}, headers=h(tok_a))
-    log("smoke: GET /balance-details", rbd.status_code == 200)
-
-    # /balances
-    rbal = requests.get(f"{BASE_URL}/balances", params={"space_id": sid}, headers=h(tok_a))
-    log("smoke: GET /balances", rbal.status_code == 200)
+    r = requests.get(f"{BASE}/household/handbook",
+                     headers=_auth_header(non_member_token),
+                     params={"space_id": space_id}, timeout=30)
+    rec(S, "GET handbook as non-member returns 403",
+        r.status_code == 403, f"status={r.status_code}")
 
 
-# ==============================================================
 def main():
-    test_login_primary()
+    token, _ = login(PRIMARY_EMAIL, PRIMARY_PASSWORD)
 
-    ts = int(time.time())
-    user_a_email = f"alex.morgan+{ts}@cozii.app"
-    user_c_email = f"jordan.park+{ts}@cozii.app"
+    stamp = uuid.uuid4().hex[:6]
+    nm_token, _ = register(f"outsider_{stamp}@example.com", "outside1234",
+                           "Outsider Nolan")
 
-    a = register_or_login(user_a_email, "SuperStrongPwd!23", "Alex Morgan")
-    c = register_or_login(user_c_email, "SuperStrongPwd!23", "Jordan Park")
+    household_space_id_from_test = test_space_type(token)
 
-    test_currency_and_patch(a["token"], a["user"], c["token"], c["user"])
-    test_finance_report(a["token"], a["user"], c["token"])
-    test_existing_smoke(a["token"], a["user"])
+    space_id, currency = get_or_make_household_space(token)
+    if household_space_id_from_test:
+        space_id = household_space_id_from_test
+        currency = "IDR"
+    if not space_id:
+        print("Cannot continue - no space_id available for household tests")
+        return
 
-    passed = sum(1 for _, ok, _ in results if ok)
-    failed = sum(1 for _, ok, _ in results if not ok)
-    print(f"\n=== SUMMARY: {passed} passed / {failed} failed / {len(results)} total ===")
-    if failed:
-        print("FAILURES:")
-        for n, ok, d in results:
-            if not ok:
-                print(f"  - {n}: {d}")
-    sys.exit(0 if failed == 0 else 1)
+    print(f"\nUsing space_id={space_id} currency={currency} for household tests\n")
+
+    role_ids = test_roles(token, space_id, nm_token)
+    if not role_ids:
+        role_ids = {"child": None, "maid": None}
+
+    test_family(token, space_id, role_ids["child"], nm_token)
+    test_staff(token, space_id, role_ids["maid"], currency, nm_token)
+    test_handbook(token, space_id, nm_token)
+
+    total = len(results)
+    failed = [r for r in results if not r[2]]
+    print("\n==== SUMMARY ====")
+    print(f"Total: {total}  Passed: {total - len(failed)}  Failed: {len(failed)}")
+    for sec, name, ok, detail in failed:
+        print(f"  FAIL [{sec}] {name} :: {detail}")
 
 
 if __name__ == "__main__":
