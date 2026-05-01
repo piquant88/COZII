@@ -286,10 +286,10 @@ const styles = StyleSheet.create({
   title: { fontSize: 30, fontWeight: '900', color: colors.textMain, letterSpacing: -0.5, marginBottom: spacing.md },
   quickRow: { flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.md },
   quickCard: {
-    flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10,
-    paddingHorizontal: spacing.md, paddingVertical: 14, borderRadius: radius.md,
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    paddingHorizontal: spacing.sm, paddingVertical: 14, borderRadius: radius.md,
   },
-  quickTxt: { fontSize: 13, fontWeight: '800', color: colors.textMain },
+  quickTxt: { fontSize: 12, fontWeight: '800', color: colors.textMain, textAlign: 'center' },
   tabs: {
     flexDirection: 'row',
     backgroundColor: colors.surfaceAlt,

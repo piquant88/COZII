@@ -9,6 +9,7 @@ import { useAuth } from '../src/AuthContext';
 import { api } from '../src/api';
 import { colors, radius, spacing, shadows, tints } from '../src/theme';
 import { Icon, BILL_ICON_OPTIONS } from '../src/Icon';
+import { formatMoney, getCurrency } from '../src/currency';
 import type { Bill, Category, User } from '../src/types';
 
 const FREQUENCIES: Array<{ key: Bill['frequency']; label: string }> = [
@@ -62,6 +63,10 @@ export default function Bills() {
 
   // pay confirmation
   const [payTarget, setPayTarget] = useState<Bill | null>(null);
+  // inline new category
+  const [newCatName, setNewCatName] = useState('');
+  const [showNewCat, setShowNewCat] = useState(false);
+  const [creatingCat, setCreatingCat] = useState(false);
 
   const load = useCallback(async () => {
     if (!activeSpace) return;
@@ -140,6 +145,25 @@ export default function Bills() {
       setPayTarget(null);
       await load();
     } catch (e: any) { Alert.alert('Error', e?.message || 'Failed to mark paid'); }
+  };
+
+  const createInlineCategory = async () => {
+    if (!activeSpace || !newCatName.trim()) return;
+    setCreatingCat(true);
+    try {
+      const c = await api.post<Category>('/categories', {
+        space_id: activeSpace.space_id,
+        name: newCatName.trim(),
+        icon: 'Box',
+        tint: 'mint',
+        fields: [],
+      });
+      setCategories((cur) => [...cur, c]);
+      setFCategoryId(c.category_id);
+      setNewCatName('');
+      setShowNewCat(false);
+    } catch (e: any) { Alert.alert('Error', e?.message || 'Failed to create category'); }
+    finally { setCreatingCat(false); }
   };
 
   const { due, upcoming, paid } = useMemo(() => {
@@ -274,9 +298,11 @@ export default function Bills() {
               <TextInput style={styles.input} value={fName} onChangeText={setFName}
                 placeholder="e.g. Rent, Wifi" placeholderTextColor={colors.textMuted} testID="bill-form-name" />
 
-              <Text style={styles.label}>Amount</Text>
+              <Text style={styles.label}>Amount ({getCurrency(cur).symbol} {cur})</Text>
               <TextInput style={styles.input} value={fAmount} onChangeText={setFAmount}
-                keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={colors.textMuted} testID="bill-form-amount" />
+                keyboardType="decimal-pad"
+                placeholder={cur === 'IDR' || cur === 'JPY' ? '0' : '0.00'}
+                placeholderTextColor={colors.textMuted} testID="bill-form-amount" />
 
               <Text style={styles.label}>Icon</Text>
               <View style={styles.iconRow}>
@@ -317,7 +343,21 @@ export default function Bills() {
                         <Text style={[styles.dayTxt, fDueDay === d && styles.dayTxtActive]}>{d}</Text>
                       </TouchableOpacity>
                     ))}
+                    <TextInput
+                      style={styles.dayCustom}
+                      keyboardType="number-pad"
+                      maxLength={2}
+                      value={String(fDueDay)}
+                      onChangeText={(t) => {
+                        const n = Math.max(1, Math.min(31, parseInt(t || '0', 10) || 0));
+                        if (n) setFDueDay(n);
+                      }}
+                      placeholder="Any"
+                      placeholderTextColor={colors.textMuted}
+                      testID="bill-form-day-custom"
+                    />
                   </View>
+                  <Text style={styles.helper}>Tap a chip or type any day from 1 to 31.</Text>
                 </>
               )}
               {fFreq === 'weekly' && (
@@ -355,7 +395,36 @@ export default function Bills() {
                     <Text style={[styles.chipTxt, fCategoryId === c.category_id && styles.chipTxtActive]}>{c.name}</Text>
                   </TouchableOpacity>
                 ))}
+                <TouchableOpacity
+                  style={[styles.chip, { backgroundColor: tints.sage.bg, flexDirection: 'row', alignItems: 'center', gap: 4 }]}
+                  onPress={() => setShowNewCat((v) => !v)}
+                  testID="bill-form-newcat-toggle"
+                >
+                  <Icon name="Plus" size={12} color={tints.sage.icon} />
+                  <Text style={[styles.chipTxt, { color: tints.sage.icon }]}>New</Text>
+                </TouchableOpacity>
               </View>
+              {showNewCat && (
+                <View style={styles.newCatRow}>
+                  <TextInput
+                    style={[styles.input, { flex: 1 }]}
+                    value={newCatName}
+                    onChangeText={setNewCatName}
+                    placeholder="e.g. Utilities, Gym"
+                    placeholderTextColor={colors.textMuted}
+                    autoFocus
+                    testID="bill-form-newcat-input"
+                  />
+                  <TouchableOpacity
+                    style={[styles.smallAddBtn, (creatingCat || !newCatName.trim()) && { opacity: 0.5 }]}
+                    onPress={createInlineCategory}
+                    disabled={creatingCat || !newCatName.trim()}
+                    testID="bill-form-newcat-save"
+                  >
+                    <Text style={styles.smallAddTxt}>{creatingCat ? '...' : 'Add'}</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
 
               {members.length > 1 && (
                 <>
@@ -524,6 +593,21 @@ const styles = StyleSheet.create({
   dayChipActive: { backgroundColor: colors.primary },
   dayTxt: { fontSize: 12, color: colors.textMain, fontWeight: '700' },
   dayTxtActive: { color: '#fff' },
+  dayCustom: {
+    minWidth: 60, paddingHorizontal: 10, paddingVertical: 6,
+    borderRadius: radius.full,
+    backgroundColor: colors.surfaceAlt,
+    borderWidth: 1, borderColor: colors.border,
+    fontSize: 12, fontWeight: '700', color: colors.textMain,
+    textAlign: 'center',
+  },
+  newCatRow: { flexDirection: 'row', gap: 8, marginTop: 8, alignItems: 'center' },
+  smallAddBtn: {
+    paddingHorizontal: 16, paddingVertical: 12,
+    borderRadius: radius.full, backgroundColor: colors.primary,
+    ...shadows.button,
+  },
+  smallAddTxt: { color: '#fff', fontWeight: '800', fontSize: 13 },
   chipWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 },
   chip: {
     paddingHorizontal: 12, paddingVertical: 7, borderRadius: radius.full,

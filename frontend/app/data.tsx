@@ -169,39 +169,43 @@ export default function DataSheet() {
       </View>
 
       {/* Period selector */}
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.periodRow}
-      >
-        {Object.entries(PERIODS).map(([k, l]) => (
-          <TouchableOpacity
-            key={k}
-            style={[styles.periodChip, period === k && styles.periodChipActive]}
-            onPress={() => setPeriod(k)}
-          >
-            <Text style={[styles.periodTxt, period === k && styles.periodTxtActive]}>{l}</Text>
-          </TouchableOpacity>
-        ))}
-      </ScrollView>
+      <View style={{ height: 44 }}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.periodRow}
+        >
+          {Object.entries(PERIODS).map(([k, l]) => (
+            <TouchableOpacity
+              key={k}
+              style={[styles.periodChip, period === k && styles.periodChipActive]}
+              onPress={() => setPeriod(k)}
+            >
+              <Text style={[styles.periodTxt, period === k && styles.periodTxtActive]}>{l}</Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      </View>
 
       {/* Section tabs */}
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.tabRow}
-      >
-        {TABS.map((t) => (
-          <TouchableOpacity
-            key={t.key}
-            style={[styles.tabChip, tab === t.key && styles.tabChipActive]}
-            onPress={() => setTab(t.key)}
-            testID={`tab-${t.key}`}
-          >
-            <Text style={[styles.tabTxt, tab === t.key && styles.tabTxtActive]}>{t.label}</Text>
-          </TouchableOpacity>
-        ))}
-      </ScrollView>
+      <View style={{ height: 44 }}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.tabRow}
+        >
+          {TABS.map((t) => (
+            <TouchableOpacity
+              key={t.key}
+              style={[styles.tabChip, tab === t.key && styles.tabChipActive]}
+              onPress={() => setTab(t.key)}
+              testID={`tab-${t.key}`}
+            >
+              <Text style={[styles.tabTxt, tab === t.key && styles.tabTxtActive]}>{t.label}</Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      </View>
 
       {/* Action row */}
       <View style={styles.actionRow}>
