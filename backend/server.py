@@ -1727,6 +1727,7 @@ class HandbookEntry(BaseModel):
     body: str
     icon: str = "BookOpen"
     color: str = "mint"
+    photo_base64: Optional[str] = None
     sort: int = 0
     created_at: datetime
     updated_at: datetime
@@ -1738,6 +1739,7 @@ class CreateHandbookEntryRequest(BaseModel):
     body: str
     icon: str = "BookOpen"
     color: str = "mint"
+    photo_base64: Optional[str] = None
     sort: int = 0
 
 
@@ -1746,6 +1748,7 @@ class UpdateHandbookEntryRequest(BaseModel):
     body: Optional[str] = None
     icon: Optional[str] = None
     color: Optional[str] = None
+    photo_base64: Optional[str] = None
     sort: Optional[int] = None
 
 
@@ -1912,6 +1915,26 @@ async def list_staff(space_id: str, user: User = Depends(get_current_user)):
     return [StaffMember(**d) for d in out]
 
 
+DEFAULT_STAFF_PERMS = {
+    "view_tasks": True,
+    "log_attendance": True,
+    "request_shopping": True,
+    "view_handbook": True,
+    "view_wage_amount": True,
+    "view_other_staff": False,
+    "view_family": False,
+    "view_finance": False,
+}
+
+
+class UpdateStaffPermissionsRequest(BaseModel):
+    permissions: Dict[str, bool]
+
+
+def _gen_staff_invite_code() -> str:
+    return secrets.token_hex(3).upper()
+
+
 @api_router.post("/household/staff", response_model=StaffMember)
 async def create_staff(body: CreateStaffRequest, user: User = Depends(get_current_user)):
     space = await assert_space_member(body.space_id, user.user_id)
@@ -1931,12 +1954,224 @@ async def create_staff(body: CreateStaffRequest, user: User = Depends(get_curren
         "start_date": body.start_date,
         "notes": body.notes,
         "user_id": None,
+        "invite_code": _gen_staff_invite_code(),
+        "permissions": DEFAULT_STAFF_PERMS.copy(),
         "created_at": now_utc(),
     }
     await db.staff_members.insert_one(doc)
     doc.pop("_id", None)
     await _attach_role_name(doc)
     return StaffMember(**doc)
+
+
+@api_router.patch("/household/staff/{staff_id}/permissions", response_model=StaffMember)
+async def update_staff_perms(staff_id: str, body: UpdateStaffPermissionsRequest, user: User = Depends(get_current_user)):
+    s = await db.staff_members.find_one({"staff_id": staff_id}, {"_id": 0})
+    if not s:
+        raise HTTPException(404, "Staff not found")
+    await assert_space_member(s["space_id"], user.user_id)
+    space = await db.family_spaces.find_one({"space_id": s["space_id"]}, {"_id": 0})
+    if not space or space.get("owner_id") != user.user_id:
+        raise HTTPException(403, "Only the space owner can change staff permissions")
+    merged = {**DEFAULT_STAFF_PERMS, **(s.get("permissions") or {}), **(body.permissions or {})}
+    await db.staff_members.update_one({"staff_id": staff_id}, {"$set": {"permissions": merged}})
+    out = await db.staff_members.find_one({"staff_id": staff_id}, {"_id": 0})
+    await _attach_role_name(out)
+    return StaffMember(**out)
+
+
+class JoinStaffRequest(BaseModel):
+    invite_code: str
+
+
+@api_router.post("/household/staff/join")
+async def join_staff(body: JoinStaffRequest, user: User = Depends(get_current_user)):
+    code = (body.invite_code or "").strip().upper()
+    if not code:
+        raise HTTPException(400, "Invite code required")
+    s = await db.staff_members.find_one({"invite_code": code}, {"_id": 0})
+    if not s:
+        raise HTTPException(404, "Invalid invite code")
+    if s.get("user_id") and s["user_id"] != user.user_id:
+        raise HTTPException(400, "This staff profile is already linked to another account")
+    await db.staff_members.update_one({"staff_id": s["staff_id"]}, {"$set": {"user_id": user.user_id}})
+    space = await db.family_spaces.find_one({"space_id": s["space_id"]}, {"_id": 0})
+    if space and user.user_id not in (space.get("member_ids") or []):
+        await db.family_spaces.update_one({"space_id": s["space_id"]}, {"$addToSet": {"member_ids": user.user_id}})
+    return {"ok": True, "space_id": s["space_id"], "staff_id": s["staff_id"]}
+
+
+@api_router.get("/spaces/{space_id}/my_role")
+async def my_role(space_id: str, user: User = Depends(get_current_user)):
+    space = await assert_space_member(space_id, user.user_id)
+    is_owner = space.get("owner_id") == user.user_id
+    staff = await db.staff_members.find_one({"space_id": space_id, "user_id": user.user_id}, {"_id": 0})
+    if staff:
+        return {"role": "staff", "staff_id": staff["staff_id"], "permissions": {**DEFAULT_STAFF_PERMS, **(staff.get("permissions") or {})}}
+    return {"role": "owner" if is_owner else "member", "staff_id": None, "permissions": {}}
+
+
+# =========================
+# Phase 3 — Payroll (wages as finance items)
+# =========================
+class StaffPayment(BaseModel):
+    payment_id: str
+    space_id: str
+    staff_id: str
+    staff_name: Optional[str] = None
+    period: str
+    gross: float
+    advances: float = 0.0
+    deductions: float = 0.0
+    bonus: float = 0.0
+    net: float
+    currency: str = "USD"
+    receipt_photo: Optional[str] = None
+    notes: Optional[str] = None
+    item_id: Optional[str] = None
+    paid_at: datetime
+
+
+class CreateStaffPaymentRequest(BaseModel):
+    space_id: str
+    staff_id: str
+    period: Optional[str] = None
+    gross: Optional[float] = None
+    advances: float = 0.0
+    deductions: float = 0.0
+    bonus: float = 0.0
+    receipt_photo: Optional[str] = None
+    notes: Optional[str] = None
+
+
+async def _ensure_wages_category(space_id: str) -> str:
+    cat = await db.categories.find_one({"space_id": space_id, "name": "Staff wages"}, {"_id": 0})
+    if cat:
+        return cat["category_id"]
+    doc = {
+        "category_id": gen_id("cat"),
+        "space_id": space_id,
+        "name": "Staff wages",
+        "icon": "Wallet",
+        "tint": "peach",
+        "fields": [],
+        "shared_with": [],
+        "created_at": now_utc(),
+    }
+    await db.categories.insert_one(doc)
+    return doc["category_id"]
+
+
+@api_router.get("/household/payroll", response_model=List[StaffPayment])
+async def list_payroll(space_id: str, staff_id: Optional[str] = None, user: User = Depends(get_current_user)):
+    await assert_space_member(space_id, user.user_id)
+    q: Dict[str, Any] = {"space_id": space_id}
+    if staff_id:
+        q["staff_id"] = staff_id
+    docs = await db.staff_payments.find(q, {"_id": 0}).sort("paid_at", -1).to_list(2000)
+    if docs:
+        staff_ids = list({d["staff_id"] for d in docs})
+        staff = await db.staff_members.find({"staff_id": {"$in": staff_ids}}, {"_id": 0}).to_list(500)
+        name_by_id = {s["staff_id"]: s["name"] for s in staff}
+        for d in docs:
+            d["staff_name"] = name_by_id.get(d["staff_id"])
+    return [StaffPayment(**d) for d in docs]
+
+
+@api_router.post("/household/payroll", response_model=StaffPayment)
+async def create_payroll(body: CreateStaffPaymentRequest, user: User = Depends(get_current_user)):
+    space = await assert_space_member(body.space_id, user.user_id)
+    staff = await db.staff_members.find_one({"staff_id": body.staff_id, "space_id": body.space_id}, {"_id": 0})
+    if not staff:
+        raise HTTPException(404, "Staff not found")
+    gross = body.gross if body.gross is not None else float(staff.get("salary") or 0)
+    net = gross + float(body.bonus or 0) - float(body.advances or 0) - float(body.deductions or 0)
+    cycle = staff.get("pay_cycle", "monthly")
+    today = datetime.now(timezone.utc)
+    period = body.period
+    if not period:
+        if cycle == "monthly":
+            period = today.strftime("%Y-%m")
+        elif cycle == "weekly":
+            period = today.strftime("%Y-W%V")
+        else:
+            period = today.strftime("%Y-%m-%d")
+    cat_id = await _ensure_wages_category(body.space_id)
+    item_doc = {
+        "item_id": gen_id("item"),
+        "space_id": body.space_id,
+        "category_id": cat_id,
+        "name": f"Salary — {staff['name']} ({period})",
+        "price": round(net, 2),
+        "quantity": 1,
+        "status": "available",
+        "purchase_date": today.strftime("%Y-%m-%d"),
+        "expiry_date": None,
+        "photo_base64": body.receipt_photo,
+        "created_by": user.user_id,
+        "created_at": today,
+        "shared_with": [],
+        "split_with": [],
+        "fields": {},
+    }
+    await db.items.insert_one(item_doc)
+    payment = {
+        "payment_id": gen_id("pay"),
+        "space_id": body.space_id,
+        "staff_id": body.staff_id,
+        "staff_name": staff["name"],
+        "period": period,
+        "gross": round(gross, 2),
+        "advances": round(float(body.advances or 0), 2),
+        "deductions": round(float(body.deductions or 0), 2),
+        "bonus": round(float(body.bonus or 0), 2),
+        "net": round(net, 2),
+        "currency": staff.get("salary_currency") or space.get("currency") or "USD",
+        "receipt_photo": body.receipt_photo,
+        "notes": body.notes,
+        "item_id": item_doc["item_id"],
+        "paid_at": today,
+    }
+    await db.staff_payments.insert_one(payment)
+    payment.pop("_id", None)
+    return StaffPayment(**payment)
+
+
+@api_router.delete("/household/payroll/{payment_id}")
+async def delete_payroll(payment_id: str, user: User = Depends(get_current_user)):
+    p = await db.staff_payments.find_one({"payment_id": payment_id}, {"_id": 0})
+    if not p:
+        raise HTTPException(404, "Payment not found")
+    await assert_space_member(p["space_id"], user.user_id)
+    await db.staff_payments.delete_one({"payment_id": payment_id})
+    if p.get("item_id"):
+        await db.items.delete_one({"item_id": p["item_id"]})
+    return {"ok": True}
+
+
+@api_router.get("/household/staff/me")
+async def staff_me(space_id: str, user: User = Depends(get_current_user)):
+    s = await db.staff_members.find_one({"space_id": space_id, "user_id": user.user_id}, {"_id": 0})
+    if not s:
+        raise HTTPException(404, "You are not linked as staff in this space")
+    await _attach_role_name(s)
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    tasks = await db.task_templates.find(
+        {"space_id": space_id, "$or": [{"staff_id": s["staff_id"]}, {"role_id": s.get("role_id")}, {"staff_id": None, "role_id": None}]},
+        {"_id": 0},
+    ).to_list(500)
+    comps = await db.task_completions.find({"space_id": space_id, "date": today_str}, {"_id": 0}).to_list(500)
+    comp_by_task = {c["task_id"]: c for c in comps}
+    today_tasks: List[Dict[str, Any]] = []
+    for t in tasks:
+        if _task_due_on(t, today_str):
+            today_tasks.append({**t, "completed_today": t["task_id"] in comp_by_task, "completion": comp_by_task.get(t["task_id"])})
+    att = await db.attendance_logs.find({"space_id": space_id, "staff_id": s["staff_id"]}, {"_id": 0}).sort("date", -1).to_list(60)
+    perms = {**DEFAULT_STAFF_PERMS, **(s.get("permissions") or {})}
+    payments: List[Dict[str, Any]] = []
+    if perms.get("view_wage_amount"):
+        payments = await db.staff_payments.find({"space_id": space_id, "staff_id": s["staff_id"]}, {"_id": 0}).sort("paid_at", -1).to_list(100)
+    return {"staff": s, "permissions": perms, "today_tasks": today_tasks, "attendance": att, "payments": payments}
 
 
 @api_router.patch("/household/staff/{staff_id}", response_model=StaffMember)
@@ -1986,6 +2221,7 @@ async def create_handbook(body: CreateHandbookEntryRequest, user: User = Depends
         "body": body.body,
         "icon": body.icon or "BookOpen",
         "color": body.color or "mint",
+        "photo_base64": body.photo_base64,
         "sort": body.sort or 0,
         "created_at": now,
         "updated_at": now,
@@ -2002,7 +2238,7 @@ async def update_handbook(entry_id: str, body: UpdateHandbookEntryRequest, user:
         raise HTTPException(404, "Handbook entry not found")
     await assert_space_member(e["space_id"], user.user_id)
     updates: Dict[str, Any] = {}
-    for k in ("title", "body", "icon", "color", "sort"):
+    for k in ("title", "body", "icon", "color", "photo_base64", "sort"):
         v = getattr(body, k)
         if v is not None:
             updates[k] = v

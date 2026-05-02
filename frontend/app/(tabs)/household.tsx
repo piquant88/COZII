@@ -364,6 +364,7 @@ function HandbookSection({ entries, onEdit, onTemplate }: { entries: HandbookEnt
             </View>
             <View style={{ flex: 1 }}>
               <Text style={styles.hbTitle}>{e.title}</Text>
+              {e.photo_base64 ? <Image source={{ uri: e.photo_base64 }} style={styles.hbPhoto} /> : null}
               <Text style={styles.hbBody} numberOfLines={3}>{e.body}</Text>
             </View>
             <Icon name="Edit3" size={14} color={colors.textMuted} />
@@ -534,6 +535,8 @@ function StaffForm({ initial, roles, spaceId, currency, onClose, onSaved }: any)
   const [startDate, setStartDate] = useState(initial?.start_date || '');
   const [notes, setNotes] = useState(initial?.notes || '');
   const [saving, setSaving] = useState(false);
+  const [payNote, setPayNote] = useState('');
+  const [paying, setPaying] = useState(false);
 
   const save = async () => {
     if (!name.trim()) { Alert.alert('Name required', ''); return; }
@@ -554,6 +557,27 @@ function StaffForm({ initial, roles, spaceId, currency, onClose, onSaved }: any)
     } catch (e: any) { Alert.alert('Error', e?.message || ''); }
     finally { setSaving(false); }
   };
+
+  const markSalaryPaid = async () => {
+    if (!initial?.staff_id || !initial?.salary) { Alert.alert('Set salary first', ''); return; }
+    setPaying(true);
+    try {
+      await api.post('/household/payroll', { space_id: spaceId, staff_id: initial.staff_id, notes: payNote || null });
+      Alert.alert('Paid', 'Salary logged in Finance as "Staff wages".');
+      setPayNote('');
+      onSaved();
+    } catch (e: any) { Alert.alert('Error', e?.message || ''); }
+    finally { setPaying(false); }
+  };
+
+  const copyCode = async () => {
+    try {
+      const Clipboard = await import('expo-clipboard');
+      await (Clipboard as any).setStringAsync(initial.invite_code);
+      Alert.alert('Copied', `Share code ${initial.invite_code} with ${initial.name}. They sign up with any email, tap "Join as staff" and paste this code.`);
+    } catch (e) {}
+  };
+
   const remove = async () => {
     if (!initial?.staff_id) return;
     Alert.alert('Remove staff?', `Remove ${initial.name}. Past records stay.`, [
@@ -620,6 +644,29 @@ function StaffForm({ initial, roles, spaceId, currency, onClose, onSaved }: any)
       </View>
       <Text style={styles.label}>Notes</Text>
       <TextInput style={[styles.input, { minHeight: 60 }]} value={notes} onChangeText={setNotes} multiline placeholder="responsibilities, agreement, anything important" placeholderTextColor={colors.textMuted} />
+      {initial?.staff_id && initial?.invite_code && (
+        <View style={styles.inviteBox}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.label}>Invite code</Text>
+            <Text style={styles.inviteCode}>{initial.invite_code}</Text>
+            <Text style={styles.helper}>Share with {initial.name}. They sign up, tap "Join as staff" and paste this code to access their own simplified app.</Text>
+          </View>
+          <TouchableOpacity onPress={copyCode} style={styles.copyBtn}><Icon name="Copy" size={14} color={colors.textMain} /><Text style={styles.copyTxt}>Copy</Text></TouchableOpacity>
+        </View>
+      )}
+
+      {initial?.staff_id && initial?.salary ? (
+        <View style={styles.payBox}>
+          <Text style={styles.label}>Mark salary paid</Text>
+          <Text style={styles.helper}>Logs this as an expense in Finance ("Staff wages" category). Adjust amount / advances in Wages report if needed.</Text>
+          <TextInput style={styles.input} value={payNote} onChangeText={setPayNote} placeholder="Optional note (e.g. advance, bonus)" placeholderTextColor={colors.textMuted} />
+          <TouchableOpacity style={[styles.payNowBtn, paying && { opacity: 0.6 }]} onPress={markSalaryPaid} disabled={paying}>
+            <Icon name="Wallet" size={14} color="#fff" />
+            <Text style={styles.payNowTxt}>{paying ? 'Recording...' : `Pay ${formatMoney(initial.salary, currency)}`}</Text>
+          </TouchableOpacity>
+        </View>
+      ) : null}
+
       {initial?.staff_id && (
         <TouchableOpacity onPress={remove} style={styles.deleteRow}><Icon name="Trash2" size={14} color={colors.dangerText} /><Text style={styles.deleteTxt}>Remove from staff</Text></TouchableOpacity>
       )}
@@ -683,13 +730,14 @@ function HandbookForm({ initial, spaceId, onClose, onSaved }: any) {
   const [body, setBody] = useState(initial?.body || '');
   const [icon, setIcon] = useState(initial?.icon || 'BookOpen');
   const [color, setColor] = useState<keyof typeof tints>((initial?.color as any) || 'sage');
+  const [photo, setPhoto] = useState<string | null>(initial?.photo_base64 || null);
   const [saving, setSaving] = useState(false);
 
   const save = async () => {
     if (!title.trim()) return;
     setSaving(true);
     try {
-      const payload: any = { title: title.trim(), body, icon, color };
+      const payload: any = { title: title.trim(), body, icon, color, photo_base64: photo };
       if (initial?.entry_id && !isTemplate) await api.patch(`/household/handbook/${initial.entry_id}`, payload);
       else await api.post('/household/handbook', { space_id: spaceId, ...payload });
       onSaved();
@@ -709,6 +757,7 @@ function HandbookForm({ initial, spaceId, onClose, onSaved }: any) {
 
   return (
     <FormSheet title={initial?.entry_id && !isTemplate ? 'Edit handbook entry' : 'New handbook entry'} onClose={onClose} onSave={save} saving={saving}>
+      <PhotoPicker photo={photo} onChange={setPhoto} color={tints[color].icon} />
       <Text style={styles.label}>Title</Text>
       <TextInput style={styles.input} value={title} onChangeText={setTitle} placeholder="e.g. Wifi, Doctor info" placeholderTextColor={colors.textMuted} />
       <Text style={styles.label}>Body</Text>
@@ -1166,6 +1215,7 @@ const styles = StyleSheet.create({
   handbookCard: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, padding: spacing.md, borderRadius: radius.lg },
   hbIcon: { width: 36, height: 36, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   hbTitle: { fontSize: 14, fontWeight: '800', color: colors.textMain },
+  hbPhoto: { width: '100%', height: 120, borderRadius: 10, marginTop: 8, backgroundColor: '#00000010' },
   hbBody: { fontSize: 12, color: colors.textMuted, marginTop: 4, lineHeight: 18 },
   templateChip: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, paddingVertical: 8, borderRadius: radius.full, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
   templateTxt: { fontSize: 12, fontWeight: '700', color: colors.textMain },
@@ -1196,6 +1246,13 @@ const styles = StyleSheet.create({
   saveTxt: { color: '#fff', fontWeight: '800' },
   deleteRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, padding: 12, marginTop: 12 },
   deleteTxt: { fontSize: 12, color: colors.dangerText, fontWeight: '700' },
+  inviteBox: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: tints.blue.bg, padding: spacing.md, borderRadius: radius.md, marginTop: spacing.md },
+  inviteCode: { fontSize: 22, fontWeight: '900', color: tints.blue.icon, letterSpacing: 3, marginVertical: 2 },
+  copyBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, paddingVertical: 8, backgroundColor: colors.surface, borderRadius: radius.full },
+  copyTxt: { fontSize: 12, fontWeight: '800', color: colors.textMain },
+  payBox: { backgroundColor: tints.peach.bg, padding: spacing.md, borderRadius: radius.md, marginTop: spacing.md, gap: 8 },
+  payNowBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, backgroundColor: colors.primary, paddingVertical: 12, borderRadius: radius.full, ...shadows.button },
+  payNowTxt: { color: '#fff', fontWeight: '800' },
   checkBox: { width: 28, height: 28, borderRadius: 8, borderWidth: 2, borderColor: colors.border, alignItems: 'center', justifyContent: 'center' },
   checkBoxDone: { backgroundColor: colors.primary, borderColor: colors.primary },
   dateNav: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: colors.surface, padding: 8, borderRadius: radius.md, marginBottom: 4, ...shadows.card },

@@ -1,0 +1,293 @@
+import React, { useState, useCallback } from 'react';
+import {
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl,
+  ActivityIndicator, TextInput, Alert, Image,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { useFocusEffect, useRouter } from 'expo-router';
+import { useAuth } from '../src/AuthContext';
+import { api } from '../src/api';
+import { colors, radius, spacing, shadows, tints } from '../src/theme';
+import { Icon } from '../src/Icon';
+import { formatMoney } from '../src/currency';
+
+const SECTIONS: Array<{ key: 'today' | 'attendance' | 'shopping' | 'wages'; label: string; icon: string; tint: keyof typeof tints }> = [
+  { key: 'today', label: 'Today', icon: 'Check', tint: 'mint' },
+  { key: 'attendance', label: 'Attendance', icon: 'Calendar', tint: 'yellow' },
+  { key: 'shopping', label: 'Shopping', icon: 'ShoppingBag', tint: 'pink' },
+  { key: 'wages', label: 'Wages', icon: 'Wallet', tint: 'peach' },
+];
+
+const ATT_LABELS: Record<string, string> = { present: 'Present', off: 'Off', sick: 'Sick', leave: 'Leave', late: 'Late' };
+
+export default function StaffHome() {
+  const { activeSpace, user, logout } = useAuth();
+  const router = useRouter();
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [tab, setTab] = useState<typeof SECTIONS[number]['key']>('today');
+  const [newReq, setNewReq] = useState('');
+  const [newQty, setNewQty] = useState('');
+
+  const load = useCallback(async () => {
+    if (!activeSpace) return;
+    try {
+      const d = await api.get<any>(`/household/staff/me?space_id=${activeSpace.space_id}`);
+      setData(d);
+    } catch (e: any) {
+      if (e?.status === 404) {
+        Alert.alert('Not linked', 'You are not registered as staff in this space.');
+        router.replace('/(tabs)/home');
+      }
+    } finally { setLoading(false); }
+  }, [activeSpace, router]);
+
+  useFocusEffect(useCallback(() => { load(); }, [load]));
+  const onRefresh = async () => { setRefreshing(true); await load(); setRefreshing(false); };
+
+  const toggleTask = async (taskId: string) => {
+    try {
+      await api.post(`/household/tasks/${taskId}/complete`, { date: new Date().toISOString().slice(0, 10) });
+      await load();
+    } catch (e: any) { Alert.alert('Error', e?.message || ''); }
+  };
+
+  const setMyAttendance = async (status: string) => {
+    if (!activeSpace || !data?.staff) return;
+    try {
+      await api.post('/household/attendance', { space_id: activeSpace.space_id, staff_id: data.staff.staff_id, date: new Date().toISOString().slice(0, 10), status });
+      await load();
+    } catch (e: any) { Alert.alert('Error', e?.message || ''); }
+  };
+
+  const submitRequest = async () => {
+    if (!activeSpace || !newReq.trim() || !data?.staff) return;
+    try {
+      await api.post('/household/shopping', { space_id: activeSpace.space_id, item_name: newReq.trim(), quantity: newQty || null, requested_by_staff_id: data.staff.staff_id, urgency: 'normal' });
+      setNewReq(''); setNewQty('');
+      Alert.alert('Sent', 'Your request is waiting for approval.');
+      await load();
+    } catch (e: any) { Alert.alert('Error', e?.message || ''); }
+  };
+
+  if (!activeSpace || loading || !data) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <ActivityIndicator style={{ marginTop: 80 }} color={colors.primary} />
+      </SafeAreaView>
+    );
+  }
+
+  const staff = data.staff;
+  const perms = data.permissions || {};
+  const cur = staff.salary_currency || activeSpace.currency || 'USD';
+  const today = new Date().toISOString().slice(0, 10);
+  const todayAtt = (data.attendance || []).find((a: any) => a.date === today);
+  const doneCount = (data.today_tasks || []).filter((t: any) => t.completed_today).length;
+  const totalTasks = (data.today_tasks || []).length;
+  const totalPaidThisYear = (data.payments || [])
+    .filter((p: any) => new Date(p.paid_at).getFullYear() === new Date().getFullYear())
+    .reduce((s: number, p: any) => s + p.net, 0);
+
+  return (
+    <SafeAreaView style={styles.container} edges={['top']}>
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}
+      >
+        {/* Greeting header */}
+        <View style={styles.greeting}>
+          <View style={[styles.avatarBig, { backgroundColor: tints.blue.icon }]}>
+            {staff.photo_base64 ? <Image source={{ uri: staff.photo_base64 }} style={styles.avatarImg} /> : <Text style={styles.avatarBigTxt}>{staff.name?.[0]?.toUpperCase()}</Text>}
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.hi}>Hi, {staff.name?.split(' ')[0] || 'there'}!</Text>
+            <Text style={styles.greetSub}>{staff.role_name || 'Staff'} · {activeSpace.name}</Text>
+          </View>
+          <TouchableOpacity onPress={() => router.push('/(tabs)/profile')} style={styles.iconBtn}>
+            <Icon name="User" size={18} color={colors.textMain} />
+          </TouchableOpacity>
+        </View>
+
+        {/* Section tabs */}
+        <View style={{ height: 56 }}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tabRow}>
+            {SECTIONS.filter((s) => {
+              if (s.key === 'shopping' && !perms.request_shopping) return false;
+              if (s.key === 'wages' && !perms.view_wage_amount) return false;
+              if (s.key === 'attendance' && !perms.log_attendance) return false;
+              return true;
+            }).map((s) => {
+              const active = tab === s.key;
+              const t = tints[s.tint];
+              return (
+                <TouchableOpacity
+                  key={s.key}
+                  style={[styles.tabChip, active && { backgroundColor: t.bg, borderColor: t.icon }]}
+                  onPress={() => setTab(s.key)}
+                  testID={`staff-tab-${s.key}`}
+                >
+                  <Icon name={s.icon} size={16} color={active ? t.icon : colors.textMuted} />
+                  <Text style={[styles.tabTxt, active && { color: t.icon, fontWeight: '800' }]}>{s.label}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        </View>
+
+        {tab === 'today' && (
+          <View style={{ gap: 8 }}>
+            <View style={[styles.hero, { backgroundColor: tints.mint.bg }]}>
+              <View>
+                <Text style={styles.heroLabel}>Today</Text>
+                <Text style={styles.heroAmt}>{doneCount}/{totalTasks} done</Text>
+                <Text style={styles.heroSub}>{new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}</Text>
+              </View>
+              <Icon name="Check" size={40} color={tints.mint.icon} />
+            </View>
+            {totalTasks === 0 ? (
+              <Text style={styles.emptyTxt}>No tasks for today. Enjoy your day!</Text>
+            ) : (
+              (data.today_tasks || []).map((t: any) => (
+                <View key={t.task_id} style={[styles.row, t.completed_today && { opacity: 0.55 }]}>
+                  <TouchableOpacity style={[styles.checkBox, t.completed_today && styles.checkBoxDone]} onPress={() => toggleTask(t.task_id)} testID={`task-${t.task_id}`}>
+                    {t.completed_today && <Icon name="Check" size={14} color="#fff" />}
+                  </TouchableOpacity>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.rowName, t.completed_today && { textDecorationLine: 'line-through' }]} numberOfLines={2}>{t.title}</Text>
+                    {t.description ? <Text style={styles.rowSub} numberOfLines={2}>{t.description}</Text> : null}
+                    {t.due_time ? <Text style={styles.rowSub}>Due at {t.due_time}</Text> : null}
+                  </View>
+                </View>
+              ))
+            )}
+          </View>
+        )}
+
+        {tab === 'attendance' && (
+          <View style={{ gap: 8 }}>
+            <View style={[styles.hero, { backgroundColor: tints.yellow.bg }]}>
+              <View>
+                <Text style={styles.heroLabel}>Today's status</Text>
+                <Text style={styles.heroAmt}>{todayAtt ? ATT_LABELS[todayAtt.status] : 'Not set'}</Text>
+                <Text style={styles.heroSub}>{new Date().toLocaleDateString()}</Text>
+              </View>
+              <Icon name="Calendar" size={40} color={tints.yellow.icon} />
+            </View>
+            <View style={styles.row}>
+              <Text style={[styles.rowName, { flex: 1 }]}>Mark today as:</Text>
+            </View>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+              {Object.keys(ATT_LABELS).map((st) => (
+                <TouchableOpacity key={st} style={[styles.attBtn, todayAtt?.status === st && styles.attBtnActive]} onPress={() => setMyAttendance(st)} testID={`my-att-${st}`}>
+                  <Text style={[styles.attBtnTxt, todayAtt?.status === st && { color: '#fff' }]}>{ATT_LABELS[st]}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <Text style={[styles.sectionTitle, { marginTop: spacing.md }]}>Recent</Text>
+            {(data.attendance || []).slice(0, 14).map((a: any) => (
+              <View key={a.attendance_id} style={styles.row}>
+                <Text style={[styles.rowName, { flex: 1 }]}>{new Date(a.date).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}</Text>
+                <Text style={[styles.attTagTxt, { color: a.status === 'present' ? tints.sage.icon : a.status === 'sick' ? tints.pink.icon : tints.lavender.icon }]}>{ATT_LABELS[a.status]}</Text>
+              </View>
+            ))}
+          </View>
+        )}
+
+        {tab === 'shopping' && (
+          <View style={{ gap: 8 }}>
+            <View style={[styles.hero, { backgroundColor: tints.pink.bg }]}>
+              <View>
+                <Text style={styles.heroLabel}>Need something?</Text>
+                <Text style={styles.heroAmt}>Send a quick request</Text>
+                <Text style={styles.heroSub}>Owner will see it and buy when they can.</Text>
+              </View>
+              <Icon name="ShoppingBag" size={40} color={tints.pink.icon} />
+            </View>
+            <Text style={styles.label}>What's running low?</Text>
+            <TextInput style={styles.input} value={newReq} onChangeText={setNewReq} placeholder="e.g. Rice" placeholderTextColor={colors.textMuted} testID="staff-shop-name" />
+            <Text style={styles.label}>Quantity (optional)</Text>
+            <TextInput style={styles.input} value={newQty} onChangeText={setNewQty} placeholder="e.g. 5 kg" placeholderTextColor={colors.textMuted} />
+            <TouchableOpacity style={[styles.sendBtn, !newReq.trim() && { opacity: 0.5 }]} onPress={submitRequest} disabled={!newReq.trim()} testID="staff-shop-send">
+              <Icon name="ArrowRight" size={16} color="#fff" />
+              <Text style={styles.sendTxt}>Send request</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {tab === 'wages' && perms.view_wage_amount && (
+          <View style={{ gap: 8 }}>
+            <View style={[styles.hero, { backgroundColor: tints.peach.bg }]}>
+              <View>
+                <Text style={styles.heroLabel}>Salary</Text>
+                <Text style={styles.heroAmt}>{staff.salary ? formatMoney(staff.salary, cur) : '—'}</Text>
+                <Text style={styles.heroSub}>per {staff.pay_cycle || 'month'}</Text>
+              </View>
+              <Icon name="Wallet" size={40} color={tints.peach.icon} />
+            </View>
+            {totalPaidThisYear > 0 && (
+              <Text style={styles.sectionTitle}>{formatMoney(totalPaidThisYear, cur)} paid this year</Text>
+            )}
+            <Text style={[styles.sectionTitle, { marginTop: spacing.md }]}>Payment history</Text>
+            {(data.payments || []).length === 0 ? (
+              <Text style={styles.emptyTxt}>No payments yet.</Text>
+            ) : (
+              (data.payments || []).map((p: any) => (
+                <View key={p.payment_id} style={styles.row}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.rowName}>{p.period}</Text>
+                    <Text style={styles.rowSub}>{new Date(p.paid_at).toLocaleDateString()}</Text>
+                  </View>
+                  <Text style={styles.rowAmt}>{formatMoney(p.net, p.currency)}</Text>
+                </View>
+              ))
+            )}
+          </View>
+        )}
+
+        <TouchableOpacity style={styles.logoutBtn} onPress={async () => { await logout(); router.replace('/welcome'); }} testID="staff-logout">
+          <Icon name="LogOut" size={16} color={colors.dangerText} />
+          <Text style={styles.logoutTxt}>Log out</Text>
+        </TouchableOpacity>
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: colors.background },
+  scroll: { padding: spacing.md, paddingBottom: 60 },
+  greeting: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: spacing.md },
+  avatarBig: { width: 56, height: 56, borderRadius: 20, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
+  avatarImg: { width: '100%', height: '100%' },
+  avatarBigTxt: { color: '#fff', fontSize: 22, fontWeight: '900' },
+  hi: { fontSize: 22, fontWeight: '900', color: colors.textMain },
+  greetSub: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
+  iconBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: colors.surface, alignItems: 'center', justifyContent: 'center', ...shadows.card },
+  tabRow: { gap: 8, paddingVertical: 8 },
+  tabChip: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 14, paddingVertical: 8, borderRadius: radius.full, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+  tabTxt: { fontSize: 12, fontWeight: '700', color: colors.textMuted },
+  hero: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: spacing.lg, borderRadius: radius.lg, marginBottom: spacing.sm },
+  heroLabel: { fontSize: 12, color: colors.textMuted, fontWeight: '700' },
+  heroAmt: { fontSize: 26, fontWeight: '900', color: colors.textMain, marginTop: 4, letterSpacing: -0.5 },
+  heroSub: { fontSize: 12, color: colors.textMuted, marginTop: 4 },
+  row: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: colors.surface, padding: spacing.md, borderRadius: radius.md, ...shadows.card },
+  rowName: { fontSize: 14, fontWeight: '700', color: colors.textMain },
+  rowSub: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  rowAmt: { fontSize: 14, fontWeight: '800', color: colors.textMain },
+  sectionTitle: { fontSize: 12, fontWeight: '800', color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 },
+  emptyTxt: { fontSize: 13, color: colors.textMuted, fontStyle: 'italic', textAlign: 'center', padding: spacing.md },
+  checkBox: { width: 28, height: 28, borderRadius: 8, borderWidth: 2, borderColor: colors.border, alignItems: 'center', justifyContent: 'center' },
+  checkBoxDone: { backgroundColor: colors.primary, borderColor: colors.primary },
+  attBtn: { flex: 1, minWidth: 80, paddingVertical: 12, borderRadius: radius.md, alignItems: 'center', backgroundColor: colors.surfaceAlt },
+  attBtnActive: { backgroundColor: colors.primary },
+  attBtnTxt: { fontSize: 12, fontWeight: '800', color: colors.textMain },
+  attTagTxt: { fontSize: 12, fontWeight: '800' },
+  label: { fontSize: 11, fontWeight: '800', color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 4 },
+  input: { backgroundColor: colors.surface, borderRadius: radius.md, paddingHorizontal: spacing.md, paddingVertical: 12, fontSize: 15, color: colors.textMain, ...shadows.card },
+  sendBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: colors.primary, paddingVertical: 14, borderRadius: radius.full, marginTop: spacing.sm, ...shadows.button },
+  sendTxt: { color: '#fff', fontWeight: '800', fontSize: 14 },
+  logoutBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, padding: spacing.md, marginTop: spacing.xl, backgroundColor: colors.surface, borderRadius: radius.full, ...shadows.card },
+  logoutTxt: { color: colors.dangerText, fontWeight: '700' },
+});
