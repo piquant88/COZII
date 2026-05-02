@@ -130,6 +130,11 @@ export default function HouseholdHub() {
           {SECTIONS.map((s) => {
             const active = section === s.key;
             const t = tints[s.tint];
+            let badge = 0;
+            if (s.key === 'shopping') badge = (shopping || []).filter((r: any) => r.status === 'pending').length;
+            if (s.key === 'tasks') {
+              badge = (tasks || []).filter((x: any) => x.active !== false && !x.completed_today).length;
+            }
             return (
               <TouchableOpacity
                 key={s.key}
@@ -139,6 +144,11 @@ export default function HouseholdHub() {
               >
                 <Icon name={s.icon} size={16} color={active ? t.icon : colors.textMuted} />
                 <Text style={[styles.tabTxt, active && { color: t.icon, fontWeight: '800' }]}>{s.label}</Text>
+                {badge > 0 && (
+                  <View style={styles.chipBadge}>
+                    <Text style={styles.chipBadgeTxt}>{badge > 9 ? '9+' : badge}</Text>
+                  </View>
+                )}
               </TouchableOpacity>
             );
           })}
@@ -177,9 +187,42 @@ export default function HouseholdHub() {
         ) : section === 'shopping' ? (
           <ShoppingSection
             requests={shopping}
+            currency={activeSpace.currency || 'USD'}
             onEdit={(r) => setEdit({ kind: 'shopping', data: r })}
             onStatus={async (r, status) => {
-              try { await api.patch(`/household/shopping/${r.request_id}`, { status }); await load(); }
+              try {
+                if (status === 'rejected') {
+                  // Prompt for a reason (simple one-line via Alert prompt)
+                  Alert.prompt?.('Reject reason', 'Why are you rejecting this? (optional)', async (reason?: string) => {
+                    try {
+                      await api.patch(`/household/shopping/${r.request_id}`, { status: 'rejected', rejected_reason: reason || '' });
+                      await load();
+                    } catch (e: any) { Alert.alert('Error', e?.message || ''); }
+                  });
+                  // Fallback (Android/web): just set rejected without reason
+                  if (!Alert.prompt) {
+                    await api.patch(`/household/shopping/${r.request_id}`, { status: 'rejected' });
+                    await load();
+                  }
+                  return;
+                }
+                if (status === 'purchased') {
+                  Alert.prompt?.('Actual price?', `How much did you pay for ${r.item_name}? (optional)`, async (priceStr?: string) => {
+                    const p = parseFloat((priceStr || '').replace(/[^0-9.]/g, '')) || null;
+                    try {
+                      await api.post(`/household/shopping/${r.request_id}/purchase`, { actual_price: p });
+                      await load();
+                    } catch (e: any) { Alert.alert('Error', e?.message || ''); }
+                  });
+                  if (!Alert.prompt) {
+                    await api.post(`/household/shopping/${r.request_id}/purchase`, {});
+                    await load();
+                  }
+                  return;
+                }
+                await api.patch(`/household/shopping/${r.request_id}`, { status });
+                await load();
+              }
               catch (e: any) { Alert.alert('Error', e?.message || ''); }
             }}
           />
@@ -1182,17 +1225,23 @@ function AttendanceSection({ staff, attendance, date, setDate, onSet }: any) {
   );
 }
 
-function ShoppingSection({ requests, onEdit, onStatus }: any) {
-  const pending = requests.filter((r: ShoppingReq) => r.status === 'pending');
-  const approved = requests.filter((r: ShoppingReq) => r.status === 'approved');
-  const done = requests.filter((r: ShoppingReq) => r.status === 'purchased');
+function ShoppingSection({ requests, onEdit, onStatus, currency }: any) {
+  const [filter, setFilter] = useState<'pending' | 'approved' | 'purchased' | 'rejected' | 'all'>('pending');
+  const counts = {
+    pending: (requests || []).filter((r: ShoppingReq) => r.status === 'pending').length,
+    approved: (requests || []).filter((r: ShoppingReq) => r.status === 'approved').length,
+    purchased: (requests || []).filter((r: ShoppingReq) => r.status === 'purchased').length,
+    rejected: (requests || []).filter((r: ShoppingReq) => r.status === 'rejected').length,
+    all: (requests || []).length,
+  };
+  const filtered = filter === 'all' ? (requests || []) : (requests || []).filter((r: ShoppingReq) => r.status === filter);
 
   if (requests.length === 0) {
     return (
       <View style={styles.empty}>
         <View style={[styles.heroIcon, { backgroundColor: tints.pink.bg }]}><Icon name="ShoppingBag" size={28} color={tints.pink.icon} /></View>
         <Text style={styles.emptyTitle}>Shopping list</Text>
-        <Text style={styles.emptySub}>Your staff will drop things here as they run out — rice, tissue, oil. Approve and buy, or reject. In Phase 4 staff will request directly from their own login.</Text>
+        <Text style={styles.emptySub}>Your staff will drop things here as they run out — rice, tissue, oil. Approve and buy, or reject.</Text>
         <TouchableOpacity style={styles.ctaBtn} onPress={() => onEdit()} testID="shopping-cta">
           <Icon name="Plus" color="#fff" size={16} />
           <Text style={styles.ctaTxt}>Add request</Text>
@@ -1200,13 +1249,31 @@ function ShoppingSection({ requests, onEdit, onStatus }: any) {
       </View>
     );
   }
-  const card = (r: ShoppingReq, showActions: boolean) => {
+  const filters: Array<{ key: typeof filter; label: string; count: number }> = [
+    { key: 'pending', label: 'Pending', count: counts.pending },
+    { key: 'approved', label: 'Approved', count: counts.approved },
+    { key: 'purchased', label: 'Purchased', count: counts.purchased },
+    { key: 'rejected', label: 'Rejected', count: counts.rejected },
+    { key: 'all', label: 'All', count: counts.all },
+  ];
+
+  const card = (r: any) => {
     const urgT = r.urgency === 'high' ? tints.pink : r.urgency === 'low' ? tints.sage : tints.yellow;
+    const curr = r.currency || currency || 'USD';
+    const price = r.actual_price ?? r.estimated_price;
+    const priceLabel = r.actual_price ? 'Paid' : r.estimated_price ? 'Est.' : '';
+    const created = r.created_at ? new Date(r.created_at) : null;
+    const purchased = r.purchased_at ? new Date(r.purchased_at) : null;
+    const approved = r.approved_at ? new Date(r.approved_at) : null;
     return (
       <View key={r.request_id} style={styles.row}>
-        <View style={[styles.avatar, { backgroundColor: urgT.icon }]}>
-          <Icon name="ShoppingBag" size={18} color="#fff" />
-        </View>
+        {r.photo_base64 ? (
+          <Image source={{ uri: r.photo_base64 }} style={styles.shopThumb} />
+        ) : (
+          <View style={[styles.avatar, { backgroundColor: urgT.icon }]}>
+            <Icon name="ShoppingBag" size={18} color="#fff" />
+          </View>
+        )}
         <View style={{ flex: 1 }}>
           <Text style={styles.rowName}>{r.item_name}{r.quantity ? ` · ${r.quantity}` : ''}</Text>
           <Text style={styles.rowSub}>
@@ -1214,26 +1281,49 @@ function ShoppingSection({ requests, onEdit, onStatus }: any) {
             {r.category_name ? ` · ${r.category_name}` : ''}
             {` · ${r.urgency}`}
           </Text>
-          {r.note ? <Text style={[styles.rowSub, { marginTop: 4 }]}>"{r.note}"</Text> : null}
-          {showActions && (
-            <View style={{ flexDirection: 'row', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
-              {r.status === 'pending' && (
-                <>
-                  <TouchableOpacity style={[styles.miniBtn, { backgroundColor: tints.sage.icon }]} onPress={() => onStatus(r, 'approved')}>
-                    <Text style={styles.miniBtnTxt}>Approve</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={[styles.miniBtn, { backgroundColor: tints.pink.icon }]} onPress={() => onStatus(r, 'rejected')}>
-                    <Text style={styles.miniBtnTxt}>Reject</Text>
-                  </TouchableOpacity>
-                </>
-              )}
-              {r.status === 'approved' && (
-                <TouchableOpacity style={[styles.miniBtn, { backgroundColor: colors.primary }]} onPress={() => onStatus(r, 'purchased')}>
-                  <Text style={styles.miniBtnTxt}>Mark purchased</Text>
-                </TouchableOpacity>
-              )}
+          {price ? (
+            <View style={styles.priceChip}>
+              <Icon name="DollarSign" size={10} color={tints.sage.icon} />
+              <Text style={styles.priceChipTxt}>{priceLabel} {formatMoney(price, curr)}</Text>
             </View>
-          )}
+          ) : null}
+          {r.note ? <Text style={[styles.rowSub, { marginTop: 4, fontStyle: 'italic' }]}>"{r.note}"</Text> : null}
+          {created ? (
+            <Text style={styles.metaTime}>Requested {created.toLocaleDateString()} {created.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>
+          ) : null}
+          {approved && r.status !== 'rejected' ? (
+            <Text style={styles.metaTime}>Approved {approved.toLocaleDateString()} {approved.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>
+          ) : null}
+          {purchased ? (
+            <Text style={styles.metaTime}>Purchased {purchased.toLocaleDateString()} {purchased.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>
+          ) : null}
+          {r.rejected_reason ? (
+            <Text style={[styles.metaTime, { color: tints.pink.icon }]}>Rejected: "{r.rejected_reason}"</Text>
+          ) : null}
+
+          {/* Action row */}
+          <View style={{ flexDirection: 'row', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
+            {r.status === 'pending' && (
+              <>
+                <TouchableOpacity style={[styles.miniBtn, { backgroundColor: tints.sage.icon }]} onPress={() => onStatus(r, 'approved')} testID={`shop-approve-${r.request_id}`}>
+                  <Text style={styles.miniBtnTxt}>Approve</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[styles.miniBtn, { backgroundColor: tints.pink.icon }]} onPress={() => onStatus(r, 'rejected')} testID={`shop-reject-${r.request_id}`}>
+                  <Text style={styles.miniBtnTxt}>Reject</Text>
+                </TouchableOpacity>
+              </>
+            )}
+            {r.status === 'approved' && (
+              <TouchableOpacity style={[styles.miniBtn, { backgroundColor: colors.primary }]} onPress={() => onStatus(r, 'purchased')} testID={`shop-purchase-${r.request_id}`}>
+                <Text style={styles.miniBtnTxt}>Mark purchased</Text>
+              </TouchableOpacity>
+            )}
+            {r.status === 'rejected' && (
+              <TouchableOpacity style={[styles.miniBtn, { backgroundColor: tints.sage.icon }]} onPress={() => onStatus(r, 'approved')}>
+                <Text style={styles.miniBtnTxt}>Re-approve</Text>
+              </TouchableOpacity>
+            )}
+          </View>
         </View>
         <TouchableOpacity onPress={() => onEdit(r)} style={{ padding: 6 }}>
           <Icon name="Edit3" size={14} color={colors.textMuted} />
@@ -1244,9 +1334,28 @@ function ShoppingSection({ requests, onEdit, onStatus }: any) {
 
   return (
     <View style={{ gap: 8 }}>
-      {pending.length > 0 && (<><Text style={styles.sectionTitle}>Pending approval</Text>{pending.map((r: ShoppingReq) => card(r, true))}</>)}
-      {approved.length > 0 && (<><Text style={[styles.sectionTitle, { marginTop: spacing.md }]}>Approved — go buy</Text>{approved.map((r: ShoppingReq) => card(r, true))}</>)}
-      {done.length > 0 && (<><Text style={[styles.sectionTitle, { marginTop: spacing.md }]}>Purchased</Text>{done.slice(0, 10).map((r: ShoppingReq) => card(r, false))}</>)}
+      <View style={styles.shopFilterRow}>
+        {filters.map((f) => (
+          <TouchableOpacity
+            key={f.key}
+            style={[styles.shopFilterChip, filter === f.key && styles.shopFilterActive]}
+            onPress={() => setFilter(f.key)}
+            testID={`shop-filter-${f.key}`}
+          >
+            <Text style={[styles.shopFilterTxt, filter === f.key && styles.shopFilterTxtActive]}>{f.label}</Text>
+            {f.count > 0 && (
+              <View style={{ minWidth: 16, height: 16, borderRadius: 8, paddingHorizontal: 4, alignItems: 'center', justifyContent: 'center', backgroundColor: filter === f.key ? '#fff' : tints.pink.icon }}>
+                <Text style={{ fontSize: 9, fontWeight: '900', color: filter === f.key ? colors.textMain : '#fff' }}>{f.count}</Text>
+              </View>
+            )}
+          </TouchableOpacity>
+        ))}
+      </View>
+      {filtered.length === 0 ? (
+        <Text style={styles.emptyTxt}>No {filter} requests.</Text>
+      ) : (
+        filtered.map(card)
+      )}
     </View>
   );
 }
@@ -1458,6 +1567,17 @@ const styles = StyleSheet.create({
   bannerTxt: { flex: 1, fontSize: 12, color: colors.textMain, lineHeight: 16 },
   tabRow: { paddingHorizontal: spacing.md, gap: 8, paddingVertical: 8 },
   tabChip: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 14, paddingVertical: 8, borderRadius: radius.full, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+  chipBadge: { minWidth: 18, height: 18, borderRadius: 9, backgroundColor: tints.pink.icon, paddingHorizontal: 5, alignItems: 'center', justifyContent: 'center', marginLeft: 2 },
+  chipBadgeTxt: { fontSize: 10, fontWeight: '900', color: '#fff' },
+  shopFilterRow: { flexDirection: 'row', gap: 6, flexWrap: 'wrap', marginBottom: 8 },
+  shopFilterChip: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: radius.full, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+  shopFilterActive: { backgroundColor: colors.textMain, borderColor: colors.textMain },
+  shopFilterTxt: { fontSize: 11, fontWeight: '700', color: colors.textMuted },
+  shopFilterTxtActive: { color: '#fff' },
+  shopThumb: { width: 44, height: 44, borderRadius: radius.sm, marginRight: 8 },
+  priceChip: { flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 6, paddingVertical: 2, borderRadius: radius.sm, backgroundColor: tints.sage.bg, marginTop: 4, alignSelf: 'flex-start' },
+  priceChipTxt: { fontSize: 10, fontWeight: '800', color: tints.sage.icon },
+  metaTime: { fontSize: 10, color: colors.textMuted, marginTop: 2 },
   tabTxt: { fontSize: 12, fontWeight: '700', color: colors.textMuted },
   scroll: { padding: spacing.md, paddingBottom: 120 },
   empty: { alignItems: 'center', paddingVertical: 40 },

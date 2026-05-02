@@ -2366,8 +2366,21 @@ class TaskCompletion(BaseModel):
     date: str  # YYYY-MM-DD
     completed_at: datetime
     completed_by: str
+    completed_by_name: Optional[str] = None
+    staff_id: Optional[str] = None
+    photo_base64: Optional[str] = None
+    notes: Optional[str] = None  # staff's own completion note
+    owner_note: Optional[str] = None  # owner review/comment
+
+
+class CompleteTaskRequest(BaseModel):
+    date: Optional[str] = None  # YYYY-MM-DD, defaults to today
     photo_base64: Optional[str] = None
     notes: Optional[str] = None
+
+
+class AnnotateCompletionRequest(BaseModel):
+    owner_note: str
 
 
 class AttendanceLog(BaseModel):
@@ -2399,10 +2412,18 @@ class ShoppingRequest(BaseModel):
     category_name: Optional[str] = None
     urgency: str = "normal"  # low | normal | high
     status: str = "pending"  # pending | approved | purchased | rejected
+    estimated_price: Optional[float] = None
+    actual_price: Optional[float] = None
+    currency: Optional[str] = None
+    photo_base64: Optional[str] = None
     requested_by: str
     requested_by_name: Optional[str] = None
     requested_by_staff_id: Optional[str] = None
     approved_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    rejected_reason: Optional[str] = None
+    purchased_by: Optional[str] = None
+    purchased_at: Optional[datetime] = None
     fulfilled_at: Optional[datetime] = None
     created_at: datetime
 
@@ -2415,6 +2436,8 @@ class CreateShoppingRequest(BaseModel):
     category_id: Optional[str] = None
     urgency: str = "normal"
     requested_by_staff_id: Optional[str] = None
+    estimated_price: Optional[float] = None
+    photo_base64: Optional[str] = None
 
 
 class UpdateShoppingRequest(BaseModel):
@@ -2424,6 +2447,15 @@ class UpdateShoppingRequest(BaseModel):
     category_id: Optional[str] = None
     urgency: Optional[str] = None
     status: Optional[str] = None
+    estimated_price: Optional[float] = None
+    actual_price: Optional[float] = None
+    photo_base64: Optional[str] = None
+    rejected_reason: Optional[str] = None
+
+
+class MarkPurchasedRequest(BaseModel):
+    actual_price: Optional[float] = None
+    note: Optional[str] = None
 
 
 def _task_due_on(task: Dict[str, Any], date_str: str) -> bool:
@@ -2716,6 +2748,16 @@ async def complete_task(task_id: str, body: CompleteTaskRequest, user: User = De
     if existing:
         await db.task_completions.delete_one({"task_id": task_id, "date": date_str})
         return {"completed": False}
+    # Enforce photo proof when task requires it
+    if t.get("requires_photo") and not body.photo_base64:
+        raise HTTPException(400, "This task requires a photo to mark complete")
+    # Find the staff_id for the completer (if they are linked as staff)
+    staff_id = None
+    staff_name = None
+    linked_staff = await db.staff_members.find_one({"space_id": t["space_id"], "user_id": user.user_id}, {"_id": 0})
+    if linked_staff:
+        staff_id = linked_staff["staff_id"]
+        staff_name = linked_staff.get("name")
     doc = {
         "completion_id": gen_id("comp"),
         "task_id": task_id,
@@ -2723,11 +2765,66 @@ async def complete_task(task_id: str, body: CompleteTaskRequest, user: User = De
         "date": date_str,
         "completed_at": now_utc(),
         "completed_by": user.user_id,
+        "completed_by_name": staff_name or user.name if hasattr(user, 'name') else staff_name,
+        "staff_id": staff_id,
         "photo_base64": body.photo_base64,
         "notes": body.notes,
+        "owner_note": None,
     }
     await db.task_completions.insert_one(doc)
+    # Notify space members (owner) about completion
+    space = await db.family_spaces.find_one({"space_id": t["space_id"]}, {"_id": 0})
+    if space:
+        for mid in [space["owner_id"]] + list(space.get("member_ids", []) or []):
+            if mid == user.user_id:
+                continue
+            await _create_notification(
+                space_id=t["space_id"],
+                user_id=mid,
+                kind="task_done",
+                title=f"Task done: {t['title']}",
+                body=f"{staff_name or 'Someone'} completed this task" + (f" · with photo" if body.photo_base64 else "") + (f" · \"{body.notes}\"" if body.notes else ""),
+                data={"task_id": task_id, "completion_id": doc["completion_id"]},
+            )
     return {"completed": True, "completion_id": doc["completion_id"]}
+
+
+@api_router.patch("/household/completions/{completion_id}/annotate")
+async def annotate_completion(completion_id: str, body: AnnotateCompletionRequest, user: User = Depends(get_current_user)):
+    c = await db.task_completions.find_one({"completion_id": completion_id}, {"_id": 0})
+    if not c:
+        raise HTTPException(404, "Completion not found")
+    await assert_space_member(c["space_id"], user.user_id)
+    await db.task_completions.update_one(
+        {"completion_id": completion_id},
+        {"$set": {"owner_note": body.owner_note}},
+    )
+    # Notify the staff who completed it
+    if c.get("completed_by") and c["completed_by"] != user.user_id:
+        await _create_notification(
+            space_id=c["space_id"],
+            user_id=c["completed_by"],
+            kind="task_comment",
+            title="Comment on your task",
+            body=body.owner_note[:200],
+            data={"task_id": c["task_id"], "completion_id": completion_id},
+        )
+    out = await db.task_completions.find_one({"completion_id": completion_id}, {"_id": 0})
+    return out
+
+
+@api_router.get("/household/completions")
+async def list_completions(space_id: str, task_id: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None, user: User = Depends(get_current_user)):
+    await assert_space_member(space_id, user.user_id)
+    q: Dict[str, Any] = {"space_id": space_id}
+    if task_id:
+        q["task_id"] = task_id
+    if date_from and date_to:
+        q["date"] = {"$gte": date_from, "$lte": date_to}
+    elif date_from:
+        q["date"] = {"$gte": date_from}
+    docs = await db.task_completions.find(q, {"_id": 0}).sort("completed_at", -1).to_list(500)
+    return docs
 
 
 # ----- Attendance -----
@@ -2802,7 +2899,7 @@ async def list_shopping(space_id: str, status: Optional[str] = None, user: User 
 
 @api_router.post("/household/shopping", response_model=ShoppingRequest)
 async def create_shopping(body: CreateShoppingRequest, user: User = Depends(get_current_user)):
-    await assert_space_member(body.space_id, user.user_id)
+    space = await assert_space_member(body.space_id, user.user_id)
     doc = {
         "request_id": gen_id("shop"),
         "space_id": body.space_id,
@@ -2812,14 +2909,48 @@ async def create_shopping(body: CreateShoppingRequest, user: User = Depends(get_
         "category_id": body.category_id,
         "urgency": body.urgency if body.urgency in ("low", "normal", "high") else "normal",
         "status": "pending",
+        "estimated_price": body.estimated_price,
+        "actual_price": None,
+        "currency": (space.get("currency") if isinstance(space, dict) else None) or "USD",
+        "photo_base64": body.photo_base64,
         "requested_by": user.user_id,
         "requested_by_staff_id": body.requested_by_staff_id,
         "approved_by": None,
+        "approved_at": None,
+        "rejected_reason": None,
+        "purchased_by": None,
+        "purchased_at": None,
         "fulfilled_at": None,
         "created_at": now_utc(),
     }
     await db.shopping_requests.insert_one(doc)
     doc.pop("_id", None)
+    # Notify owner + members (but not the requester)
+    if isinstance(space, dict):
+        # Find requester display name
+        who = "Someone"
+        if body.requested_by_staff_id:
+            st = await db.staff_members.find_one({"staff_id": body.requested_by_staff_id}, {"_id": 0, "name": 1})
+            if st:
+                who = st.get("name") or who
+        else:
+            u = await db.users.find_one({"user_id": user.user_id}, {"_id": 0, "name": 1})
+            if u:
+                who = u.get("name") or who
+        price_blurb = ""
+        if body.estimated_price:
+            price_blurb = f" (est. {doc['currency']} {body.estimated_price:,.0f})"
+        for mid in [space.get("owner_id")] + list(space.get("member_ids", []) or []):
+            if not mid or mid == user.user_id:
+                continue
+            await _create_notification(
+                space_id=body.space_id,
+                user_id=mid,
+                kind="shopping_request",
+                title=f"Shopping request: {doc['item_name']}",
+                body=f"{who} requested {doc['item_name']}{(' · ' + doc['quantity']) if doc.get('quantity') else ''}{price_blurb}",
+                data={"request_id": doc["request_id"]},
+            )
     return ShoppingRequest(**doc)
 
 
@@ -2830,18 +2961,86 @@ async def update_shopping(request_id: str, body: UpdateShoppingRequest, user: Us
         raise HTTPException(404, "Request not found")
     await assert_space_member(r["space_id"], user.user_id)
     updates: Dict[str, Any] = {}
-    for k in ("item_name", "quantity", "note", "category_id", "urgency", "status"):
+    for k in ("item_name", "quantity", "note", "category_id", "urgency", "status", "estimated_price", "actual_price", "photo_base64", "rejected_reason"):
         v = getattr(body, k)
         if v is not None:
             updates[k] = v
-    if updates.get("status") in ("approved", "purchased", "rejected"):
+    prev_status = r.get("status")
+    new_status = updates.get("status", prev_status)
+    if new_status in ("approved", "rejected") and prev_status != new_status:
         updates["approved_by"] = user.user_id
-    if updates.get("status") == "purchased":
+        updates["approved_at"] = now_utc()
+    if new_status == "purchased" and prev_status != "purchased":
+        updates["purchased_by"] = user.user_id
+        updates["purchased_at"] = now_utc()
         updates["fulfilled_at"] = now_utc()
     if updates:
         await db.shopping_requests.update_one({"request_id": request_id}, {"$set": updates})
     out = await db.shopping_requests.find_one({"request_id": request_id}, {"_id": 0})
+    # Notify requester on status changes
+    if new_status != prev_status and r.get("requested_by") and r["requested_by"] != user.user_id:
+        await _create_notification(
+            space_id=r["space_id"],
+            user_id=r["requested_by"],
+            kind="shopping_status",
+            title=f"Shopping: {r['item_name']} · {new_status}",
+            body=(body.rejected_reason or "") if new_status == "rejected" else ("Your request was " + new_status),
+            data={"request_id": request_id, "status": new_status},
+        )
     return ShoppingRequest(**out)
+
+
+@api_router.post("/household/shopping/{request_id}/purchase", response_model=ShoppingRequest)
+async def mark_shopping_purchased(request_id: str, body: MarkPurchasedRequest, user: User = Depends(get_current_user)):
+    r = await db.shopping_requests.find_one({"request_id": request_id}, {"_id": 0})
+    if not r:
+        raise HTTPException(404, "Request not found")
+    await assert_space_member(r["space_id"], user.user_id)
+    updates = {
+        "status": "purchased",
+        "purchased_by": user.user_id,
+        "purchased_at": now_utc(),
+        "fulfilled_at": now_utc(),
+    }
+    if body.actual_price is not None:
+        updates["actual_price"] = body.actual_price
+    if body.note:
+        updates["note"] = (r.get("note") or "") + ("\n" if r.get("note") else "") + f"[Purchase] {body.note}"
+    await db.shopping_requests.update_one({"request_id": request_id}, {"$set": updates})
+    out = await db.shopping_requests.find_one({"request_id": request_id}, {"_id": 0})
+    if r.get("requested_by") and r["requested_by"] != user.user_id:
+        await _create_notification(
+            space_id=r["space_id"],
+            user_id=r["requested_by"],
+            kind="shopping_status",
+            title=f"Purchased: {r['item_name']}",
+            body=(body.note or "The item has been purchased."),
+            data={"request_id": request_id, "status": "purchased"},
+        )
+    return ShoppingRequest(**out)
+
+
+# Count badges for household tabs (for owners/members)
+@api_router.get("/household/counts")
+async def household_counts(space_id: str, user: User = Depends(get_current_user)):
+    await assert_space_member(space_id, user.user_id)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # Shopping pending
+    shop_pending = await db.shopping_requests.count_documents({"space_id": space_id, "status": "pending"})
+    shop_approved = await db.shopping_requests.count_documents({"space_id": space_id, "status": "approved"})
+    # Tasks open (assigned today, not yet completed)
+    task_docs = await db.task_templates.find({"space_id": space_id, "active": True}, {"_id": 0}).to_list(1000)
+    comps_today = await db.task_completions.find({"space_id": space_id, "date": today}, {"_id": 0, "task_id": 1}).to_list(1000)
+    completed_ids = {c["task_id"] for c in comps_today}
+    tasks_open = 0
+    for t in task_docs:
+        if _task_due_on(t, today) and t["task_id"] not in completed_ids:
+            tasks_open += 1
+    return {
+        "shopping_pending": shop_pending,
+        "shopping_approved": shop_approved,
+        "tasks_open_today": tasks_open,
+    }
 
 
 @api_router.delete("/household/shopping/{request_id}")

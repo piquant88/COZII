@@ -32,8 +32,13 @@ export default function StaffHome() {
   const [tab, setTab] = useState<typeof SECTIONS[number]['key']>('today');
   const [newReq, setNewReq] = useState('');
   const [newQty, setNewQty] = useState('');
+  const [newPrice, setNewPrice] = useState('');
+  const [newPhoto, setNewPhoto] = useState<string | null>(null);
+  const [taskPhoto, setTaskPhoto] = useState<{ [taskId: string]: string }>({});
+  const [taskNote, setTaskNote] = useState<{ [taskId: string]: string }>({});
   const [notifs, setNotifs] = useState<any[]>([]);
   const [showNotifs, setShowNotifs] = useState(false);
+  const [myShop, setMyShop] = useState<any[]>([]);
 
   const load = useCallback(async () => {
     if (!activeSpace) return;
@@ -63,8 +68,23 @@ export default function StaffHome() {
 
   const toggleTask = async (taskId: string) => {
     if (isPreview) { Alert.alert('Preview mode', 'Actions are disabled. This is how the staff sees it.'); return; }
+    const t = (data?.today_tasks || []).find((x: any) => x.task_id === taskId);
+    const photo = taskPhoto[taskId];
+    const note = taskNote[taskId];
+    // If task already done → toggle off is allowed
+    if (!t?.completed_today && t?.requires_photo && !photo) {
+      Alert.alert('Photo required', 'This task needs a photo as proof. Tap the camera icon below the task first.');
+      return;
+    }
     try {
-      await api.post(`/household/tasks/${taskId}/complete`, { date: new Date().toISOString().slice(0, 10) });
+      await api.post(`/household/tasks/${taskId}/complete`, {
+        date: new Date().toISOString().slice(0, 10),
+        photo_base64: photo || null,
+        notes: note || null,
+      });
+      // clear local input for that task
+      setTaskPhoto((p) => { const n = { ...p }; delete n[taskId]; return n; });
+      setTaskNote((p) => { const n = { ...p }; delete n[taskId]; return n; });
       await load();
     } catch (e: any) { Alert.alert('Error', e?.message || ''); }
   };
@@ -82,10 +102,41 @@ export default function StaffHome() {
     if (isPreview) { Alert.alert('Preview mode', 'Actions are disabled. This is how the staff sees it.'); return; }
     if (!activeSpace || !newReq.trim() || !data?.staff) return;
     try {
-      await api.post('/household/shopping', { space_id: activeSpace.space_id, item_name: newReq.trim(), quantity: newQty || null, requested_by_staff_id: data.staff.staff_id, urgency: 'normal' });
-      setNewReq(''); setNewQty('');
+      const priceNum = parseFloat(newPrice.replace(/[^0-9.]/g, '')) || null;
+      await api.post('/household/shopping', {
+        space_id: activeSpace.space_id,
+        item_name: newReq.trim(),
+        quantity: newQty || null,
+        requested_by_staff_id: data.staff.staff_id,
+        urgency: 'normal',
+        estimated_price: priceNum,
+        photo_base64: newPhoto,
+      });
+      setNewReq(''); setNewQty(''); setNewPrice(''); setNewPhoto(null);
       Alert.alert('Sent', 'Your request is waiting for approval.');
       await load();
+    } catch (e: any) { Alert.alert('Error', e?.message || ''); }
+  };
+
+  const pickShoppingPhoto = async () => {
+    if (isPreview) return;
+    try {
+      const { launchImageLibraryAsync, MediaTypeOptions } = await import('expo-image-picker');
+      const res = await launchImageLibraryAsync({ mediaTypes: MediaTypeOptions.Images, base64: true, quality: 0.5, allowsEditing: false });
+      if (!res.canceled && res.assets?.[0]?.base64) {
+        setNewPhoto(`data:image/jpeg;base64,${res.assets[0].base64}`);
+      }
+    } catch (e: any) { Alert.alert('Error', e?.message || 'Could not pick image'); }
+  };
+
+  const pickTaskPhoto = async (taskId: string) => {
+    if (isPreview) return;
+    try {
+      const { launchImageLibraryAsync, MediaTypeOptions } = await import('expo-image-picker');
+      const res = await launchImageLibraryAsync({ mediaTypes: MediaTypeOptions.Images, base64: true, quality: 0.5, allowsEditing: false });
+      if (!res.canceled && res.assets?.[0]?.base64) {
+        setTaskPhoto((p) => ({ ...p, [taskId]: `data:image/jpeg;base64,${res.assets[0].base64}` }));
+      }
     } catch (e: any) { Alert.alert('Error', e?.message || ''); }
   };
 
@@ -219,18 +270,67 @@ export default function StaffHome() {
             {totalTasks === 0 ? (
               <Text style={styles.emptyTxt}>No tasks for today. Enjoy your day!</Text>
             ) : (
-              (data.today_tasks || []).map((t: any) => (
-                <View key={t.task_id} style={[styles.row, t.completed_today && { opacity: 0.55 }]}>
-                  <TouchableOpacity style={[styles.checkBox, t.completed_today && styles.checkBoxDone]} onPress={() => toggleTask(t.task_id)} testID={`task-${t.task_id}`}>
-                    {t.completed_today && <Icon name="Check" size={14} color="#fff" />}
-                  </TouchableOpacity>
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.rowName, t.completed_today && { textDecorationLine: 'line-through' }]} numberOfLines={2}>{t.title}</Text>
-                    {t.description ? <Text style={styles.rowSub} numberOfLines={2}>{t.description}</Text> : null}
-                    {t.due_time ? <Text style={styles.rowSub}>Due at {t.due_time}</Text> : null}
+              (data.today_tasks || []).map((t: any) => {
+                const compAt = t.completion?.completed_at ? new Date(t.completion.completed_at) : null;
+                const needsPhoto = !!t.requires_photo;
+                const stagedPhoto = taskPhoto[t.task_id];
+                const stagedNote = taskNote[t.task_id];
+                return (
+                <View key={t.task_id} style={[styles.row, { flexDirection: 'column', alignItems: 'stretch', gap: 6 }, t.completed_today && { opacity: 0.85 }]}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                    <TouchableOpacity style={[styles.checkBox, t.completed_today && styles.checkBoxDone]} onPress={() => toggleTask(t.task_id)} testID={`task-${t.task_id}`}>
+                      {t.completed_today && <Icon name="Check" size={14} color="#fff" />}
+                    </TouchableOpacity>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.rowName, t.completed_today && { textDecorationLine: 'line-through' }]} numberOfLines={2}>{t.title}</Text>
+                      {t.description ? <Text style={styles.rowSub} numberOfLines={2}>{t.description}</Text> : null}
+                      <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap', marginTop: 2 }}>
+                        {t.due_time ? <Text style={[styles.rowSub, { fontWeight: '800' }]}>Due {t.due_time}</Text> : null}
+                        {needsPhoto && !t.completed_today ? (
+                          <Text style={[styles.rowSub, { color: tints.pink.icon, fontWeight: '800' }]}>📷 photo required</Text>
+                        ) : null}
+                        {compAt ? (
+                          <Text style={[styles.rowSub, { color: tints.sage.icon }]}>Done {compAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>
+                        ) : null}
+                      </View>
+                    </View>
                   </View>
+                  {!t.completed_today && (
+                    <View style={{ gap: 6 }}>
+                      <View style={{ flexDirection: 'row', gap: 6 }}>
+                        <TouchableOpacity style={[styles.miniPhoto, stagedPhoto && { padding: 0, overflow: 'hidden' }]} onPress={() => pickTaskPhoto(t.task_id)} testID={`task-photo-${t.task_id}`}>
+                          {stagedPhoto ? (
+                            <Image source={{ uri: stagedPhoto }} style={{ width: '100%', height: '100%' }} />
+                          ) : (
+                            <Icon name="Camera" size={16} color={needsPhoto ? tints.pink.icon : colors.textMuted} />
+                          )}
+                        </TouchableOpacity>
+                        <TextInput
+                          style={[styles.input, { flex: 1, minHeight: 40 }]}
+                          value={stagedNote || ''}
+                          onChangeText={(v) => setTaskNote((p) => ({ ...p, [t.task_id]: v }))}
+                          placeholder="Add a note (optional)"
+                          placeholderTextColor={colors.textMuted}
+                          testID={`task-note-${t.task_id}`}
+                        />
+                      </View>
+                    </View>
+                  )}
+                  {t.completed_today && t.completion?.photo_base64 && (
+                    <Image source={{ uri: t.completion.photo_base64 }} style={styles.doneThumb} />
+                  )}
+                  {t.completed_today && t.completion?.notes && (
+                    <Text style={[styles.rowSub, { fontStyle: 'italic' }]}>"{t.completion.notes}"</Text>
+                  )}
+                  {t.completed_today && t.completion?.owner_note && (
+                    <View style={styles.ownerNote}>
+                      <Icon name="MessageSquare" size={12} color={tints.blue.icon} />
+                      <Text style={styles.ownerNoteTxt}>{t.completion.owner_note}</Text>
+                    </View>
+                  )}
                 </View>
-              ))
+                );
+              })
             )}
           </View>
         )}
@@ -270,15 +370,38 @@ export default function StaffHome() {
             <View style={[styles.hero, { backgroundColor: tints.pink.bg }]}>
               <View>
                 <Text style={styles.heroLabel}>Need something?</Text>
-                <Text style={styles.heroAmt}>Send a quick request</Text>
-                <Text style={styles.heroSub}>Owner will see it and buy when they can.</Text>
+                <Text style={styles.heroAmt}>Send a request</Text>
+                <Text style={styles.heroSub}>Add a rough price + photo if you can.</Text>
               </View>
               <Icon name="ShoppingBag" size={40} color={tints.pink.icon} />
             </View>
             <Text style={styles.label}>What's running low?</Text>
             <TextInput style={styles.input} value={newReq} onChangeText={setNewReq} placeholder="e.g. Rice" placeholderTextColor={colors.textMuted} testID="staff-shop-name" />
-            <Text style={styles.label}>Quantity (optional)</Text>
-            <TextInput style={styles.input} value={newQty} onChangeText={setNewQty} placeholder="e.g. 5 kg" placeholderTextColor={colors.textMuted} />
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.label}>Quantity</Text>
+                <TextInput style={styles.input} value={newQty} onChangeText={setNewQty} placeholder="e.g. 5 kg" placeholderTextColor={colors.textMuted} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.label}>Estimated price ({cur})</Text>
+                <TextInput style={styles.input} value={newPrice} onChangeText={setNewPrice} placeholder="e.g. 50000" placeholderTextColor={colors.textMuted} keyboardType="numeric" testID="staff-shop-price" />
+              </View>
+            </View>
+            <TouchableOpacity style={styles.photoPick} onPress={pickShoppingPhoto} activeOpacity={0.8} testID="staff-shop-photo">
+              {newPhoto ? (
+                <Image source={{ uri: newPhoto }} style={styles.photoImg} />
+              ) : (
+                <View style={{ alignItems: 'center', gap: 4 }}>
+                  <Icon name="Camera" size={18} color={colors.primary} />
+                  <Text style={styles.photoTxt}>Add photo (optional)</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+            {newPhoto && (
+              <TouchableOpacity onPress={() => setNewPhoto(null)} style={{ alignSelf: 'center' }}>
+                <Text style={{ color: colors.textMuted, fontSize: 11 }}>Remove photo</Text>
+              </TouchableOpacity>
+            )}
             <TouchableOpacity style={[styles.sendBtn, !newReq.trim() && { opacity: 0.5 }]} onPress={submitRequest} disabled={!newReq.trim()} testID="staff-shop-send">
               <Icon name="ArrowRight" size={16} color="#fff" />
               <Text style={styles.sendTxt}>Send request</Text>
@@ -356,6 +479,13 @@ const styles = StyleSheet.create({
   previewTxt: { flex: 1, fontSize: 12, fontWeight: '800', color: tints.blue.icon },
   previewExit: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: radius.full, backgroundColor: '#fff' },
   previewExitTxt: { fontSize: 11, fontWeight: '800', color: tints.blue.icon },
+  photoPick: { height: 80, borderWidth: 1, borderStyle: 'dashed', borderColor: colors.border, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceAlt, overflow: 'hidden' },
+  photoImg: { width: '100%', height: '100%' },
+  photoTxt: { fontSize: 12, color: colors.primary, fontWeight: '700' },
+  miniPhoto: { width: 40, height: 40, borderRadius: radius.sm, backgroundColor: colors.surfaceAlt, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.border },
+  doneThumb: { width: 120, height: 80, borderRadius: radius.sm, marginTop: 6 },
+  ownerNote: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: tints.blue.bg, padding: 8, borderRadius: radius.sm, marginTop: 4 },
+  ownerNoteTxt: { flex: 1, fontSize: 12, color: tints.blue.icon, fontWeight: '600' },
   tabRow: { gap: 8, paddingVertical: 8 },
   tabChip: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 14, paddingVertical: 8, borderRadius: radius.full, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
   tabTxt: { fontSize: 12, fontWeight: '700', color: colors.textMuted },

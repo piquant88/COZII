@@ -1661,3 +1661,242 @@ agent_communication:
       Task "Staff active/end_date lifecycle + report filter" updated to
       working=true, needs_retesting=false, stuck_count=0. No further backend
       work required. No frontend testing performed (per protocol).
+
+## 2026-06-XX — Phase 7: Shopping/Task upgrades (prices, photos, notifications, timestamps)
+
+backend:
+  - task: "Shopping requests: price + photo + notifications + purchase flow"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          ShoppingRequest now includes estimated_price, actual_price, currency,
+          photo_base64, approved_at, rejected_reason, purchased_by, purchased_at.
+          POST /household/shopping accepts estimated_price and photo_base64 and
+          creates a 'shopping_request' notification for the space owner + members
+          (not the requester). PATCH adds approved_at on approve/reject and
+          notifies the requester with a 'shopping_status' notification.
+          New: POST /household/shopping/{id}/purchase {actual_price?, note?} marks
+          purchased with timestamp, appends purchase note, and notifies requester.
+      - working: true
+        agent: "testing"
+        comment: |
+          Phase 7 backend testing 2026-06-XX via /app/backend_test_phase7.py
+          (33/33 PASS) against the public preview URL. Setup: registered fresh
+          owner (Anya Sharma) + staff (Sari Putri) + outsider; created a
+          household space currency=IDR; staff joined via the staff invite_code.
+          ✅ POST /household/shopping as STAFF with {item_name:"Rice",
+             quantity:"5 kg", estimated_price:50000, photo_base64:<jpeg data
+             URI>, requested_by_staff_id, urgency:"high"} → 200 with
+             estimated_price=50000, photo_base64 preserved verbatim,
+             currency="IDR" (matches space), status="pending", urgency="high".
+          ✅ Owner GET /api/notifications?space_id=... returns a
+             'shopping_request' notification titled exactly
+             "Shopping request: Rice".
+          ✅ Owner PATCH /household/shopping/{id} {status:"approved"} → 200,
+             approved_at populated, approved_by==owner.user_id. Staff GET
+             /notifications shows a 'shopping_status' notif titled
+             "Shopping: Rice · approved".
+          ✅ For a separate pending request, PATCH {status:"rejected",
+             rejected_reason:"too expensive"} stores rejected_reason and the
+             staff's 'shopping_status' notif body contains "too expensive".
+          ✅ POST /household/shopping/{id}/purchase {actual_price:55000,
+             note:"bought at supermarket"} → status="purchased",
+             purchased_at populated, actual_price=55000, request.note
+             appended with "[Purchase] bought at supermarket".
+          ✅ Requester (staff) GET /notifications shows a 'shopping_status'
+             notif titled "Purchased: Rice".
+  - task: "Task completions: photo enforcement, owner comments, timestamps, staff link"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          complete_task now 400's if task.requires_photo && no photo_base64.
+          TaskCompletion doc now stores completed_by_name, staff_id (linked
+          staff if completer is staff), and owner_note. Completion also
+          broadcasts 'task_done' notifications to space owner and members.
+          New endpoint: PATCH /household/completions/{id}/annotate {owner_note}
+          lets owner add a comment — notifies the staff.
+          New endpoint: GET /household/completions?space_id=&task_id=&date_from=
+          lists completions for review.
+      - working: true
+        agent: "testing"
+        comment: |
+          Phase 7 task-completion enforcement verified end-to-end:
+          ✅ Owner POST /household/tasks {space_id, title:"Clean kitchen",
+             staff_id, recurrence:"daily", requires_photo:true} → 200,
+             requires_photo=true on the returned TaskTemplate.
+          ✅ As STAFF user, POST /household/tasks/{id}/complete {} → 400 with
+             detail message containing "requires a photo".
+          ✅ POST /household/tasks/{id}/complete {photo_base64:<jpeg>} → 200,
+             completion_id returned. GET /household/completions confirms the
+             stored row has staff_id linked to the joined staff and
+             completed_by_name="Sari Putri".
+          ✅ Owner GET /api/notifications shows a 'task_done' notification
+             titled "Task done: Clean kitchen".
+          ✅ Owner PATCH /household/completions/{completion_id}/annotate
+             {owner_note:"Great job"} → 200; staff GET /api/notifications
+             returns a 'task_comment' notification with body containing
+             "Great job".
+  - task: "Badge counts for household tabs"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          New GET /household/counts?space_id returns
+            { shopping_pending, shopping_approved, tasks_open_today }.
+          Used as a backend truth for badge counts, but frontend also computes
+          locally from already-loaded data for immediate feedback.
+      - working: true
+        agent: "testing"
+        comment: |
+          ✅ GET /api/household/counts?space_id=X returns integer values for
+             shopping_pending, shopping_approved, tasks_open_today.
+          ✅ After creating a fresh pending shopping request and a fresh
+             non-completed daily task, the counts increment correctly
+             (shopping_pending 0→1; tasks_open_today 0→1).
+          ✅ Non-member GET /household/counts → 403 ("Not a member of this
+             space"). Regression spot-check: quick task notification
+             (POST /household/tasks/quick) still creates a 'task_assigned'
+             notif titled "Quick task: Take out trash" for the linked staff
+             user. 33/33 PASS overall.
+
+frontend:
+  - task: "Staff shopping form — price, photo, richer UX"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/staff-home.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+  - task: "Staff task completion — photo proof, required enforcement, note, timestamps"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/staff-home.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Each task row now has an inline 📷 photo picker + note input. If
+          task.requires_photo is true, tapping the checkbox without a photo
+          shows an Alert 'Photo required'. After completion, the photo and
+          note are rendered below the row. Owner comments (owner_note) show
+          as a blue call-out.
+  - task: "Owner ShoppingSection — filter sub-tabs, price/photo/timestamps"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/(tabs)/household.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          ShoppingSection now has Pending / Approved / Purchased / Rejected /
+          All filter chips with counts. Each card shows photo thumbnail,
+          price (estimated vs actual), category, urgency, timestamps
+          (requested, approved, purchased) and rejection reason.
+          Approve → Reject flows prompt for reason (web/Android fallback);
+          Purchase flow prompts for actual price and hits the dedicated
+          /purchase endpoint so finance gets actual numbers.
+  - task: "Household tab chip badges (Shopping pending / Tasks open today)"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/(tabs)/household.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Phase 7 backend ready for testing:
+      1) POST /api/household/shopping with { estimated_price: 50000, photo_base64, requested_by_staff_id } as a STAFF user → owner/members should receive 'shopping_request' notification; response includes those fields.
+      2) PATCH /api/household/shopping/{id} with { status: 'approved' } → approved_at set, requester receives 'shopping_status' notification.
+      3) PATCH … { status: 'rejected', rejected_reason: 'too expensive' } → rejected_reason stored; notification body contains reason.
+      4) POST /api/household/shopping/{id}/purchase { actual_price: 55000, note: 'bought at supermarket' } → status=purchased, purchased_at set, note appended, notification goes to requester titled 'Purchased: ...'.
+      5) POST /api/household/tasks/{id}/complete on a task with requires_photo=true WITHOUT photo_base64 → 400 'This task requires a photo to mark complete'. With photo_base64 set → ok.
+      6) After completion, owners should receive 'task_done' notifications. PATCH /household/completions/{id}/annotate { owner_note: 'Good job' } → stores it and notifies the completer.
+      7) GET /api/household/counts?space_id=X → { shopping_pending, shopping_approved, tasks_open_today } counts.
+      All existing endpoints must continue to work.
+
+  - agent: "testing"
+    message: |
+      Phase 7 backend testing complete (2026-06-XX) via /app/backend_test_phase7.py
+      against the public preview URL — 33/33 PASS, no failures.
+
+      Setup: registered fresh owner (Anya Sharma) + staff (Sari Putri) + outsider
+      via /api/auth/register; created household space currency=IDR; staff joined
+      via the staff invite_code returned by POST /household/staff.
+
+      ✅ 1) Shopping create with price + photo
+         - POST /household/shopping as STAFF with estimated_price=50000,
+           photo_base64=<jpeg data URI>, requested_by_staff_id, urgency='high'
+           returns 200 with all fields preserved, currency='IDR' (from space),
+           status='pending', urgency='high'.
+         - Owner GET /api/notifications?space_id=… returns 'shopping_request'
+           titled exactly "Shopping request: Rice".
+
+      ✅ 2) Shopping status transitions
+         - PATCH {status:'approved'} → approved_at populated,
+           approved_by==owner.user_id; staff sees 'shopping_status' titled
+           "Shopping: Rice · approved".
+         - On a separate pending request, PATCH {status:'rejected',
+           rejected_reason:'too expensive'} stores the reason; staff
+           rejection notif body contains "too expensive".
+         - POST /shopping/{id}/purchase {actual_price:55000,
+           note:'bought at supermarket'} → status='purchased', purchased_at
+           populated, actual_price stored, note appended with
+           "[Purchase] bought at supermarket". Requester receives notif
+           titled "Purchased: Rice".
+
+      ✅ 3) Task completion photo enforcement
+         - POST /household/tasks {requires_photo:true} → ok.
+         - POST /tasks/{id}/complete {} → 400 with detail
+           "This task requires a photo to mark complete".
+         - POST /tasks/{id}/complete {photo_base64} → 200,
+           completion has staff_id linked to staff and
+           completed_by_name='Sari Putri'.
+         - Owner gets 'task_done' notif "Task done: Clean kitchen".
+         - PATCH /completions/{id}/annotate {owner_note:'Great job'} →
+           staff gets 'task_comment' notif body contains "Great job".
+
+      ✅ 4) Household counts
+         - GET /household/counts?space_id=X returns integer
+           shopping_pending, shopping_approved, tasks_open_today.
+         - After creating a fresh pending request and a fresh non-completed
+           daily task, both shopping_pending (0→1) and tasks_open_today
+           (0→1) increment correctly.
+         - Non-member GET /counts → 403 "Not a member of this space".
+
+      ✅ 5) Quick task notification regression
+         - POST /household/tasks/quick still creates a 'task_assigned'
+           notification titled "Quick task: Take out trash" for the linked
+           staff user.
+
+      All three Phase 7 backend tasks updated to working=true,
+      needs_retesting=false. No backend bugs surfaced. Per protocol, frontend
+      testing was NOT performed.
+
