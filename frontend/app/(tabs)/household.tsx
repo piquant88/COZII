@@ -351,12 +351,17 @@ function StaffCard({ staff: s, roles, currency, spaceId, onEdit, onRefresh }: { 
           {s.photo_base64 ? <Image source={{ uri: s.photo_base64 }} style={styles.avatarImg} /> : <Text style={styles.avatarTxt}>{s.name?.[0]?.toUpperCase()}</Text>}
         </View>
         <View style={{ flex: 1 }}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
             <Text style={styles.rowName}>{s.name}</Text>
             {(s as any).user_id ? (
               <View style={[styles.badge, { backgroundColor: tints.sage.bg, paddingVertical: 2 }]}>
                 <Icon name="Check" size={9} color={tints.sage.icon} />
                 <Text style={[styles.badgeTxt, { color: tints.sage.icon, fontSize: 9 }]}>linked</Text>
+              </View>
+            ) : null}
+            {((s as any).active === false) ? (
+              <View style={[styles.badge, { backgroundColor: tints.pink.bg, paddingVertical: 2 }]}>
+                <Text style={[styles.badgeTxt, { color: tints.pink.icon, fontSize: 9 }]}>former</Text>
               </View>
             ) : null}
           </View>
@@ -371,6 +376,23 @@ function StaffCard({ staff: s, roles, currency, spaceId, onEdit, onRefresh }: { 
               <Text style={[styles.badgeTxt, { color: tints.sage.icon }]}>{formatMoney(s.salary, s.salary_currency || currency)} / {s.pay_cycle}</Text>
             </View>
           ) : null}
+          {!!(s as any).invite_code && !(s as any).user_id && (
+            <TouchableOpacity
+              style={styles.codeChip}
+              onPress={async (e) => {
+                e.stopPropagation?.();
+                try {
+                  const Clipboard = await import('expo-clipboard');
+                  await (Clipboard as any).setStringAsync((s as any).invite_code);
+                  Alert.alert('Code copied', `Give ${(s as any).invite_code} to ${s.name}. They sign up with any email, tap "I'm staff" and paste this code.`);
+                } catch {}
+              }}
+              testID={`staff-code-${s.staff_id}`}
+            >
+              <Icon name="Copy" size={10} color={tints.yellow.icon} />
+              <Text style={styles.codeChipTxt}>CODE {(s as any).invite_code}</Text>
+            </TouchableOpacity>
+          )}
         </View>
         <Icon name="ChevronRight" size={16} color={colors.textMuted} />
       </TouchableOpacity>
@@ -672,6 +694,8 @@ function StaffForm({ initial, roles, spaceId, currency, onClose, onSaved }: any)
   const [cycle, setCycle] = useState<'monthly' | 'weekly' | 'daily'>(initial?.pay_cycle || 'monthly');
   const [offDay, setOffDay] = useState(initial?.off_day || '');
   const [startDate, setStartDate] = useState(initial?.start_date || '');
+  const [endDate, setEndDate] = useState(initial?.end_date || '');
+  const [active, setActive] = useState<boolean>(initial?.active !== false);
   const [notes, setNotes] = useState(initial?.notes || '');
   const [saving, setSaving] = useState(false);
   const [payNote, setPayNote] = useState('');
@@ -688,6 +712,7 @@ function StaffForm({ initial, roles, spaceId, currency, onClose, onSaved }: any)
         salary: salary ? parseFloat(salary) : null,
         pay_cycle: cycle, salary_currency: currency,
         off_day: offDay || null, start_date: startDate || null,
+        end_date: endDate || null, active: active,
         notes: notes || null,
       };
       if (initial?.staff_id) await api.patch(`/household/staff/${initial.staff_id}`, payload);
@@ -781,6 +806,21 @@ function StaffForm({ initial, roles, spaceId, currency, onClose, onSaved }: any)
           <TextInput style={styles.input} value={startDate} onChangeText={setStartDate} placeholder="YYYY-MM-DD" placeholderTextColor={colors.textMuted} />
         </View>
       </View>
+      <View style={{ flexDirection: 'row', gap: 10, alignItems: 'flex-end' }}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.label}>End date (if they stopped)</Text>
+          <TextInput style={styles.input} value={endDate} onChangeText={setEndDate} placeholder="optional · YYYY-MM-DD" placeholderTextColor={colors.textMuted} testID="staff-end-date" />
+        </View>
+        <TouchableOpacity
+          style={[styles.activeToggle, active && { backgroundColor: tints.sage.bg, borderColor: tints.sage.icon }]}
+          onPress={() => setActive((v) => !v)}
+          testID="staff-active-toggle"
+        >
+          <Icon name={active ? 'Check' : 'X'} size={12} color={active ? tints.sage.icon : colors.textMuted} />
+          <Text style={[styles.activeToggleTxt, active && { color: tints.sage.icon }]}>{active ? 'Currently employed' : 'Former staff'}</Text>
+        </TouchableOpacity>
+      </View>
+      <Text style={styles.helper}>Former staff won't appear in monthly reports from the current month onward — past records (wages paid, attendance) stay intact for history.</Text>
       <Text style={styles.label}>Notes</Text>
       <TextInput style={[styles.input, { minHeight: 60 }]} value={notes} onChangeText={setNotes} multiline placeholder="responsibilities, agreement, anything important" placeholderTextColor={colors.textMuted} />
       {initial?.staff_id && initial?.invite_code && (
@@ -1488,6 +1528,10 @@ const styles = StyleSheet.create({
   sendBtnTxt: { color: '#fff', fontWeight: '800', fontSize: 12 },
   sendBtnAlt: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 10, borderRadius: radius.full, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.primary },
   sendBtnAltTxt: { color: colors.primary, fontWeight: '800', fontSize: 12 },
+  activeToggle: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 10, borderRadius: radius.md, backgroundColor: colors.surfaceAlt, borderWidth: 1, borderColor: colors.border },
+  activeToggleTxt: { fontSize: 11, fontWeight: '800', color: colors.textMuted },
+  codeChip: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 8, paddingVertical: 3, borderRadius: radius.sm, backgroundColor: tints.yellow.bg, borderWidth: 1, borderColor: tints.yellow.icon, marginTop: 4, alignSelf: 'flex-start' },
+  codeChipTxt: { fontSize: 10, fontWeight: '900', color: tints.yellow.icon, letterSpacing: 1.2 },
   payNowTxt: { color: '#fff', fontWeight: '800' },
   checkBox: { width: 28, height: 28, borderRadius: 8, borderWidth: 2, borderColor: colors.border, alignItems: 'center', justifyContent: 'center' },
   checkBoxDone: { backgroundColor: colors.primary, borderColor: colors.primary },

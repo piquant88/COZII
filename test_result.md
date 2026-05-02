@@ -1373,3 +1373,230 @@ agent_communication:
          - Non-space-member → 403. Unknown staff_id → 404.
          - view_wage_amount=false on that staff → payments: [].
 
+
+## 2026-06-XX — Phase 6: Staff lifecycle + label/format polish
+
+backend:
+  - task: "Staff active/end_date lifecycle + report filter"
+    implemented: true
+    working: false
+    file: "/app/backend/server.py"
+    stuck_count: 1
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          StaffMember / CreateStaffRequest / UpdateStaffRequest now expose:
+            - end_date: Optional[str] (YYYY-MM-DD)
+            - active: bool (default True)
+          /api/reports/household staff loop now INCLUDES a staff member only if:
+            (active != false) AND (start_date <= end_of_month OR has activity)
+            AND (end_date is null OR end_date >= start_of_month OR has activity)
+          "has activity" = had an attendance log or a payment in the window, so
+          historical reports (e.g. looking at April for a former staff) still
+          show them correctly. Current-month reports hide staff who haven't
+          started yet or have ended before the month begins.
+      - working: false
+        agent: "testing"
+        comment: |
+          Phase 6 retest 2026-05-02 via /app/backend_test_phase6.py.
+          The Pydantic models DO declare `active: bool = True` and
+          `end_date: Optional[str] = None`, but neither field is actually
+          persisted to MongoDB on POST/PATCH. As a result:
+            - POST /api/household/staff with body {space_id,name,salary,active:false}
+              returns response.active == TRUE (Pydantic default), end_date is null.
+              MongoDB doc has NO `active` and NO `end_date` keys.
+            - PATCH /api/household/staff/{id} with {end_date:"2026-01-31",
+              active:false} returns 200 but response.end_date == null and
+              response.active == TRUE. The PATCH silently drops both fields.
+            - GET /api/reports/household current-month returns staff B
+              (active=false), C is correctly excluded (start_date is the only
+              lifecycle field that IS persisted), and D (end_date=2020-01-31)
+              is INCLUDED because its end_date never made it to MongoDB.
+              Expected: only A. Got: A, B, D.
+            - Historical /reports/household?year=2020&month=1 correctly
+              includes D with paid > 0 (works because the historical-activity
+              path uses payments-in-window — independent of the lifecycle
+              fields). Past-month integrity is fine.
+
+          ROOT CAUSE 1 — `create_staff` (server.py:1960-1986) builds the
+          insert doc but never adds `end_date` or `active`. Fix: include
+          these keys explicitly:
+            "end_date": body.end_date,
+            "active": True if body.active is None else bool(body.active),
+
+          ROOT CAUSE 2 — `update_staff` (server.py:2213-2228) loops over a
+          hard-coded tuple of allowed update keys that omits `end_date` and
+          `active`. Fix: add both names to the tuple at line 2220:
+            for k in ("name", "role_id", ..., "start_date", "end_date",
+                      "active", "notes"):
+
+          Side effects on /reports/household filter — the filter logic itself
+          (server.py:2968-2983) is correct; once the fields are persisted,
+          B/C/D will all be excluded as the test expects. Verified by
+          manually setting active/end_date directly in Mongo: filter passes.
+
+          Other tests in this run pass:
+            ✅ POST response.end_date == null when not specified (default).
+            ✅ start_date is persisted (C correctly excluded).
+            ✅ /reports/household total_spent + total_wages match.
+            ✅ Historical 2020-01 report shows D with paid==2000000.
+
+  - task: "Pre-existing Item.updated_at missing bug"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "low"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Made updated_at optional on Item/Category/etc. so legacy docs without the field load via GET /api/items."
+      - working: true
+        agent: "testing"
+        comment: |
+          Verified 2026-05-02 via /app/backend_test_phase6.py.
+          Repro: POST a category and an item, then $unset updated_at on
+          both directly in Mongo to simulate legacy docs.
+            ✅ GET /api/items?space_id=... → 200, legacy item present,
+               item.updated_at == null in response (not 500).
+            ✅ GET /api/categories?space_id=... → 200, no validation error.
+          Item / Category Pydantic models tolerate the missing field as
+          intended.
+
+frontend:
+  - task: "Staff end-date / active toggle + former badge"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/(tabs)/household.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Added 'End date' field + 'Currently employed / Former staff' toggle
+          inside StaffForm. Staff cards now show a 'former' badge when inactive.
+          Tapping the new invite-code chip on the card copies the staff-only
+          code to the clipboard.
+  - task: "Contextual labels: 'House rules' vs 'Roommate agreement' and 'Family invite code'"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/agreement.tsx, /app/frontend/app/(tabs)/profile.tsx"
+    stuck_count: 0
+    priority: "low"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          When space_type === 'household', the agreement screen title and the
+          profile row read 'House rules'. Profile invite code is labeled
+          'Family invite code' in household mode with a helper that points
+          staff to the separate staff-only code.
+  - task: "Home 'spent this month' now uses formatMoney"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/(tabs)/home.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Replaced `${(stats?.spent_this_month ?? 0).toFixed(0)}` with
+          `formatMoney(value, activeSpace.currency)` so IDR shows 'Rp 2.000.000'
+          and USD shows '$2,000.00'. Also added adjustsFontSizeToFit so long
+          numbers don't overflow the card.
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Phase 6 backend ready for testing. Focus areas:
+      1) Create staff with active=false and hit /api/reports/household for the
+         current month → that staff should NOT appear in response.staff.
+      2) Create staff with start_date in the FUTURE (e.g., next month) → also
+         not in report.staff for current month.
+      3) Create staff with end_date in the past, then post a payroll dated in
+         that past month → when requesting /reports/household for THAT past
+         month (year + month params), the staff MUST appear with paid > 0 and
+         metrics intact. Historical integrity.
+      4) PATCH /api/household/staff/{id} accepts end_date and active and merges
+         them. Returns StaffMember with the new fields populated.
+      5) GET /api/categories and GET /api/items no longer 500 for legacy docs
+         without updated_at (return null for the field).
+
+  - agent: "testing"
+    message: |
+      Phase 6 backend retest 2026-05-02 via /app/backend_test_phase6.py.
+      25/33 PASS, 8 FAIL — all 8 failures trace back to ONE bug surface
+      (active + end_date are not persisted by the staff endpoints).
+
+      ❌ BUG (HIGH) — Staff lifecycle fields are not persisted on
+         POST/PATCH /api/household/staff. The Pydantic models declare
+         `active: bool = True` and `end_date: Optional[str] = None`, but
+         the handler code never writes these to MongoDB.
+
+         File: /app/backend/server.py
+         Repro:
+           POST /household/staff {space_id, name, salary, active:false}
+             → response.active == TRUE (Pydantic default), end_date null
+             → Mongo doc has NO `active` and NO `end_date` keys
+           PATCH /household/staff/{id} {end_date:"2026-01-31", active:false}
+             → 200, response.end_date == null, response.active == TRUE
+             → Mongo doc unchanged
+
+         FIX 1 — create_staff (server.py:1960-1986). The doc dict is
+            missing both keys. Add:
+              "end_date": body.end_date,
+              "active": True if body.active is None else bool(body.active),
+
+         FIX 2 — update_staff (server.py:2213-2228). The allowed-update
+            tuple at line 2220 omits both. Change to:
+              for k in ("name", "role_id", "photo_base64", "phone",
+                        "emergency_contact", "id_number", "salary",
+                        "pay_cycle", "salary_currency", "off_day",
+                        "start_date", "end_date", "active", "notes"):
+
+         Knock-on effect on /api/reports/household: because B (active=false)
+         and D (end_date=2020-01-31) never had those fields persisted, the
+         current-month report INCLUDES B and D when it should only include
+         A. The filter logic in household_report (server.py:2968-2983) is
+         actually correct — once the fields land in Mongo, B/C/D are all
+         excluded as expected. Verified by manually setting active/end_date
+         in Mongo: filter behaves correctly. So no changes are needed in
+         the report code.
+
+      ✅ Pre-existing Item.updated_at bug — FIXED. Stripped `updated_at`
+         on a Mongo item + category and confirmed GET /api/items and
+         GET /api/categories both return 200 with updated_at = null.
+
+      ✅ Historical /api/reports/household?year=2020&month=1 correctly
+         shows staff D with paid == 2,000,000 after a manually-injected
+         staff_payments doc dated 2020-01-15. Historical integrity holds
+         (the activity-window path is independent of the active/end_date
+         bug and is working).
+
+      ✅ Spot-checks: POST /household/tasks/quick returns
+         recurrence='once'; GET /reports/finance returns the full shape.
+         No regressions in existing endpoints.
+
+      ✅ Section 1 partial passes:
+         - POST /household/staff w/ active=false → response 200 (just the
+           returned `active` value is wrong).
+         - POST response.end_date is null when not provided (default).
+         - C correctly excluded from current-month report (start_date IS
+           persisted, only active/end_date are dropped).
+
+      Action for main agent:
+        1. Apply the two-line fixes above to create_staff and update_staff.
+        2. Optionally add /api/household/staff/me reads or migrations for
+           old staff docs that don't carry `active` (default to True on
+           read is already in place via _in_window).
+        3. Re-run /app/backend_test_phase6.py — should hit 33/33.
+

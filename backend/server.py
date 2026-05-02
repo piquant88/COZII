@@ -200,7 +200,7 @@ class Item(TZAware):
     created_by: str
     created_by_name: Optional[str] = None
     created_at: datetime
-    updated_at: datetime
+    updated_at: Optional[datetime] = None
 
 
 class CreateItemRequest(BaseModel):
@@ -1331,7 +1331,7 @@ class Agreement(TZAware):
     text: str
     sections: List[Dict[str, Any]] = []  # [{title, body}]
     signatures: List[AgreementSignature] = []
-    updated_at: datetime
+    updated_at: Optional[datetime] = None
     updated_by: str
 
 
@@ -1697,6 +1697,8 @@ class StaffMember(BaseModel):
     salary_currency: Optional[str] = None
     off_day: Optional[str] = None
     start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    active: bool = True
     notes: Optional[str] = None
     user_id: Optional[str] = None  # set when staff signs up to the app
     invite_code: Optional[str] = None
@@ -1717,6 +1719,8 @@ class CreateStaffRequest(BaseModel):
     salary_currency: Optional[str] = None
     off_day: Optional[str] = None
     start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    active: bool = True
     notes: Optional[str] = None
 
 
@@ -1732,6 +1736,8 @@ class UpdateStaffRequest(BaseModel):
     salary_currency: Optional[str] = None
     off_day: Optional[str] = None
     start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    active: Optional[bool] = None
     notes: Optional[str] = None
 
 
@@ -1745,7 +1751,7 @@ class HandbookEntry(BaseModel):
     photo_base64: Optional[str] = None
     sort: int = 0
     created_at: datetime
-    updated_at: datetime
+    updated_at: Optional[datetime] = None
 
 
 class CreateHandbookEntryRequest(BaseModel):
@@ -2942,7 +2948,9 @@ async def household_report(space_id: str, year: Optional[int] = None, month: Opt
         })
 
     # --- Staff summary ---
-    staff_docs = await db.staff_members.find({"space_id": space_id}, {"_id": 0}).to_list(500)
+    # Show staff that were "active during this month" OR had any payment/attendance in the window.
+    # A staff is active-during-window if: (start_date <= window_end) AND (end_date is null OR end_date >= window_start) AND active != false
+    all_staff = await db.staff_members.find({"space_id": space_id}, {"_id": 0}).to_list(500)
     # Attendance in window
     att_docs = await db.attendance_logs.find({"space_id": space_id, "date": {"$gte": start_str, "$lt": end_str}}, {"_id": 0}).to_list(5000)
     att_by_staff: Dict[str, Dict[str, int]] = {}
@@ -2956,6 +2964,26 @@ async def household_report(space_id: str, year: Optional[int] = None, month: Opt
     for p in pay_docs:
         paid_by_staff[p["staff_id"]] = paid_by_staff.get(p["staff_id"], 0) + float(p.get("net") or 0)
     total_wages = sum(paid_by_staff.values())
+
+    def _in_window(s: Dict[str, Any]) -> bool:
+        # Explicitly inactive → only include if they had activity in window
+        active = s.get("active", True)
+        sd = s.get("start_date")
+        ed = s.get("end_date")
+        had_activity = (s["staff_id"] in att_by_staff) or (s["staff_id"] in paid_by_staff)
+        # Exclude staff with start_date after window end (hasn't started yet), unless they had activity
+        if sd and sd >= end_str and not had_activity:
+            return False
+        # Exclude staff ended before window start, unless they had activity (historical)
+        if ed and ed < start_str and not had_activity:
+            return False
+        # Inactive and no activity → hide
+        if not active and not had_activity:
+            return False
+        return True
+
+    staff_docs = [s for s in all_staff if _in_window(s)]
+
     # Task completions per staff in window
     task_ids = [t["task_id"] for t in await db.task_templates.find({"space_id": space_id}, {"_id": 0, "task_id": 1, "staff_id": 1, "role_id": 1}).to_list(2000)]
     task_owner = {t["task_id"]: t for t in await db.task_templates.find({"space_id": space_id}, {"_id": 0, "task_id": 1, "staff_id": 1, "role_id": 1}).to_list(2000)}
@@ -2978,6 +3006,9 @@ async def household_report(space_id: str, year: Optional[int] = None, month: Opt
             "name": s.get("name"),
             "photo_base64": s.get("photo_base64"),
             "role_id": s.get("role_id"),
+            "active": s.get("active", True),
+            "start_date": s.get("start_date"),
+            "end_date": s.get("end_date"),
             "days_present": att.get("present", 0) + att.get("late", 0),
             "days_off": att.get("off", 0),
             "days_sick": att.get("sick", 0),

@@ -33,6 +33,8 @@ How notice will be given and how the deposit is handled.
 export default function Agreement() {
   const router = useRouter();
   const { activeSpace, user } = useAuth();
+  const isHousehold = activeSpace?.space_type === 'household';
+  const screenTitle = isHousehold ? 'House rules' : 'Roommate agreement';
   const [doc, setDoc] = useState<AgreementDoc | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -87,7 +89,7 @@ export default function Agreement() {
         <TouchableOpacity style={styles.iconBtn} onPress={() => router.back()} testID="agreement-back">
           <Icon name="ArrowLeft" color={colors.textMain} />
         </TouchableOpacity>
-        <Text style={styles.title}>Roommate agreement</Text>
+        <Text style={styles.title}>{screenTitle}</Text>
         {!editing && doc ? (
           <TouchableOpacity style={styles.iconBtn} onPress={() => { setText(doc.text); setEditing(true); }} testID="agreement-edit">
             <Icon name="Edit3" color={colors.textMain} size={18} />

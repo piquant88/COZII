@@ -96,8 +96,13 @@ export default function Profile() {
 
               <TouchableOpacity style={styles.inviteBox} onPress={copyCode} activeOpacity={0.8} testID="profile-copy-invite">
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.inviteLbl}>Invite code</Text>
+                  <Text style={styles.inviteLbl}>{activeSpace.space_type === 'household' ? 'Family invite code' : 'Invite code'}</Text>
                   <Text style={styles.inviteCode} testID="profile-invite-code">{activeSpace.invite_code}</Text>
+                  <Text style={styles.helperSmall}>
+                    {activeSpace.space_type === 'household'
+                      ? 'For family members & partners. Staff get a separate code from the Household → Staff screen.'
+                      : 'Shares access with roommates / flatmates.'}
+                  </Text>
                 </View>
                 <View style={styles.copyBtn}>
                   <Icon name={copied ? 'Check' : 'Copy'} size={16} color={colors.textMain} />
@@ -205,7 +210,7 @@ export default function Profile() {
           testID="profile-agreement"
         >
           <Icon name="FileText" size={20} color={colors.textMain} />
-          <Text style={styles.rowBtnTxt}>Roommate agreement</Text>
+          <Text style={styles.rowBtnTxt}>{activeSpace?.space_type === 'household' ? 'House rules' : 'Roommate agreement'}</Text>
           <Icon name="ChevronRight" size={18} color={colors.textMuted} />
         </TouchableOpacity>
 
@@ -375,6 +380,7 @@ const styles = StyleSheet.create({
     marginTop: spacing.md,
   },
   inviteLbl: { fontSize: 11, color: colors.textMuted, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5 },
+  helperSmall: { fontSize: 11, color: colors.textMuted, marginTop: 4, lineHeight: 15 },
   inviteCode: { fontSize: 22, fontWeight: '900', color: colors.textMain, letterSpacing: 4, marginTop: 4 },
   copyBtn: {
     flexDirection: 'row', alignItems: 'center', gap: 6,

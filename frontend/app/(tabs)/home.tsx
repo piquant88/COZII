@@ -10,6 +10,7 @@ import { Icon } from '../../src/Icon';
 import { api } from '../../src/api';
 import type { Stats, Activity } from '../../src/types';
 import { formatDistanceToNow } from 'date-fns';
+import { formatMoney } from '../../src/currency';
 
 export default function Home() {
   const { user, activeSpace, spaces, setActiveSpaceId } = useAuth();
@@ -117,7 +118,7 @@ export default function Home() {
           </View>
           <View style={[styles.statCard, { backgroundColor: tints.lavender.bg }]} testID="home-stat-spent">
             <Icon name="Wallet" color={tints.lavender.icon} size={20} />
-            <Text style={styles.statNum}>${(stats?.spent_this_month ?? 0).toFixed(0)}</Text>
+            <Text style={styles.statNum} numberOfLines={1} adjustsFontSizeToFit>{formatMoney(stats?.spent_this_month ?? 0, activeSpace?.currency || 'USD')}</Text>
             <Text style={styles.statLbl}>This month</Text>
           </View>
         </View>
