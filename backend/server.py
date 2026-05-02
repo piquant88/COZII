@@ -1932,6 +1932,20 @@ async def delete_family_member(member_id: str, user: User = Depends(get_current_
 async def list_staff(space_id: str, user: User = Depends(get_current_user)):
     await assert_space_member(space_id, user.user_id)
     docs = await db.staff_members.find({"space_id": space_id}, {"_id": 0}).sort("created_at", 1).to_list(500)
+    # Backfill legacy staff docs missing invite_code / active / permissions
+    for d in docs:
+        updates: Dict[str, Any] = {}
+        if not d.get("invite_code"):
+            d["invite_code"] = _gen_staff_invite_code()
+            updates["invite_code"] = d["invite_code"]
+        if "active" not in d:
+            d["active"] = True
+            updates["active"] = True
+        if not d.get("permissions"):
+            d["permissions"] = DEFAULT_STAFF_PERMS.copy()
+            updates["permissions"] = d["permissions"]
+        if updates:
+            await db.staff_members.update_one({"staff_id": d["staff_id"]}, {"$set": updates})
     out = [await _attach_role_name(d) for d in docs]
     return [StaffMember(**d) for d in out]
 
