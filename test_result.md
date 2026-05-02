@@ -749,12 +749,30 @@ agent_communication:
 backend:
   - task: "Staff permissions incl. view_inventory"
     implemented: true
-    working: false
+    working: true
     file: "/app/backend/server.py"
-    stuck_count: 1
+    stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          Re-tested 2026-06-XX after main agent added `invite_code: Optional[str]`
+          and `permissions: Dict[str, bool] = Field(default_factory=dict)` fields
+          to the StaffMember Pydantic response model (server.py:1702-1703).
+          /app/backend_test_phase4_retest.py — 18/18 PASS:
+            ✅ POST /household/staff response.invite_code = 6-char alphanumeric
+               (e.g. "533845")
+            ✅ POST response.permissions is a non-empty dict containing all 9
+               keys including `view_inventory: false`
+            ✅ PATCH /household/staff/{id}/permissions returns 200 with
+               invite_code + permissions populated; view_inventory=True merged
+               correctly while retaining other defaults (view_tasks=True etc).
+            ✅ GET /household/staff list entries include invite_code and the
+               merged permissions dict (view_inventory=True after PATCH).
+          The Phase 4 staff-join UX is now unblocked — owner can read invite_code
+          from the create-staff response and share it with the staff member.
       - working: "NA"
         agent: "main"
         comment: |
@@ -899,12 +917,29 @@ backend:
 
   - task: "GET /api/categories after payroll regression"
     implemented: true
-    working: false
+    working: true
     file: "/app/backend/server.py"
     stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          Re-tested 2026-06-XX after main agent fix:
+            - `_ensure_wages_category` now accepts user_id and inserts
+              "created_by": user_id (server.py:2078).
+            - `list_categories` self-heals legacy docs missing `created_by` by
+              backfilling with the space owner's user_id (server.py:567-579).
+          /app/backend_test_phase4_retest.py — 18/18 PASS:
+            ✅ POST /household/payroll succeeds (returns 200, payment_id created).
+            ✅ GET /api/categories?space_id=<household> returns 200 (was 500
+               previously due to Category.created_by ValidationError).
+            ✅ Response includes "Staff wages" category.
+            ✅ "Staff wages".created_by == owner.user_id (non-null,
+               matches the owner who triggered payroll).
+          The categories listing is fully usable for any household space after
+          payroll has run. Regression resolved.
       - working: false
         agent: "testing"
         comment: |
@@ -1017,9 +1052,7 @@ metadata:
   run_ui: false
 
 test_plan:
-  current_focus:
-    - "Staff permissions incl. view_inventory"
-    - "GET /api/categories after payroll regression"
+  current_focus: []
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -1035,6 +1068,34 @@ agent_communication:
         2) Notification endpoints + auto-create on payroll.
         3) /api/reports/household?space_id=X aggregations.
       Credentials: /app/memory/test_credentials.md (test@cozii.app / test1234).
+
+  - agent: "testing"
+    message: |
+      Focused Phase 4 retest (2026-06-XX) on the two regressions previously flagged.
+      /app/backend_test_phase4_retest.py — 18/18 PASS.
+
+      ✅ FIX VERIFIED #1 — StaffMember response model
+         (server.py:1702-1703) now exposes `invite_code: Optional[str]` and
+         `permissions: Dict[str, bool] = Field(default_factory=dict)`.
+         POST /household/staff returns invite_code (6-char e.g. "533845")
+         and permissions dict (9 keys incl. view_inventory:false).
+         PATCH /household/staff/{id}/permissions returns the same fields with
+         the merged perms (view_inventory:true preserved with other defaults).
+         GET /household/staff list entries also expose both fields. Staff-join
+         UX is unblocked.
+
+      ✅ FIX VERIFIED #2 — _ensure_wages_category now accepts user_id and
+         inserts "created_by": user_id (server.py:2078). list_categories
+         additionally self-heals legacy docs missing created_by by backfilling
+         with the space owner's user_id (server.py:567-579).
+         Repro flow (fresh household space → POST staff → POST payroll →
+         GET /api/categories?space_id=...) now returns 200 with the
+         "Staff wages" category whose created_by == owner.user_id.
+         No more 500 ValidationError.
+
+      Both flagged tasks updated to working=true, needs_retesting=false.
+      No regressions surfaced. No further backend work required for these two
+      items. Per protocol, frontend testing was NOT performed.
 
   - agent: "testing"
     message: |

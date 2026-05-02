@@ -564,6 +564,19 @@ async def list_categories(space_id: str, user: User = Depends(get_current_user))
         if not d.get("shared_with") or user.user_id in d.get("shared_with", [])
     ]
     accessible.sort(key=lambda d: d["created_at"])
+    # Backfill legacy docs missing `created_by` (e.g. auto-created "Staff wages" category before fix)
+    missing = [d for d in accessible if not d.get("created_by")]
+    if missing:
+        owner_id = None
+        sp = await db.family_spaces.find_one({"space_id": space_id}, {"_id": 0, "owner_id": 1})
+        if sp:
+            owner_id = sp.get("owner_id")
+        for d in missing:
+            d["created_by"] = owner_id or user.user_id
+        await db.categories.update_many(
+            {"space_id": space_id, "category_id": {"$in": [d["category_id"] for d in missing]}, "created_by": {"$in": [None, ""]}},
+            {"$set": {"created_by": owner_id or user.user_id}},
+        )
     return [Category(**d) for d in accessible]
 
 
@@ -1686,6 +1699,8 @@ class StaffMember(BaseModel):
     start_date: Optional[str] = None
     notes: Optional[str] = None
     user_id: Optional[str] = None  # set when staff signs up to the app
+    invite_code: Optional[str] = None
+    permissions: Dict[str, bool] = Field(default_factory=dict)
     created_at: datetime
 
 
@@ -2045,9 +2060,12 @@ class CreateStaffPaymentRequest(BaseModel):
     notes: Optional[str] = None
 
 
-async def _ensure_wages_category(space_id: str) -> str:
+async def _ensure_wages_category(space_id: str, user_id: str) -> str:
     cat = await db.categories.find_one({"space_id": space_id, "name": "Staff wages"}, {"_id": 0})
     if cat:
+        # backfill legacy docs missing created_by
+        if not cat.get("created_by"):
+            await db.categories.update_one({"category_id": cat["category_id"]}, {"$set": {"created_by": user_id}})
         return cat["category_id"]
     doc = {
         "category_id": gen_id("cat"),
@@ -2057,6 +2075,7 @@ async def _ensure_wages_category(space_id: str) -> str:
         "tint": "peach",
         "fields": [],
         "shared_with": [],
+        "created_by": user_id,
         "created_at": now_utc(),
     }
     await db.categories.insert_one(doc)
@@ -2097,7 +2116,7 @@ async def create_payroll(body: CreateStaffPaymentRequest, user: User = Depends(g
             period = today.strftime("%Y-W%V")
         else:
             period = today.strftime("%Y-%m-%d")
-    cat_id = await _ensure_wages_category(body.space_id)
+    cat_id = await _ensure_wages_category(body.space_id, user.user_id)
     item_doc = {
         "item_id": gen_id("item"),
         "space_id": body.space_id,
