@@ -446,14 +446,6 @@ function StaffCard({ staff: s, roles, currency, spaceId, onEdit, onRefresh }: { 
     </View>
   );
 }
-            </View>
-            <Icon name="ChevronRight" size={16} color={colors.textMuted} />
-          </TouchableOpacity>
-        );
-      })}
-    </View>
-  );
-}
 
 function RolesSection({ roles, onEdit, onDelete }: { roles: HouseholdRole[]; onEdit: (r?: HouseholdRole) => void; onDelete: (r: HouseholdRole) => void }) {
   const family = roles.filter((r) => r.category === 'family');
