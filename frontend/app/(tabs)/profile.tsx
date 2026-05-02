@@ -60,32 +60,14 @@ export default function Profile() {
     } finally { setSavingCur(false); }
   };
 
-  const flipSpaceType = () => {
-    if (!activeSpace) return;
-    const next = activeSpace.space_type === 'household' ? 'roommates' : 'household';
-    const title = next === 'household' ? 'Switch to Household?' : 'Switch to Roommates?';
-    const msg = next === 'household'
-      ? 'You\'ll see a Household tab to manage family + staff (maids, drivers, nannies), with roles & a house handbook.'
-      : 'The Household tab will be hidden. Your staff/family/handbook data is kept and will return if you switch back.';
-
-    const doFlip = async () => {
-      try {
-        await api.patch(`/spaces/${activeSpace.space_id}`, { space_type: next });
-        await refreshSpaces?.();
-      } catch (e: any) { Alert.alert('Error', e?.message || ''); }
-    };
-
-    if (Platform.OS === 'web') {
-      // Native Alert.alert with multiple buttons doesn't render on web
-      if (typeof window !== 'undefined' && window.confirm(`${title}\n\n${msg}`)) {
-        doFlip();
-      }
-      return;
-    }
-    Alert.alert(title, msg, [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Switch', onPress: doFlip },
-    ]);
+  const [showSpaceType, setShowSpaceType] = useState(false);
+  const setSpaceType = async (next: 'roommates' | 'household') => {
+    if (!activeSpace || activeSpace.space_type === next) { setShowSpaceType(false); return; }
+    try {
+      await api.patch(`/spaces/${activeSpace.space_id}`, { space_type: next });
+      await refreshSpaces?.();
+      setShowSpaceType(false);
+    } catch (e: any) { Alert.alert('Error', e?.message || ''); }
   };
 
   const currentCur = getCurrency(activeSpace?.currency);
@@ -163,7 +145,7 @@ export default function Profile() {
 
         <TouchableOpacity
           style={[styles.card, styles.rowBtn]}
-          onPress={flipSpaceType}
+          onPress={() => setShowSpaceType(true)}
           testID="profile-space-type"
         >
           <Icon name={activeSpace?.space_type === 'household' ? 'Home' : 'Users'} size={20} color={colors.textMain} />
@@ -282,6 +264,48 @@ export default function Profile() {
           </View>
         </View>
       </Modal>
+
+      {/* Space type picker */}
+      <Modal visible={showSpaceType} animationType="slide" transparent onRequestClose={() => setShowSpaceType(false)}>
+        <View style={profileExtra.modalOverlay}>
+          <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={() => setShowSpaceType(false)} />
+          <View style={profileExtra.sheet}>
+            <View style={profileExtra.sheetHandle} />
+            <Text style={profileExtra.sheetTitle}>Space type</Text>
+            <Text style={profileExtra.sheetSub}>Pick how this space should feel. You can switch any time — no data is lost.</Text>
+
+            <TouchableOpacity
+              style={[profileExtra.typeOption, activeSpace?.space_type === 'roommates' && profileExtra.typeOptionActive]}
+              onPress={() => setSpaceType('roommates')}
+              testID="space-type-roommates"
+            >
+              <View style={[profileExtra.typeIcon, { backgroundColor: '#FFE4DC' }]}>
+                <Icon name="Users" color="#D45B43" size={26} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={profileExtra.typeTitle}>Roommates</Text>
+                <Text style={profileExtra.typeSub}>Shared rent + groceries. Focus on splits and shared inventory.</Text>
+              </View>
+              {activeSpace?.space_type === 'roommates' && <Icon name="Check" size={18} color={colors.primary} />}
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[profileExtra.typeOption, activeSpace?.space_type === 'household' && profileExtra.typeOptionActive]}
+              onPress={() => setSpaceType('household')}
+              testID="space-type-household"
+            >
+              <View style={[profileExtra.typeIcon, { backgroundColor: '#E8F0FA' }]}>
+                <Icon name="Home" color="#5079A8" size={26} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={profileExtra.typeTitle}>Household</Text>
+                <Text style={profileExtra.typeSub}>Family + staff (maids, drivers, nannies). Adds a Household tab with directory, roles & handbook.</Text>
+              </View>
+              {activeSpace?.space_type === 'household' && <Icon name="Check" size={18} color={colors.primary} />}
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -302,6 +326,16 @@ const profileExtra = StyleSheet.create({
   curSymTxt: { fontSize: 16, fontWeight: '800', color: colors.textMain },
   curName: { fontSize: 14, fontWeight: '700', color: colors.textMain },
   curCode: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  typeOption: {
+    flexDirection: 'row', alignItems: 'center', gap: 14,
+    backgroundColor: colors.surfaceAlt, borderRadius: radius.lg,
+    padding: spacing.md, marginBottom: 10,
+    borderWidth: 2, borderColor: 'transparent',
+  },
+  typeOptionActive: { borderColor: colors.primary },
+  typeIcon: { width: 52, height: 52, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
+  typeTitle: { fontSize: 15, fontWeight: '800', color: colors.textMain },
+  typeSub: { fontSize: 12, color: colors.textMuted, marginTop: 4, lineHeight: 17 },
 });
 
 const styles = StyleSheet.create({

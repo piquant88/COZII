@@ -475,8 +475,10 @@ export default function Bills() {
       <Modal visible={!!payTarget} animationType="fade" transparent onRequestClose={() => setPayTarget(null)}>
         <View style={styles.confirmOverlay}>
           <View style={styles.confirmCard}>
-            <View style={[styles.heroIcon, { backgroundColor: tints.sage.bg, marginBottom: 12 }]}>
-              <Icon name="Check" color={tints.sage.icon} size={28} />
+            <View style={styles.confirmHero}>
+              <View style={[styles.heroIcon, { backgroundColor: tints.sage.bg, marginBottom: 12 }]}>
+                <Icon name="Check" color={tints.sage.icon} size={28} />
+              </View>
             </View>
             <Text style={styles.confirmTitle}>Mark {payTarget?.name} as paid?</Text>
             <Text style={styles.confirmSub}>
@@ -637,9 +639,10 @@ const styles = StyleSheet.create({
   confirmCard: {
     backgroundColor: colors.surface,
     borderRadius: radius.lg, padding: spacing.lg,
-    alignItems: 'center', width: '100%', maxWidth: 360,
+    width: '100%', maxWidth: 360,
     ...shadows.card,
   },
+  confirmHero: { alignItems: 'center', marginBottom: 4 },
   confirmTitle: { fontSize: 18, fontWeight: '800', color: colors.textMain, textAlign: 'center' },
   confirmSub: { fontSize: 13, color: colors.textMuted, textAlign: 'center', marginTop: 8, lineHeight: 20 },
 });
