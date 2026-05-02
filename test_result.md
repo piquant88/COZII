@@ -1156,3 +1156,220 @@ agent_communication:
       Once main agent applies the two fixes above (StaffMember response
       model + _ensure_wages_category created_by), the Phase 4 surface is
       production-ready. No frontend testing performed (per protocol).
+
+## 2026-06-XX — Phase 5: Quick-send tasks, task shortcuts, preview-as-staff, task notifications
+
+backend:
+  - task: "Task shortcuts CRUD (GET/POST/DELETE /api/household/shortcuts)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          New `task_shortcuts` collection. GET supports optional staff_id filter
+          (returns scoped to staff OR shared (staff_id=null)). POST creates one.
+          DELETE removes by id. All require space membership.
+      - working: true
+        agent: "testing"
+        comment: |
+          Verified via /app/backend_test_phase5.py against the public preview URL
+          (37/37 PASS). All scenarios:
+            ✅ POST /api/household/shortcuts {space_id, staff_id, title, icon}
+               → 200 with shortcut_id, staff_id preserved.
+            ✅ POST shared shortcut (staff_id omitted) → 200, response.staff_id=null.
+            ✅ GET /api/household/shortcuts?space_id=... returns all 3 created.
+            ✅ GET ?space_id=...&staff_id=X returns BOTH the staff-specific
+               shortcut AND the shared (staff_id=null) one, but excludes shortcuts
+               for a different staff in the same space.
+            ✅ DELETE /api/household/shortcuts/{id} → 200; shortcut absent on
+               next GET.
+            ✅ Non-member of space → 403 on GET, POST, and DELETE.
+  - task: "Quick-fire one-time task (POST /api/household/tasks/quick)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Creates a task_templates doc with recurrence='once', once_date=today,
+          staff_id=<target>. If `save_as_shortcut: true`, also upserts into
+          task_shortcuts. If staff.user_id is linked, creates a `task_assigned`
+          notification for the staff user.
+      - working: true
+        agent: "testing"
+        comment: |
+          All 11 scenarios PASS (today=2026-05-02 UTC):
+            ✅ POST /household/tasks/quick {space_id, staff_id, title} → 200,
+               recurrence='once', once_date=today (2026-05-02), staff_id=target,
+               active=true. (Created via task_templates collection.)
+            ✅ Empty/whitespace title → 400 "Title required".
+            ✅ Non-existent staff_id → 404 "Staff not found".
+            ✅ save_as_shortcut=true → creates the task AND inserts into
+               task_shortcuts; new shortcut visible via GET shortcuts
+               (count=1 for that staff+title).
+            ✅ Calling quick twice with same title + save_as_shortcut=true does
+               NOT create a duplicate shortcut (existing-by-(space,staff,title)
+               check works); count remains 1.
+            ✅ When the target staff has a linked user_id (joined via
+               POST /household/staff/join with invite_code), the staff user's
+               GET /api/notifications?space_id=... returns a `task_assigned`
+               notification with:
+                 - title == "Quick task: <title>"
+                 - data.task_id present
+                 - data.quick == true
+  - task: "Task-assigned notification on POST /api/household/tasks"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          If create_task has staff_id set and that staff has user_id linked,
+          posts a `task_assigned` notification. Title shows task title, body
+          says today/once/<recurrence> and due time when present.
+      - working: true
+        agent: "testing"
+        comment: |
+          ✅ As owner: POST /household/tasks {space_id, title, staff_id=<linked>,
+             recurrence='daily'} → 200.
+          ✅ As staff user: GET /api/notifications?space_id=...&unread_only=true
+             returns exactly one `task_assigned` notification titled
+             "New task: <title>" (verified end-to-end against preview URL).
+  - task: "Preview staff home (GET /api/household/staff/{staff_id}/view)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Any space member (owner/admin) can fetch a given staff's home view —
+          returns same shape as /household/staff/me: staff, permissions,
+          today_tasks, attendance, payments (respecting view_wage_amount).
+          Non-member of space → 403. Unknown staff → 404.
+      - working: true
+        agent: "testing"
+        comment: |
+          All 11 scenarios PASS:
+            ✅ Owner GET /household/staff/{staff_id}/view → 200 with all required
+               keys: staff, permissions, today_tasks, attendance, payments,
+               preview. preview === true.
+            ✅ today_tasks, attendance, payments are arrays.
+            ✅ staff object has name, role_id, invite_code populated.
+            ✅ When the target staff has permissions.view_wage_amount=false,
+               payments=[] in the response (verified by PATCH-ing perms first).
+            ✅ Non-member of the space → 403 "Not a member of this space".
+            ✅ Random fake staff_id → 404 "Staff not found".
+
+frontend:
+  - task: "Quick-send per staff + shortcut chips"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/(tabs)/household.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          StaffCard now expands into a Quick-send panel with: shortcut chips
+          (tap to fire, X to delete), free-text input, Send, and Send+save
+          buttons. Saves become per-staff shortcuts for next time.
+  - task: "Preview staff home button (owner)"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/(tabs)/household.tsx, /app/frontend/app/staff-home.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Each staff card has a 'Preview home' button → /staff-home?preview=<id>.
+          staff-home reads ?preview= query param, fetches /staff/{id}/view,
+          shows blue 'Previewing as X · read-only' banner at the top, disables
+          write actions with an alert, and replaces Log out with Exit preview.
+  - task: "Clarify staff invite code label"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/(tabs)/household.tsx"
+    stuck_count: 0
+    priority: "low"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Label 'Staff-only invite code' + explainer that it's different from the space invite code."
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Phase 5 backend testing complete (2026-05-02) via /app/backend_test_phase5.py
+      against the public preview URL. **37/37 PASS — all four endpoints
+      production-ready.**
+
+      ✅ Task shortcuts CRUD (GET/POST/DELETE /api/household/shortcuts)
+         - POST staff-specific + POST shared (staff_id omitted) both work.
+         - GET ?space_id&staff_id includes the staff-specific entry AND the
+           shared (staff_id=null) one, while excluding shortcuts for other staff.
+         - DELETE removes the doc; non-member 403 on GET/POST/DELETE.
+      ✅ POST /api/household/tasks/quick
+         - Creates task_templates with recurrence='once', once_date=today (UTC),
+           staff_id=target, active=true.
+         - Empty title → 400; missing staff_id → 404.
+         - save_as_shortcut=true creates shortcut and is idempotent for the
+           same (space, staff, title) → no duplicates on repeat calls.
+         - When the staff has user_id linked (POST /staff/join), the staff
+           user's GET /api/notifications shows a `task_assigned` notif titled
+           "Quick task: <title>" with data.task_id present and data.quick=true.
+      ✅ task_assigned notification on POST /api/household/tasks
+         - Owner POST /household/tasks {staff_id=<linked>, recurrence='daily'}
+           → staff user GET /api/notifications?unread_only=true returns one
+           `task_assigned` notif titled "New task: <title>".
+      ✅ GET /api/household/staff/{staff_id}/view
+         - Owner → 200 with keys: staff, permissions, today_tasks (array),
+           attendance (array), payments (array), preview=true.
+         - staff has name, role_id, invite_code populated.
+         - When permissions.view_wage_amount=false → payments=[].
+         - Non-member of the space → 403.
+         - Random fake staff_id → 404.
+
+      No regressions surfaced. No frontend testing performed (per protocol).
+
+  - agent: "main"
+    message: |
+      Phase 5 backend ready for testing. Focus on:
+      1) POST /api/household/shortcuts + GET + DELETE with staff_id filter.
+         Ensure staff_id=None (shared) is included when filter is set.
+      2) POST /api/household/tasks/quick:
+         - Creates a task (recurrence='once', once_date=today, staff_id set).
+         - If save_as_shortcut=true, shortcut is stored and will appear in GET.
+         - Duplicate quick-tasks with same title + save_as_shortcut=true should
+           NOT create duplicate shortcuts (the upsert check by title).
+         - If the target staff has user_id linked (after /staff/join), a
+           `task_assigned` notification is created for that user.
+      3) POST /api/household/tasks (normal) with staff_id=<linked staff> also
+         creates `task_assigned` notification for that user.
+      4) GET /api/household/staff/{staff_id}/view:
+         - Owner/member → 200 with same keys as /staff/me plus `preview: true`.
+         - Non-space-member → 403. Unknown staff_id → 404.
+         - view_wage_amount=false on that staff → payments: [].
+

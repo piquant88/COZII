@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl,
   ActivityIndicator, Modal, KeyboardAvoidingView, Platform, TextInput, Alert, Image,
@@ -154,7 +154,7 @@ export default function HouseholdHub() {
         ) : section === 'people' ? (
           <PeopleSection people={people} roles={roles.filter((r) => r.category === 'family')} onEdit={(p) => setEdit({ kind: 'people', data: p })} />
         ) : section === 'staff' ? (
-          <StaffSection staff={staff} roles={roles.filter((r) => r.category === 'staff')} currency={activeSpace.currency || 'USD'} onEdit={(s) => setEdit({ kind: 'staff', data: s })} />
+          <StaffSection staff={staff} roles={roles.filter((r) => r.category === 'staff')} currency={activeSpace.currency || 'USD'} spaceId={activeSpace.space_id} onEdit={(s) => setEdit({ kind: 'staff', data: s })} onRefresh={load} />
         ) : section === 'tasks' ? (
           <TasksSection
             tasks={tasks} date={taskDate} setDate={setTaskDate}
@@ -267,7 +267,7 @@ function PeopleSection({ people, roles, onEdit }: { people: FamilyMember[]; role
   );
 }
 
-function StaffSection({ staff, roles, currency, onEdit }: { staff: StaffMember[]; roles: HouseholdRole[]; currency: string; onEdit: (s?: StaffMember) => void }) {
+function StaffSection({ staff, roles, currency, spaceId, onEdit, onRefresh }: { staff: StaffMember[]; roles: HouseholdRole[]; currency: string; spaceId: string; onEdit: (s?: StaffMember) => void; onRefresh: () => void }) {
   if (staff.length === 0) {
     return (
       <View style={styles.empty}>
@@ -287,27 +287,165 @@ function StaffSection({ staff, roles, currency, onEdit }: { staff: StaffMember[]
   }
   return (
     <View style={{ gap: 8 }}>
-      {staff.map((s) => {
-        const role = roles.find((r) => r.role_id === s.role_id);
-        const t = tints[(role?.color as keyof typeof tints) || 'blue'];
-        return (
-          <TouchableOpacity key={s.staff_id} style={styles.row} onPress={() => onEdit(s)} testID={`household-staff-${s.staff_id}`} activeOpacity={0.8}>
-            <View style={[styles.avatar, { backgroundColor: t.icon }]}>
-              {s.photo_base64 ? <Image source={{ uri: s.photo_base64 }} style={styles.avatarImg} /> : <Text style={styles.avatarTxt}>{s.name?.[0]?.toUpperCase()}</Text>}
+      {staff.map((s) => (
+        <StaffCard
+          key={s.staff_id}
+          staff={s}
+          roles={roles}
+          currency={currency}
+          spaceId={spaceId}
+          onEdit={onEdit}
+          onRefresh={onRefresh}
+        />
+      ))}
+    </View>
+  );
+}
+
+function StaffCard({ staff: s, roles, currency, spaceId, onEdit, onRefresh }: { staff: StaffMember; roles: HouseholdRole[]; currency: string; spaceId: string; onEdit: (s?: StaffMember) => void; onRefresh: () => void }) {
+  const router = useRouter();
+  const role = roles.find((r) => r.role_id === s.role_id);
+  const t = tints[(role?.color as keyof typeof tints) || 'blue'];
+  const [expanded, setExpanded] = useState(false);
+  const [shortcuts, setShortcuts] = useState<any[]>([]);
+  const [freeText, setFreeText] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const loadShortcuts = useCallback(async () => {
+    try {
+      const list = await api.get<any[]>(`/household/shortcuts?space_id=${spaceId}&staff_id=${s.staff_id}`);
+      // filter: shown if scoped to this staff or shared (null)
+      setShortcuts((list || []).filter((x) => x.staff_id === s.staff_id || !x.staff_id));
+    } catch (e) {}
+  }, [spaceId, s.staff_id]);
+
+  useEffect(() => { if (expanded) loadShortcuts(); }, [expanded, loadShortcuts]);
+
+  const fire = async (title: string, saveAsShortcut: boolean) => {
+    if (!title.trim()) return;
+    setSaving(true);
+    try {
+      await api.post('/household/tasks/quick', {
+        space_id: spaceId, staff_id: s.staff_id, title: title.trim(),
+        save_as_shortcut: saveAsShortcut,
+      });
+      Alert.alert('Sent', `"${title}" sent to ${s.name}.${saveAsShortcut ? ' Saved as shortcut.' : ''}`);
+      setFreeText('');
+      if (saveAsShortcut) await loadShortcuts();
+      onRefresh();
+    } catch (e: any) { Alert.alert('Error', e?.message || 'Could not send'); }
+    finally { setSaving(false); }
+  };
+
+  const removeShortcut = async (scId: string) => {
+    try {
+      await api.delete(`/household/shortcuts/${scId}`);
+      await loadShortcuts();
+    } catch (e: any) { Alert.alert('Error', e?.message || ''); }
+  };
+
+  return (
+    <View style={[styles.row, { flexDirection: 'column', alignItems: 'stretch', padding: 0 }]} testID={`household-staff-${s.staff_id}`}>
+      <TouchableOpacity onPress={() => onEdit(s)} activeOpacity={0.8} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, padding: spacing.md }}>
+        <View style={[styles.avatar, { backgroundColor: t.icon }]}>
+          {s.photo_base64 ? <Image source={{ uri: s.photo_base64 }} style={styles.avatarImg} /> : <Text style={styles.avatarTxt}>{s.name?.[0]?.toUpperCase()}</Text>}
+        </View>
+        <View style={{ flex: 1 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <Text style={styles.rowName}>{s.name}</Text>
+            {(s as any).user_id ? (
+              <View style={[styles.badge, { backgroundColor: tints.sage.bg, paddingVertical: 2 }]}>
+                <Icon name="Check" size={9} color={tints.sage.icon} />
+                <Text style={[styles.badgeTxt, { color: tints.sage.icon, fontSize: 9 }]}>linked</Text>
+              </View>
+            ) : null}
+          </View>
+          <Text style={styles.rowSub}>
+            {role?.name || 'No role'}
+            {s.phone ? ` · ${s.phone}` : ''}
+            {s.off_day ? ` · off ${s.off_day}` : ''}
+          </Text>
+          {s.salary ? (
+            <View style={[styles.badge, { backgroundColor: tints.sage.bg, marginTop: 4 }]}>
+              <Icon name="DollarSign" size={10} color={tints.sage.icon} />
+              <Text style={[styles.badgeTxt, { color: tints.sage.icon }]}>{formatMoney(s.salary, s.salary_currency || currency)} / {s.pay_cycle}</Text>
             </View>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.rowName}>{s.name}</Text>
-              <Text style={styles.rowSub}>
-                {role?.name || 'No role'}
-                {s.phone ? ` · ${s.phone}` : ''}
-                {s.off_day ? ` · off ${s.off_day}` : ''}
-              </Text>
-              {s.salary ? (
-                <View style={[styles.badge, { backgroundColor: tints.sage.bg }]}>
-                  <Icon name="DollarSign" size={10} color={tints.sage.icon} />
-                  <Text style={[styles.badgeTxt, { color: tints.sage.icon }]}>{formatMoney(s.salary, s.salary_currency || currency)} / {s.pay_cycle}</Text>
+          ) : null}
+        </View>
+        <Icon name="ChevronRight" size={16} color={colors.textMuted} />
+      </TouchableOpacity>
+      {/* Action row: Quick send + Preview */}
+      <View style={styles.staffActions}>
+        <TouchableOpacity
+          style={[styles.actionBtn, expanded && { backgroundColor: tints.mint.icon }]}
+          onPress={() => setExpanded((v) => !v)}
+          testID={`staff-quick-${s.staff_id}`}
+        >
+          <Icon name="Sparkles" size={13} color={expanded ? '#fff' : tints.mint.icon} />
+          <Text style={[styles.actionTxt, expanded && { color: '#fff' }]}>Quick send</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.actionBtn}
+          onPress={() => router.push(`/staff-home?preview=${s.staff_id}`)}
+          testID={`staff-preview-${s.staff_id}`}
+        >
+          <Icon name="User" size={13} color={tints.blue.icon} />
+          <Text style={[styles.actionTxt, { color: tints.blue.icon }]}>Preview home</Text>
+        </TouchableOpacity>
+      </View>
+      {expanded && (
+        <View style={styles.quickPanel}>
+          <Text style={styles.helper}>Tap a shortcut to send it now. {(s as any).user_id ? `${s.name?.split(' ')[0]} will get a notification.` : `${s.name?.split(' ')[0]} isn't linked to the app yet — share their invite code first.`}</Text>
+          {shortcuts.length > 0 && (
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+              {shortcuts.map((sc) => (
+                <View key={sc.shortcut_id} style={styles.scChip}>
+                  <TouchableOpacity onPress={() => fire(sc.title, false)} disabled={saving} testID={`sc-${sc.shortcut_id}`}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                      <Icon name={sc.icon || 'Zap'} size={12} color={colors.primary} />
+                      <Text style={styles.scChipTxt}>{sc.title}</Text>
+                    </View>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={() => removeShortcut(sc.shortcut_id)} style={{ padding: 2 }}>
+                    <Icon name="X" size={10} color={colors.textMuted} />
+                  </TouchableOpacity>
                 </View>
-              ) : null}
+              ))}
+            </View>
+          )}
+          <TextInput
+            style={[styles.input, { marginTop: 8 }]}
+            value={freeText}
+            onChangeText={setFreeText}
+            placeholder='e.g. "Bring me water"'
+            placeholderTextColor={colors.textMuted}
+            testID={`quick-text-${s.staff_id}`}
+          />
+          <View style={{ flexDirection: 'row', gap: 6, marginTop: 6 }}>
+            <TouchableOpacity
+              style={[styles.sendBtn, (!freeText.trim() || saving) && { opacity: 0.5 }]}
+              onPress={() => fire(freeText, false)}
+              disabled={!freeText.trim() || saving}
+              testID={`quick-send-${s.staff_id}`}
+            >
+              <Icon name="ArrowRight" size={12} color="#fff" />
+              <Text style={styles.sendBtnTxt}>Send</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.sendBtnAlt, (!freeText.trim() || saving) && { opacity: 0.5 }]}
+              onPress={() => fire(freeText, true)}
+              disabled={!freeText.trim() || saving}
+              testID={`quick-save-${s.staff_id}`}
+            >
+              <Icon name="Plus" size={12} color={colors.primary} />
+              <Text style={styles.sendBtnAltTxt}>Send + save</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+    </View>
+  );
+}
             </View>
             <Icon name="ChevronRight" size={16} color={colors.textMuted} />
           </TouchableOpacity>
@@ -656,9 +794,9 @@ function StaffForm({ initial, roles, spaceId, currency, onClose, onSaved }: any)
       {initial?.staff_id && initial?.invite_code && (
         <View style={styles.inviteBox}>
           <View style={{ flex: 1 }}>
-            <Text style={styles.label}>Invite code</Text>
+            <Text style={styles.label}>Staff-only invite code</Text>
             <Text style={styles.inviteCode}>{initial.invite_code}</Text>
-            <Text style={styles.helper}>Share with {initial.name}. They sign up, tap "Join as staff" and paste this code to access their own simplified app.</Text>
+            <Text style={styles.helper}>Give this to {initial.name}. They sign up with any email, tap the "I'm staff" tab and paste this code — they'll land on a simplified app. This is DIFFERENT from the space invite code (which is for family/roommates).</Text>
           </View>
           <TouchableOpacity onPress={copyCode} style={styles.copyBtn}><Icon name="Copy" size={14} color={colors.textMain} /><Text style={styles.copyTxt}>Copy</Text></TouchableOpacity>
         </View>
@@ -1348,6 +1486,16 @@ const styles = StyleSheet.create({
   permRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10 },
   switch: { width: 44, height: 24, borderRadius: 12, backgroundColor: '#D6CFC9', padding: 2 },
   switchDot: { width: 20, height: 20, borderRadius: 10, backgroundColor: '#fff', position: 'absolute', top: 2, left: 2 },
+  staffActions: { flexDirection: 'row', gap: 6, paddingHorizontal: spacing.md, paddingBottom: spacing.sm },
+  actionBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 8, borderRadius: radius.full, backgroundColor: colors.surfaceAlt, borderWidth: 1, borderColor: colors.border },
+  actionTxt: { fontSize: 11, fontWeight: '800', color: colors.textMain },
+  quickPanel: { padding: spacing.md, paddingTop: 0, gap: 2 },
+  scChip: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: radius.full, backgroundColor: tints.mint.bg, borderWidth: 1, borderColor: tints.mint.icon },
+  scChipTxt: { fontSize: 11, fontWeight: '800', color: colors.primary },
+  sendBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 10, borderRadius: radius.full, backgroundColor: colors.primary },
+  sendBtnTxt: { color: '#fff', fontWeight: '800', fontSize: 12 },
+  sendBtnAlt: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 10, borderRadius: radius.full, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.primary },
+  sendBtnAltTxt: { color: colors.primary, fontWeight: '800', fontSize: 12 },
   payNowTxt: { color: '#fff', fontWeight: '800' },
   checkBox: { width: 28, height: 28, borderRadius: 8, borderWidth: 2, borderColor: colors.border, alignItems: 'center', justifyContent: 'center' },
   checkBoxDone: { backgroundColor: colors.primary, borderColor: colors.primary },

@@ -4,7 +4,7 @@ import {
   ActivityIndicator, TextInput, Alert, Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect, useRouter } from 'expo-router';
+import { useFocusEffect, useRouter, useLocalSearchParams } from 'expo-router';
 import { useAuth } from '../src/AuthContext';
 import { api } from '../src/api';
 import { colors, radius, spacing, shadows, tints } from '../src/theme';
@@ -23,6 +23,9 @@ const ATT_LABELS: Record<string, string> = { present: 'Present', off: 'Off', sic
 export default function StaffHome() {
   const { activeSpace, user, logout } = useAuth();
   const router = useRouter();
+  const params = useLocalSearchParams<{ preview?: string }>();
+  const previewStaffId = params?.preview || null;
+  const isPreview = !!previewStaffId;
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -35,24 +38,31 @@ export default function StaffHome() {
   const load = useCallback(async () => {
     if (!activeSpace) return;
     try {
-      const [d, n] = await Promise.all([
-        api.get<any>(`/household/staff/me?space_id=${activeSpace.space_id}`),
-        api.get<any[]>(`/notifications?space_id=${activeSpace.space_id}`).catch(() => []),
-      ]);
-      setData(d);
-      setNotifs(n || []);
+      if (isPreview) {
+        const d = await api.get<any>(`/household/staff/${previewStaffId}/view`);
+        setData(d);
+        setNotifs([]);
+      } else {
+        const [d, n] = await Promise.all([
+          api.get<any>(`/household/staff/me?space_id=${activeSpace.space_id}`),
+          api.get<any[]>(`/notifications?space_id=${activeSpace.space_id}`).catch(() => []),
+        ]);
+        setData(d);
+        setNotifs(n || []);
+      }
     } catch (e: any) {
       if (e?.status === 404) {
-        Alert.alert('Not linked', 'You are not registered as staff in this space.');
-        router.replace('/(tabs)/home');
+        Alert.alert(isPreview ? 'Staff not found' : 'Not linked', isPreview ? 'This staff member no longer exists.' : 'You are not registered as staff in this space.');
+        router.back();
       }
     } finally { setLoading(false); }
-  }, [activeSpace, router]);
+  }, [activeSpace, router, isPreview, previewStaffId]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
   const onRefresh = async () => { setRefreshing(true); await load(); setRefreshing(false); };
 
   const toggleTask = async (taskId: string) => {
+    if (isPreview) { Alert.alert('Preview mode', 'Actions are disabled. This is how the staff sees it.'); return; }
     try {
       await api.post(`/household/tasks/${taskId}/complete`, { date: new Date().toISOString().slice(0, 10) });
       await load();
@@ -60,6 +70,7 @@ export default function StaffHome() {
   };
 
   const setMyAttendance = async (status: string) => {
+    if (isPreview) { Alert.alert('Preview mode', 'Actions are disabled. This is how the staff sees it.'); return; }
     if (!activeSpace || !data?.staff) return;
     try {
       await api.post('/household/attendance', { space_id: activeSpace.space_id, staff_id: data.staff.staff_id, date: new Date().toISOString().slice(0, 10), status });
@@ -68,6 +79,7 @@ export default function StaffHome() {
   };
 
   const submitRequest = async () => {
+    if (isPreview) { Alert.alert('Preview mode', 'Actions are disabled. This is how the staff sees it.'); return; }
     if (!activeSpace || !newReq.trim() || !data?.staff) return;
     try {
       await api.post('/household/shopping', { space_id: activeSpace.space_id, item_name: newReq.trim(), quantity: newQty || null, requested_by_staff_id: data.staff.staff_id, urgency: 'normal' });
@@ -102,6 +114,15 @@ export default function StaffHome() {
         contentContainerStyle={styles.scroll}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}
       >
+        {isPreview && (
+          <View style={styles.previewBanner} testID="preview-banner">
+            <Icon name="User" size={14} color={tints.blue.icon} />
+            <Text style={styles.previewTxt}>Previewing as {data.staff.name} · read-only</Text>
+            <TouchableOpacity onPress={() => router.back()} style={styles.previewExit} testID="preview-exit">
+              <Text style={styles.previewExitTxt}>Exit</Text>
+            </TouchableOpacity>
+          </View>
+        )}
         {/* Greeting header */}
         <View style={styles.greeting}>
           <View style={[styles.avatarBig, { backgroundColor: tints.blue.icon }]}>
@@ -111,9 +132,9 @@ export default function StaffHome() {
             <Text style={styles.hi}>Hi, {staff.name?.split(' ')[0] || 'there'}!</Text>
             <Text style={styles.greetSub}>{staff.role_name || 'Staff'} · {activeSpace.name}</Text>
           </View>
-          <TouchableOpacity onPress={() => setShowNotifs((v) => !v)} style={styles.iconBtn} testID="staff-notifs-btn">
-            <Icon name="Heart" size={18} color={colors.textMain} />
-            {notifs.filter((n) => !n.read).length > 0 && (
+          <TouchableOpacity onPress={() => setShowNotifs((v) => !v)} style={styles.iconBtn} testID="staff-notifs-btn" disabled={isPreview}>
+            <Icon name="Heart" size={18} color={isPreview ? colors.textMuted : colors.textMain} />
+            {!isPreview && notifs.filter((n) => !n.read).length > 0 && (
               <View style={styles.notifDot}><Text style={styles.notifDotTxt}>{notifs.filter((n) => !n.read).length}</Text></View>
             )}
           </TouchableOpacity>
@@ -295,10 +316,17 @@ export default function StaffHome() {
           </View>
         )}
 
-        <TouchableOpacity style={styles.logoutBtn} onPress={async () => { await logout(); router.replace('/welcome'); }} testID="staff-logout">
-          <Icon name="LogOut" size={16} color={colors.dangerText} />
-          <Text style={styles.logoutTxt}>Log out</Text>
-        </TouchableOpacity>
+        {isPreview ? (
+          <TouchableOpacity style={styles.logoutBtn} onPress={() => router.back()} testID="preview-exit-bottom">
+            <Icon name="ChevronRight" size={16} color={colors.textMain} />
+            <Text style={[styles.logoutTxt, { color: colors.textMain }]}>Exit preview</Text>
+          </TouchableOpacity>
+        ) : (
+          <TouchableOpacity style={styles.logoutBtn} onPress={async () => { await logout(); router.replace('/welcome'); }} testID="staff-logout">
+            <Icon name="LogOut" size={16} color={colors.dangerText} />
+            <Text style={styles.logoutTxt}>Log out</Text>
+          </TouchableOpacity>
+        )}
       </ScrollView>
     </SafeAreaView>
   );
@@ -324,6 +352,10 @@ const styles = StyleSheet.create({
   notifBody: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
   notifTime: { fontSize: 10, color: colors.textMuted, marginTop: 4 },
   unreadDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.primary },
+  previewBanner: { flexDirection: 'row', alignItems: 'center', gap: 8, padding: 10, backgroundColor: tints.blue.bg, borderRadius: radius.md, marginBottom: spacing.sm, borderWidth: 1, borderColor: tints.blue.icon },
+  previewTxt: { flex: 1, fontSize: 12, fontWeight: '800', color: tints.blue.icon },
+  previewExit: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: radius.full, backgroundColor: '#fff' },
+  previewExitTxt: { fontSize: 11, fontWeight: '800', color: tints.blue.icon },
   tabRow: { gap: 8, paddingVertical: 8 },
   tabChip: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 14, paddingVertical: 8, borderRadius: radius.full, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
   tabTxt: { fontSize: 12, fontWeight: '700', color: colors.textMuted },

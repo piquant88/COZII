@@ -2486,7 +2486,166 @@ async def create_task(body: CreateTaskRequest, user: User = Depends(get_current_
     }
     await db.task_templates.insert_one(doc)
     doc.pop("_id", None)
+    # Notify assigned staff (if linked)
+    if body.staff_id:
+        st = await db.staff_members.find_one({"staff_id": body.staff_id}, {"_id": 0, "user_id": 1, "name": 1})
+        if st and st.get("user_id"):
+            when = "today" if rec in ("daily",) else (f"on {body.once_date}" if rec == "once" and body.once_date else rec)
+            await _create_notification(
+                space_id=body.space_id,
+                user_id=st["user_id"],
+                kind="task_assigned",
+                title=f"New task: {doc['title']}",
+                body=f"You've been assigned this task · {when}{(' · due ' + body.due_time) if body.due_time else ''}.",
+                data={"task_id": doc["task_id"]},
+            )
     return TaskTemplate(**doc)
+
+
+# =========================
+# Task Shortcuts & Quick-fire
+# =========================
+class TaskShortcut(BaseModel):
+    shortcut_id: str
+    space_id: str
+    staff_id: Optional[str] = None  # None = shared across all staff
+    title: str
+    icon: Optional[str] = "Zap"
+    created_at: datetime
+
+
+class CreateTaskShortcutRequest(BaseModel):
+    space_id: str
+    staff_id: Optional[str] = None
+    title: str
+    icon: Optional[str] = "Zap"
+
+
+class QuickTaskRequest(BaseModel):
+    space_id: str
+    staff_id: str
+    title: str
+    description: Optional[str] = None
+    due_time: Optional[str] = None
+    save_as_shortcut: bool = False
+
+
+@api_router.get("/household/shortcuts", response_model=List[TaskShortcut])
+async def list_task_shortcuts(space_id: str, staff_id: Optional[str] = None, user: User = Depends(get_current_user)):
+    await assert_space_member(space_id, user.user_id)
+    q: Dict[str, Any] = {"space_id": space_id}
+    if staff_id:
+        q["$or"] = [{"staff_id": staff_id}, {"staff_id": None}]
+    docs = await db.task_shortcuts.find(q, {"_id": 0}).sort("created_at", 1).to_list(500)
+    return [TaskShortcut(**d) for d in docs]
+
+
+@api_router.post("/household/shortcuts", response_model=TaskShortcut)
+async def create_task_shortcut(body: CreateTaskShortcutRequest, user: User = Depends(get_current_user)):
+    await assert_space_member(body.space_id, user.user_id)
+    if not body.title.strip():
+        raise HTTPException(400, "Title required")
+    doc = {
+        "shortcut_id": gen_id("sc"),
+        "space_id": body.space_id,
+        "staff_id": body.staff_id,
+        "title": body.title.strip(),
+        "icon": body.icon or "Zap",
+        "created_at": now_utc(),
+    }
+    await db.task_shortcuts.insert_one(doc)
+    doc.pop("_id", None)
+    return TaskShortcut(**doc)
+
+
+@api_router.delete("/household/shortcuts/{shortcut_id}")
+async def delete_task_shortcut(shortcut_id: str, user: User = Depends(get_current_user)):
+    s = await db.task_shortcuts.find_one({"shortcut_id": shortcut_id}, {"_id": 0})
+    if not s:
+        raise HTTPException(404, "Shortcut not found")
+    await assert_space_member(s["space_id"], user.user_id)
+    await db.task_shortcuts.delete_one({"shortcut_id": shortcut_id})
+    return {"ok": True}
+
+
+@api_router.post("/household/tasks/quick", response_model=TaskTemplate)
+async def quick_task(body: QuickTaskRequest, user: User = Depends(get_current_user)):
+    await assert_space_member(body.space_id, user.user_id)
+    staff = await db.staff_members.find_one({"staff_id": body.staff_id, "space_id": body.space_id}, {"_id": 0})
+    if not staff:
+        raise HTTPException(404, "Staff not found")
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(400, "Title required")
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    doc = {
+        "task_id": gen_id("task"),
+        "space_id": body.space_id,
+        "title": title,
+        "description": body.description,
+        "staff_id": body.staff_id,
+        "role_id": None,
+        "recurrence": "once",
+        "weekdays": [],
+        "monthly_day": None,
+        "once_date": today_str,
+        "due_time": body.due_time,
+        "requires_photo": False,
+        "active": True,
+        "created_at": now_utc(),
+    }
+    await db.task_templates.insert_one(doc)
+    doc.pop("_id", None)
+    # Save as shortcut for this staff
+    if body.save_as_shortcut:
+        existing = await db.task_shortcuts.find_one({"space_id": body.space_id, "staff_id": body.staff_id, "title": title}, {"_id": 0})
+        if not existing:
+            await db.task_shortcuts.insert_one({
+                "shortcut_id": gen_id("sc"),
+                "space_id": body.space_id,
+                "staff_id": body.staff_id,
+                "title": title,
+                "icon": "Zap",
+                "created_at": now_utc(),
+            })
+    # Notify staff if linked
+    if staff.get("user_id"):
+        await _create_notification(
+            space_id=body.space_id,
+            user_id=staff["user_id"],
+            kind="task_assigned",
+            title=f"Quick task: {title}",
+            body=(body.description or f"{staff.get('name', 'You')}, a new quick task was just sent for today.") + (f" · due {body.due_time}" if body.due_time else ""),
+            data={"task_id": doc["task_id"], "quick": True},
+        )
+    return TaskTemplate(**doc)
+
+
+# Owner preview of any staff's home view
+@api_router.get("/household/staff/{staff_id}/view")
+async def preview_staff_view(staff_id: str, user: User = Depends(get_current_user)):
+    s = await db.staff_members.find_one({"staff_id": staff_id}, {"_id": 0})
+    if not s:
+        raise HTTPException(404, "Staff not found")
+    await assert_space_member(s["space_id"], user.user_id)
+    await _attach_role_name(s)
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    tasks = await db.task_templates.find(
+        {"space_id": s["space_id"], "$or": [{"staff_id": s["staff_id"]}, {"role_id": s.get("role_id")}, {"staff_id": None, "role_id": None}]},
+        {"_id": 0},
+    ).to_list(500)
+    comps = await db.task_completions.find({"space_id": s["space_id"], "date": today_str}, {"_id": 0}).to_list(500)
+    comp_by_task = {c["task_id"]: c for c in comps}
+    today_tasks: List[Dict[str, Any]] = []
+    for t in tasks:
+        if _task_due_on(t, today_str):
+            today_tasks.append({**t, "completed_today": t["task_id"] in comp_by_task, "completion": comp_by_task.get(t["task_id"])})
+    att = await db.attendance_logs.find({"space_id": s["space_id"], "staff_id": s["staff_id"]}, {"_id": 0}).sort("date", -1).to_list(60)
+    perms = {**DEFAULT_STAFF_PERMS, **(s.get("permissions") or {})}
+    payments: List[Dict[str, Any]] = []
+    if perms.get("view_wage_amount"):
+        payments = await db.staff_payments.find({"space_id": s["space_id"], "staff_id": s["staff_id"]}, {"_id": 0}).sort("paid_at", -1).to_list(100)
+    return {"staff": s, "permissions": perms, "today_tasks": today_tasks, "attendance": att, "payments": payments, "preview": True}
 
 
 @api_router.patch("/household/tasks/{task_id}", response_model=TaskTemplate)
