@@ -16,6 +16,8 @@ export default function Profile() {
   const router = useRouter();
   const { user, logout, activeSpace, spaces, setActiveSpaceId, refreshSpaces } = useAuth() as any;
   const [members, setMembers] = useState<User[]>([]);
+  const [familyMap, setFamilyMap] = useState<Record<string, any>>({}); // user_id → family member doc
+  const [staffMap, setStaffMap] = useState<Record<string, any>>({}); // user_id → staff doc
   const [copied, setCopied] = useState(false);
   const [showCurrency, setShowCurrency] = useState(false);
   const [savingCur, setSavingCur] = useState(false);
@@ -25,6 +27,17 @@ export default function Profile() {
     try {
       const m = await api.get<User[]>(`/spaces/${activeSpace.space_id}/members`);
       setMembers(m);
+      // Fetch family + staff to identify each member's role/title
+      const [family, staff] = await Promise.all([
+        api.get<any[]>(`/household/family?space_id=${activeSpace.space_id}`).catch(() => []),
+        api.get<any[]>(`/household/staff?space_id=${activeSpace.space_id}`).catch(() => []),
+      ]);
+      const fm: Record<string, any> = {};
+      (family || []).forEach((f: any) => { if (f.user_id) fm[f.user_id] = f; });
+      const sm: Record<string, any> = {};
+      (staff || []).forEach((s: any) => { if (s.user_id) sm[s.user_id] = s; });
+      setFamilyMap(fm);
+      setStaffMap(sm);
     } catch (e) { console.warn(e); }
   }, [activeSpace]);
 
@@ -111,20 +124,31 @@ export default function Profile() {
               </TouchableOpacity>
 
               <Text style={styles.membersTitle}>Members</Text>
-              {members.map((m) => (
-                <View key={m.user_id} style={styles.memberRow}>
-                  <View style={[styles.memberAvatar, { backgroundColor: m.user_id === activeSpace.owner_id ? colors.peach : colors.lavender }]}>
-                    <Text style={styles.memberAvatarTxt}>{m.name?.[0]?.toUpperCase()}</Text>
+              {members.map((m) => {
+                const isOwner = m.user_id === activeSpace.owner_id;
+                const isYou = m.user_id === user?.user_id;
+                const fam = familyMap[m.user_id];
+                const sf = staffMap[m.user_id];
+                let roleLabel = ''; let roleBg = ''; let roleFg = '';
+                if (isOwner) { roleLabel = 'Owner'; roleBg = colors.peach; roleFg = colors.textMain; }
+                else if (sf) { roleLabel = sf.role_name || 'Staff'; roleBg = '#DDEAF6'; roleFg = '#1F4F88'; }
+                else if (fam) { roleLabel = fam.relation || fam.relation_label || 'Family'; roleBg = '#DCEBD2'; roleFg = '#3D6F2A'; }
+                else { roleLabel = activeSpace.space_type === 'household' ? 'Family' : 'Roommate'; roleBg = '#F0E6D8'; roleFg = '#7A5C2E'; }
+                return (
+                  <View key={m.user_id} style={styles.memberRow}>
+                    <View style={[styles.memberAvatar, { backgroundColor: isOwner ? colors.peach : sf ? '#1F4F88' : fam ? '#3D6F2A' : colors.lavender }]}>
+                      <Text style={styles.memberAvatarTxt}>{m.name?.[0]?.toUpperCase()}</Text>
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.memberName}>{m.name}{isYou ? ' (You)' : ''}</Text>
+                      <Text style={styles.memberEmail}>{m.email}</Text>
+                    </View>
+                    <View style={[styles.roleBadge, { backgroundColor: roleBg }]}>
+                      <Text style={[styles.roleBadgeTxt, { color: roleFg }]}>{roleLabel}</Text>
+                    </View>
                   </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.memberName}>{m.name}{m.user_id === user?.user_id ? ' (You)' : ''}</Text>
-                    <Text style={styles.memberEmail}>{m.email}</Text>
-                  </View>
-                  {m.user_id === activeSpace.owner_id && (
-                    <View style={styles.ownerBadge}><Text style={styles.ownerTxt}>Owner</Text></View>
-                  )}
-                </View>
-              ))}
+                );
+              })}
             </View>
           </>
         )}
@@ -147,6 +171,16 @@ export default function Profile() {
             </View>
           </>
         )}
+
+        <TouchableOpacity
+          style={[styles.card, styles.rowBtn]}
+          onPress={() => router.push('/documents')}
+          testID="profile-documents"
+        >
+          <Icon name="FileText" size={20} color={colors.textMain} />
+          <Text style={styles.rowBtnTxt}>Documents</Text>
+          <Icon name="ChevronRight" size={18} color={colors.textMuted} />
+        </TouchableOpacity>
 
         <TouchableOpacity
           style={[styles.card, styles.rowBtn]}
@@ -404,6 +438,8 @@ const styles = StyleSheet.create({
   memberEmail: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
   ownerBadge: { backgroundColor: colors.peach, paddingHorizontal: 10, paddingVertical: 4, borderRadius: radius.full },
   ownerTxt: { fontSize: 11, fontWeight: '800', color: '#9B5A3F' },
+  roleBadge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: radius.full },
+  roleBadgeTxt: { fontSize: 11, fontWeight: '800' },
   rowBtn: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
     padding: spacing.md,

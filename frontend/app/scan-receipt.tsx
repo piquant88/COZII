@@ -48,6 +48,7 @@ export default function ScanReceipt() {
   const [items, setItems] = useState<Scanned[]>([]);
   const [showCategoryPicker, setShowCategoryPicker] = useState(false);
   const [pickerForIndex, setPickerForIndex] = useState<number | null>(null);
+  const [eventTag, setEventTag] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
   const [lockCategory, setLockCategory] = useState<boolean>(!!preselectCategoryId);
 
@@ -179,6 +180,8 @@ export default function ScanReceipt() {
         })),
         purchase_date: new Date().toISOString().slice(0, 10),
         receipt_photo_base64: photo,
+        event_tag: eventTag.trim() || null,
+        auto_fetch_images: true,
       });
       router.replace('/(tabs)/inventory');
     } catch (e: any) {
@@ -266,6 +269,21 @@ export default function ScanReceipt() {
                         <Text style={styles.catSelectTxt}>{defaultCategory?.name || 'Pick category'}</Text>
                         <Icon name="ChevronRight" size={16} color={colors.textMuted} />
                       </TouchableOpacity>
+                    </View>
+                  </View>
+
+                  <View style={styles.defaultCatBox}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.label}>Event tag (optional)</Text>
+                      <TextInput
+                        style={styles.eventInput}
+                        value={eventTag}
+                        onChangeText={setEventTag}
+                        placeholder='e.g. "Birthday June 8" or "Diwali 2026"'
+                        placeholderTextColor={colors.textMuted}
+                        testID="scan-event-tag"
+                      />
+                      <Text style={styles.eventHint}>Stamps every item with this tag so you can group all event expenses together.</Text>
                     </View>
                   </View>
 
@@ -467,6 +485,8 @@ const styles = StyleSheet.create({
     borderRadius: radius.md,
   },
   catSelectTxt: { flex: 1, fontSize: 14, fontWeight: '700', color: colors.textMain },
+  eventInput: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, paddingHorizontal: 12, paddingVertical: 10, fontSize: 14, color: colors.textMain, marginTop: 6 },
+  eventHint: { fontSize: 11, color: colors.textMuted, marginTop: 4, lineHeight: 15, fontStyle: 'italic' },
   catDot: { width: 10, height: 10, borderRadius: 5 },
   sectionTitle: { fontSize: 18, fontWeight: '800', color: colors.textMain, marginBottom: 2 },
   sectionSub: { fontSize: 12, color: colors.textMuted, marginBottom: spacing.md },

@@ -10,6 +10,7 @@ import string
 import uuid
 import bcrypt
 import httpx
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -188,7 +189,10 @@ class Item(TZAware):
     space_id: str
     category_id: str
     name: str
-    photo_base64: Optional[str] = None
+    photo_base64: Optional[str] = None  # uploaded photo override (still supported)
+    image_url: Optional[str] = None  # auto-fetched product image URL (preferred for display)
+    receipt_base64: Optional[str] = None  # original receipt/proof file (image base64)
+    event_tag: Optional[str] = None  # free-text tag for grouping (e.g. "Birthday June 8")
     status: str = "available"  # available | low | finished
     quantity: float = 1
     unit: Optional[str] = None
@@ -208,6 +212,9 @@ class CreateItemRequest(BaseModel):
     category_id: str
     name: str = Field(min_length=1, max_length=80)
     photo_base64: Optional[str] = None
+    image_url: Optional[str] = None
+    receipt_base64: Optional[str] = None
+    event_tag: Optional[str] = None
     status: str = "available"
     quantity: float = 1
     unit: Optional[str] = None
@@ -221,6 +228,9 @@ class CreateItemRequest(BaseModel):
 class UpdateItemRequest(BaseModel):
     name: Optional[str] = None
     photo_base64: Optional[str] = None
+    image_url: Optional[str] = None
+    receipt_base64: Optional[str] = None
+    event_tag: Optional[str] = None
     status: Optional[str] = None
     quantity: Optional[float] = None
     unit: Optional[str] = None
@@ -629,6 +639,9 @@ async def create_item(body: CreateItemRequest, user: User = Depends(get_current_
         "category_id": body.category_id,
         "name": body.name.strip(),
         "photo_base64": body.photo_base64,
+        "image_url": body.image_url,
+        "receipt_base64": body.receipt_base64,
+        "event_tag": body.event_tag,
         "status": body.status,
         "quantity": body.quantity,
         "unit": body.unit,
@@ -741,6 +754,48 @@ def _extract_json_block(text: str) -> str:
     return text
 
 
+# =========================
+# Product image search (best-effort, no API key)
+# =========================
+import httpx as _httpx_for_img  # safe alias
+
+async def _search_product_image(query: str) -> Optional[str]:
+    """Best-effort fetch of a product image URL using DuckDuckGo. Returns None if anything goes wrong."""
+    if not query or len(query.strip()) < 2:
+        return None
+    q = query.strip()
+    try:
+        async with _httpx_for_img.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+            # 1) Get vqd token
+            r1 = await client.post(
+                "https://duckduckgo.com/",
+                data={"q": q},
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            m = re.search(r'vqd=["\']?(\d-[\d-]+)', r1.text)
+            if not m:
+                return None
+            vqd = m.group(1)
+            # 2) Search images
+            r2 = await client.get(
+                "https://duckduckgo.com/i.js",
+                params={"q": q, "o": "json", "vqd": vqd, "f": ",,,", "p": "1"},
+                headers={"User-Agent": "Mozilla/5.0", "Referer": "https://duckduckgo.com/"},
+            )
+            if r2.status_code != 200:
+                return None
+            data = r2.json()
+            results = data.get("results") or []
+            for it in results[:5]:
+                img = it.get("image")
+                if img and img.startswith("http"):
+                    return img
+            return None
+    except Exception as e:
+        logger.debug("product image search failed for %r: %s", q, e)
+        return None
+
+
 @api_router.post("/ai/scan-receipt", response_model=ScanReceiptResponse)
 async def scan_receipt(body: ScanReceiptRequest, user: User = Depends(get_current_user)):
     if not EMERGENT_LLM_KEY:
@@ -849,17 +904,28 @@ class BulkCreateItemsRequest(BaseModel):
     per_item_category: Dict[str, str] = {}  # index -> category_id override
     items: List[ScannedItem]
     purchase_date: Optional[str] = None
-    receipt_photo_base64: Optional[str] = None
+    receipt_photo_base64: Optional[str] = None  # original receipt (kept as proof, not display)
+    event_tag: Optional[str] = None  # e.g. "Birthday June 8"
+    auto_fetch_images: bool = True  # auto-search the web for product images
 
 
 @api_router.post("/items/bulk", response_model=List[Item])
 async def bulk_create_items(body: BulkCreateItemsRequest, user: User = Depends(get_current_user)):
     await assert_space_member(body.space_id, user.user_id)
-    # Load categories owned by this space to validate ids
     cat_docs = await db.categories.find({"space_id": body.space_id}, {"_id": 0, "category_id": 1}).to_list(200)
     valid_cat_ids = {c["category_id"] for c in cat_docs}
     if body.category_id not in valid_cat_ids:
         raise HTTPException(status_code=400, detail="Invalid default category")
+
+    # Best-effort fetch product images in parallel for each item
+    image_urls: List[Optional[str]] = [None] * len(body.items)
+    if body.auto_fetch_images and body.items:
+        async def _fetch_for(idx: int, name: str):
+            try:
+                image_urls[idx] = await _search_product_image(name)
+            except Exception:
+                image_urls[idx] = None
+        await asyncio.gather(*[_fetch_for(i, it.name) for i, it in enumerate(body.items)])
 
     created: List[dict] = []
     for idx, it in enumerate(body.items):
@@ -871,7 +937,10 @@ async def bulk_create_items(body: BulkCreateItemsRequest, user: User = Depends(g
             "space_id": body.space_id,
             "category_id": cid,
             "name": it.name.strip(),
-            "photo_base64": body.receipt_photo_base64,
+            "photo_base64": None,
+            "image_url": image_urls[idx],
+            "receipt_base64": body.receipt_photo_base64,
+            "event_tag": body.event_tag,
             "status": "available",
             "quantity": it.quantity,
             "unit": None,
@@ -891,6 +960,33 @@ async def bulk_create_items(body: BulkCreateItemsRequest, user: User = Depends(g
         await record_activity(body.space_id, user, "added", "item", out["item_id"], out["name"])
 
     return [Item(**d) for d in created]
+
+
+# Manual product-image refetch endpoint for an item
+class RefreshImageRequest(BaseModel):
+    query: Optional[str] = None  # override search query
+
+
+@api_router.post("/items/{item_id}/refresh-image", response_model=Item)
+async def refresh_item_image(item_id: str, body: RefreshImageRequest, user: User = Depends(get_current_user)):
+    doc = await db.items.find_one({"item_id": item_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Item not found")
+    await assert_space_member(doc["space_id"], user.user_id)
+    q = (body.query or doc.get("name") or "").strip()
+    url = await _search_product_image(q)
+    if not url:
+        raise HTTPException(404, "No image found for this query. Try a more specific name (e.g. brand + model).")
+    await db.items.update_one({"item_id": item_id}, {"$set": {"image_url": url, "photo_base64": None, "updated_at": now_utc()}})
+    out = await db.items.find_one({"item_id": item_id}, {"_id": 0})
+    return Item(**out)
+
+
+# Public lightweight search endpoint (used during item edit)
+@api_router.get("/products/image-search")
+async def product_image_search(q: str, user: User = Depends(get_current_user)):
+    url = await _search_product_image(q)
+    return {"query": q, "image_url": url}
 
 
 # =========================
@@ -3041,6 +3137,117 @@ async def household_counts(space_id: str, user: User = Depends(get_current_user)
         "shopping_approved": shop_approved,
         "tasks_open_today": tasks_open,
     }
+
+
+# =========================
+# Documents vault
+# =========================
+class Document(BaseModel):
+    document_id: str
+    space_id: str
+    name: str
+    folder: Optional[str] = None  # e.g. "contracts", "ids", "insurance"
+    mime: str = "image/jpeg"
+    file_base64: Optional[str] = None  # base64 (image/pdf)
+    note: Optional[str] = None
+    tags: List[str] = Field(default_factory=list)
+    size_kb: Optional[int] = None
+    uploaded_by: str
+    uploaded_by_name: Optional[str] = None
+    created_at: datetime
+    related_to: Optional[Dict[str, str]] = None  # {kind:'payment'|'item', id:..}
+
+
+class CreateDocumentRequest(BaseModel):
+    space_id: str
+    name: str
+    folder: Optional[str] = None
+    mime: str = "image/jpeg"
+    file_base64: str
+    note: Optional[str] = None
+    tags: List[str] = []
+    related_to: Optional[Dict[str, str]] = None
+
+
+class UpdateDocumentRequest(BaseModel):
+    name: Optional[str] = None
+    folder: Optional[str] = None
+    note: Optional[str] = None
+    tags: Optional[List[str]] = None
+
+
+@api_router.get("/documents", response_model=List[Document])
+async def list_documents(space_id: str, folder: Optional[str] = None, user: User = Depends(get_current_user)):
+    await assert_space_member(space_id, user.user_id)
+    q: Dict[str, Any] = {"space_id": space_id}
+    if folder:
+        q["folder"] = folder
+    docs = await db.documents.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return [Document(**d) for d in docs]
+
+
+@api_router.post("/documents", response_model=Document)
+async def create_document(body: CreateDocumentRequest, user: User = Depends(get_current_user)):
+    await assert_space_member(body.space_id, user.user_id)
+    if not body.file_base64:
+        raise HTTPException(400, "file_base64 is required")
+    raw = body.file_base64
+    # Estimate size in KB
+    payload = raw.split(",", 1)[1] if "," in raw and raw.startswith("data:") else raw
+    size_kb = max(1, int(len(payload) * 3 / 4 / 1024))
+    if size_kb > 8 * 1024:  # 8 MB hard cap
+        raise HTTPException(413, "File too large (max ~8 MB). Please compress or split.")
+    doc = {
+        "document_id": gen_id("doc"),
+        "space_id": body.space_id,
+        "name": body.name.strip() or "Untitled",
+        "folder": body.folder,
+        "mime": body.mime or "image/jpeg",
+        "file_base64": body.file_base64,
+        "note": body.note,
+        "tags": body.tags or [],
+        "size_kb": size_kb,
+        "uploaded_by": user.user_id,
+        "uploaded_by_name": user.name,
+        "created_at": now_utc(),
+        "related_to": body.related_to,
+    }
+    await db.documents.insert_one(doc)
+    doc.pop("_id", None)
+    return Document(**doc)
+
+
+@api_router.patch("/documents/{document_id}", response_model=Document)
+async def update_document(document_id: str, body: UpdateDocumentRequest, user: User = Depends(get_current_user)):
+    d = await db.documents.find_one({"document_id": document_id}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Document not found")
+    await assert_space_member(d["space_id"], user.user_id)
+    updates = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
+    if updates:
+        await db.documents.update_one({"document_id": document_id}, {"$set": updates})
+    out = await db.documents.find_one({"document_id": document_id}, {"_id": 0})
+    return Document(**out)
+
+
+@api_router.delete("/documents/{document_id}")
+async def delete_document(document_id: str, user: User = Depends(get_current_user)):
+    d = await db.documents.find_one({"document_id": document_id}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Document not found")
+    await assert_space_member(d["space_id"], user.user_id)
+    await db.documents.delete_one({"document_id": document_id})
+    return {"ok": True}
+
+
+@api_router.get("/documents/folders")
+async def list_doc_folders(space_id: str, user: User = Depends(get_current_user)):
+    await assert_space_member(space_id, user.user_id)
+    pipeline = [{"$match": {"space_id": space_id, "folder": {"$ne": None}}}, {"$group": {"_id": "$folder", "count": {"$sum": 1}}}]
+    folders = []
+    async for r in db.documents.aggregate(pipeline):
+        folders.append({"folder": r["_id"], "count": r["count"]})
+    return folders
 
 
 @api_router.delete("/household/shopping/{request_id}")

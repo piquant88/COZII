@@ -125,8 +125,8 @@ export default function Inventory() {
                     testID={`search-item-${it.item_id}`}
                   >
                     <View style={[styles.itemThumb, { backgroundColor: tint.bg }]}>
-                      {it.photo_base64 ? (
-                        <Image source={{ uri: it.photo_base64 }} style={styles.itemThumbImg} />
+                      {(it.image_url || it.photo_base64) ? (
+                        <Image source={{ uri: it.image_url || it.photo_base64 }} style={styles.itemThumbImg} />
                       ) : (
                         <Icon name={catIcon(it.category_id)} color={tint.icon} size={20} />
                       )}
