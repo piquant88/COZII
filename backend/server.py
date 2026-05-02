@@ -1974,6 +1974,8 @@ async def create_staff(body: CreateStaffRequest, user: User = Depends(get_curren
         "salary_currency": body.salary_currency or (space.get("currency") if isinstance(space, dict) else None) or "USD",
         "off_day": body.off_day,
         "start_date": body.start_date,
+        "end_date": body.end_date,
+        "active": True if body.active is None else bool(body.active),
         "notes": body.notes,
         "user_id": None,
         "invite_code": _gen_staff_invite_code(),
@@ -2217,7 +2219,7 @@ async def update_staff(staff_id: str, body: UpdateStaffRequest, user: User = Dep
         raise HTTPException(404, "Staff member not found")
     await assert_space_member(s["space_id"], user.user_id)
     updates: Dict[str, Any] = {}
-    for k in ("name", "role_id", "photo_base64", "phone", "emergency_contact", "id_number", "salary", "pay_cycle", "salary_currency", "off_day", "start_date", "notes"):
+    for k in ("name", "role_id", "photo_base64", "phone", "emergency_contact", "id_number", "salary", "pay_cycle", "salary_currency", "off_day", "start_date", "end_date", "active", "notes"):
         v = getattr(body, k)
         if v is not None:
             updates[k] = v

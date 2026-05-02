@@ -1379,12 +1379,42 @@ agent_communication:
 backend:
   - task: "Staff active/end_date lifecycle + report filter"
     implemented: true
-    working: false
+    working: true
     file: "/app/backend/server.py"
-    stuck_count: 1
+    stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          Phase 6 retest 2026-05-02 via /app/backend_test_phase6.py.
+          ALL 33/33 ASSERTIONS PASS after main agent fixes.
+          
+          Verified fixes:
+            ✅ create_staff now persists `end_date` and `active` to the
+               inserted doc. POST {active:false} → response.active == false,
+               Mongo doc has active=false stored.
+            ✅ update_staff now accepts `end_date` and `active` in the
+               update tuple. PATCH {end_date:"2026-01-31", active:false} →
+               response.end_date == "2026-01-31", response.active == false.
+          
+          /api/reports/household current-month filter works as expected:
+            ✅ Staff A (active, paid in window) → INCLUDED
+            ✅ Staff B (active=false, no activity) → EXCLUDED
+            ✅ Staff C (start_date=2099-01-01) → EXCLUDED
+            ✅ Staff D (end_date=2020-01-31) → EXCLUDED
+            ✅ report.staff has exactly {A}
+          
+          Historical integrity intact:
+            ✅ /reports/household?year=2020&month=1 includes D
+               (end_date=2020-01-31) with paid==2,000,000 IDR after a
+               historical staff_payments doc was injected for 2020-01-15.
+          
+          Spot-checks all green: /reports/finance, /household/tasks/quick,
+          legacy items/categories without updated_at.
+          
+          Marking task working=true, needs_retesting=false. Production-ready.
       - working: "NA"
         agent: "main"
         comment: |
@@ -1600,3 +1630,34 @@ agent_communication:
            read is already in place via _in_window).
         3. Re-run /app/backend_test_phase6.py — should hit 33/33.
 
+
+  - agent: "testing"
+    message: |
+      Phase 6 Staff lifecycle retest 2026-05-02 via /app/backend_test_phase6.py.
+      33/33 PASS. Both bugs confirmed fixed:
+      
+      ✅ FIX VERIFIED #1 — create_staff now persists `end_date` and `active`
+         to the inserted MongoDB doc. POST /household/staff {active:false}
+         returns response.active == false; Mongo has active=false.
+      
+      ✅ FIX VERIFIED #2 — update_staff now allows `end_date` and `active`
+         in the update tuple. PATCH {end_date:"2026-01-31", active:false}
+         returns 200 with both fields populated in the response.
+      
+      ✅ /api/reports/household current-month filter behaves as expected:
+         A (active, paid in window) → INCLUDED
+         B (active=false) → EXCLUDED
+         C (start_date=2099-01-01 future) → EXCLUDED
+         D (end_date=2020-01-31 past) → EXCLUDED
+         report.staff == {A} exactly.
+      
+      ✅ Historical integrity preserved: /reports/household?year=2020&month=1
+         still includes D with paid==2,000,000 IDR after injecting a
+         staff_payments doc dated 2020-01-15.
+      
+      ✅ Spot-checks all green: /reports/finance shape, /household/tasks/quick
+         (recurrence='once'), legacy items/categories without updated_at.
+      
+      Task "Staff active/end_date lifecycle + report filter" updated to
+      working=true, needs_retesting=false, stuck_count=0. No further backend
+      work required. No frontend testing performed (per protocol).
