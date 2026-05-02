@@ -2024,6 +2024,390 @@ async def delete_handbook(entry_id: str, user: User = Depends(get_current_user))
 
 
 # =========================
+# Household Phase 2 — Tasks, Attendance, Shopping requests
+# =========================
+class TaskTemplate(BaseModel):
+    task_id: str
+    space_id: str
+    title: str
+    description: Optional[str] = None
+    staff_id: Optional[str] = None
+    role_id: Optional[str] = None
+    recurrence: str = "daily"  # daily | weekly | monthly | once
+    weekdays: List[int] = Field(default_factory=list)  # 0=Mon..6=Sun, used when recurrence=weekly
+    monthly_day: Optional[int] = None  # used when recurrence=monthly
+    once_date: Optional[str] = None  # YYYY-MM-DD, used when recurrence=once
+    due_time: Optional[str] = None  # HH:MM
+    requires_photo: bool = False
+    active: bool = True
+    created_at: datetime
+
+
+class CreateTaskRequest(BaseModel):
+    space_id: str
+    title: str
+    description: Optional[str] = None
+    staff_id: Optional[str] = None
+    role_id: Optional[str] = None
+    recurrence: str = "daily"
+    weekdays: List[int] = Field(default_factory=list)
+    monthly_day: Optional[int] = None
+    once_date: Optional[str] = None
+    due_time: Optional[str] = None
+    requires_photo: bool = False
+
+
+class UpdateTaskRequest(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    staff_id: Optional[str] = None
+    role_id: Optional[str] = None
+    recurrence: Optional[str] = None
+    weekdays: Optional[List[int]] = None
+    monthly_day: Optional[int] = None
+    once_date: Optional[str] = None
+    due_time: Optional[str] = None
+    requires_photo: Optional[bool] = None
+    active: Optional[bool] = None
+
+
+class TaskCompletion(BaseModel):
+    completion_id: str
+    task_id: str
+    space_id: str
+    date: str  # YYYY-MM-DD
+    completed_at: datetime
+    completed_by: str
+    photo_base64: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class AttendanceLog(BaseModel):
+    attendance_id: str
+    space_id: str
+    staff_id: str
+    date: str
+    status: str  # present | off | sick | leave | late
+    notes: Optional[str] = None
+    recorded_by: str
+    created_at: datetime
+
+
+class SetAttendanceRequest(BaseModel):
+    space_id: str
+    staff_id: str
+    date: str
+    status: str
+    notes: Optional[str] = None
+
+
+class ShoppingRequest(BaseModel):
+    request_id: str
+    space_id: str
+    item_name: str
+    quantity: Optional[str] = None
+    note: Optional[str] = None
+    category_id: Optional[str] = None
+    category_name: Optional[str] = None
+    urgency: str = "normal"  # low | normal | high
+    status: str = "pending"  # pending | approved | purchased | rejected
+    requested_by: str
+    requested_by_name: Optional[str] = None
+    requested_by_staff_id: Optional[str] = None
+    approved_by: Optional[str] = None
+    fulfilled_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class CreateShoppingRequest(BaseModel):
+    space_id: str
+    item_name: str
+    quantity: Optional[str] = None
+    note: Optional[str] = None
+    category_id: Optional[str] = None
+    urgency: str = "normal"
+    requested_by_staff_id: Optional[str] = None
+
+
+class UpdateShoppingRequest(BaseModel):
+    item_name: Optional[str] = None
+    quantity: Optional[str] = None
+    note: Optional[str] = None
+    category_id: Optional[str] = None
+    urgency: Optional[str] = None
+    status: Optional[str] = None
+
+
+def _task_due_on(task: Dict[str, Any], date_str: str) -> bool:
+    """Check if a task template is due on a specific date (YYYY-MM-DD)."""
+    try:
+        d = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except Exception:
+        return False
+    if not task.get("active", True):
+        return False
+    rec = task.get("recurrence", "daily")
+    if rec == "daily":
+        return True
+    if rec == "weekly":
+        wds = task.get("weekdays") or []
+        return d.weekday() in wds
+    if rec == "monthly":
+        day = task.get("monthly_day") or 1
+        # If month doesn't have that day, fall back to last day
+        import calendar
+        last = calendar.monthrange(d.year, d.month)[1]
+        target = min(day, last)
+        return d.day == target
+    if rec == "once":
+        return (task.get("once_date") or "") == date_str
+    return False
+
+
+# ----- Task templates -----
+@api_router.get("/household/tasks")
+async def list_tasks(space_id: str, date: Optional[str] = None, user: User = Depends(get_current_user)):
+    await assert_space_member(space_id, user.user_id)
+    tasks = await db.task_templates.find({"space_id": space_id}, {"_id": 0}).sort("created_at", 1).to_list(1000)
+    target_date = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # Fetch completions for the target date
+    comps = await db.task_completions.find({"space_id": space_id, "date": target_date}, {"_id": 0}).to_list(2000)
+    comp_by_task = {c["task_id"]: c for c in comps}
+    # Fetch staff names for display
+    staff = await db.staff_members.find({"space_id": space_id}, {"_id": 0, "staff_id": 1, "name": 1, "role_id": 1, "photo_base64": 1}).to_list(500)
+    staff_map = {s["staff_id"]: s for s in staff}
+    roles = await db.household_roles.find({"space_id": space_id}, {"_id": 0}).to_list(200)
+    role_map = {r["role_id"]: r for r in roles}
+
+    out: List[Dict[str, Any]] = []
+    for t in tasks:
+        due_today = _task_due_on(t, target_date)
+        staff_info = staff_map.get(t.get("staff_id")) if t.get("staff_id") else None
+        role_info = role_map.get(t.get("role_id")) if t.get("role_id") else None
+        comp = comp_by_task.get(t["task_id"])
+        out.append({
+            **t,
+            "staff_name": staff_info["name"] if staff_info else None,
+            "staff_photo": staff_info.get("photo_base64") if staff_info else None,
+            "role_name": role_info["name"] if role_info else None,
+            "role_color": role_info.get("color") if role_info else None,
+            "due_today": due_today,
+            "completed_today": comp is not None,
+            "completion": comp,
+        })
+    return {"date": target_date, "tasks": out}
+
+
+@api_router.post("/household/tasks", response_model=TaskTemplate)
+async def create_task(body: CreateTaskRequest, user: User = Depends(get_current_user)):
+    await assert_space_member(body.space_id, user.user_id)
+    rec = body.recurrence if body.recurrence in ("daily", "weekly", "monthly", "once") else "daily"
+    doc = {
+        "task_id": gen_id("task"),
+        "space_id": body.space_id,
+        "title": body.title.strip(),
+        "description": body.description,
+        "staff_id": body.staff_id,
+        "role_id": body.role_id,
+        "recurrence": rec,
+        "weekdays": body.weekdays or [],
+        "monthly_day": body.monthly_day,
+        "once_date": body.once_date,
+        "due_time": body.due_time,
+        "requires_photo": bool(body.requires_photo),
+        "active": True,
+        "created_at": now_utc(),
+    }
+    await db.task_templates.insert_one(doc)
+    doc.pop("_id", None)
+    return TaskTemplate(**doc)
+
+
+@api_router.patch("/household/tasks/{task_id}", response_model=TaskTemplate)
+async def update_task(task_id: str, body: UpdateTaskRequest, user: User = Depends(get_current_user)):
+    t = await db.task_templates.find_one({"task_id": task_id}, {"_id": 0})
+    if not t:
+        raise HTTPException(404, "Task not found")
+    await assert_space_member(t["space_id"], user.user_id)
+    updates: Dict[str, Any] = {}
+    for k in ("title", "description", "staff_id", "role_id", "recurrence", "weekdays", "monthly_day", "once_date", "due_time", "requires_photo", "active"):
+        v = getattr(body, k)
+        if v is not None:
+            updates[k] = v
+    if updates:
+        await db.task_templates.update_one({"task_id": task_id}, {"$set": updates})
+    out = await db.task_templates.find_one({"task_id": task_id}, {"_id": 0})
+    return TaskTemplate(**out)
+
+
+@api_router.delete("/household/tasks/{task_id}")
+async def delete_task(task_id: str, user: User = Depends(get_current_user)):
+    t = await db.task_templates.find_one({"task_id": task_id}, {"_id": 0})
+    if not t:
+        raise HTTPException(404, "Task not found")
+    await assert_space_member(t["space_id"], user.user_id)
+    await db.task_templates.delete_one({"task_id": task_id})
+    # Don't delete historical completions — keep for records
+    return {"ok": True}
+
+
+class CompleteTaskRequest(BaseModel):
+    date: Optional[str] = None
+    photo_base64: Optional[str] = None
+    notes: Optional[str] = None
+
+
+@api_router.post("/household/tasks/{task_id}/complete")
+async def complete_task(task_id: str, body: CompleteTaskRequest, user: User = Depends(get_current_user)):
+    t = await db.task_templates.find_one({"task_id": task_id}, {"_id": 0})
+    if not t:
+        raise HTTPException(404, "Task not found")
+    await assert_space_member(t["space_id"], user.user_id)
+    date_str = body.date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # Toggle: if already completed today → delete; otherwise insert
+    existing = await db.task_completions.find_one({"task_id": task_id, "date": date_str}, {"_id": 0})
+    if existing:
+        await db.task_completions.delete_one({"task_id": task_id, "date": date_str})
+        return {"completed": False}
+    doc = {
+        "completion_id": gen_id("comp"),
+        "task_id": task_id,
+        "space_id": t["space_id"],
+        "date": date_str,
+        "completed_at": now_utc(),
+        "completed_by": user.user_id,
+        "photo_base64": body.photo_base64,
+        "notes": body.notes,
+    }
+    await db.task_completions.insert_one(doc)
+    return {"completed": True, "completion_id": doc["completion_id"]}
+
+
+# ----- Attendance -----
+@api_router.get("/household/attendance")
+async def list_attendance(space_id: str, date_from: Optional[str] = None, date_to: Optional[str] = None, staff_id: Optional[str] = None, user: User = Depends(get_current_user)):
+    await assert_space_member(space_id, user.user_id)
+    q: Dict[str, Any] = {"space_id": space_id}
+    if staff_id:
+        q["staff_id"] = staff_id
+    if date_from and date_to:
+        q["date"] = {"$gte": date_from, "$lte": date_to}
+    elif date_from:
+        q["date"] = {"$gte": date_from}
+    elif date_to:
+        q["date"] = {"$lte": date_to}
+    docs = await db.attendance_logs.find(q, {"_id": 0}).sort([("date", -1), ("created_at", -1)]).to_list(2000)
+    return docs
+
+
+@api_router.post("/household/attendance", response_model=AttendanceLog)
+async def set_attendance(body: SetAttendanceRequest, user: User = Depends(get_current_user)):
+    await assert_space_member(body.space_id, user.user_id)
+    if body.status not in ("present", "off", "sick", "leave", "late"):
+        raise HTTPException(400, "Invalid status")
+    # Upsert per (staff_id, date)
+    existing = await db.attendance_logs.find_one({"space_id": body.space_id, "staff_id": body.staff_id, "date": body.date}, {"_id": 0})
+    if existing:
+        await db.attendance_logs.update_one(
+            {"attendance_id": existing["attendance_id"]},
+            {"$set": {"status": body.status, "notes": body.notes, "recorded_by": user.user_id, "created_at": now_utc()}},
+        )
+        out = await db.attendance_logs.find_one({"attendance_id": existing["attendance_id"]}, {"_id": 0})
+        return AttendanceLog(**out)
+    doc = {
+        "attendance_id": gen_id("att"),
+        "space_id": body.space_id,
+        "staff_id": body.staff_id,
+        "date": body.date,
+        "status": body.status,
+        "notes": body.notes,
+        "recorded_by": user.user_id,
+        "created_at": now_utc(),
+    }
+    await db.attendance_logs.insert_one(doc)
+    doc.pop("_id", None)
+    return AttendanceLog(**doc)
+
+
+# ----- Shopping requests -----
+@api_router.get("/household/shopping")
+async def list_shopping(space_id: str, status: Optional[str] = None, user: User = Depends(get_current_user)):
+    await assert_space_member(space_id, user.user_id)
+    q: Dict[str, Any] = {"space_id": space_id}
+    if status:
+        q["status"] = status
+    docs = await db.shopping_requests.find(q, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    # Enrich with names
+    users = await db.users.find({"user_id": {"$in": list({d["requested_by"] for d in docs})}}, {"_id": 0, "password_hash": 0}).to_list(200)
+    user_map = {u["user_id"]: u["name"] for u in users}
+    staff = await db.staff_members.find({"space_id": space_id}, {"_id": 0}).to_list(500)
+    staff_map = {s["staff_id"]: s for s in staff}
+    cats = await db.categories.find({"space_id": space_id}, {"_id": 0}).to_list(500)
+    cat_map = {c["category_id"]: c["name"] for c in cats}
+    for d in docs:
+        if d.get("requested_by_staff_id") and staff_map.get(d["requested_by_staff_id"]):
+            d["requested_by_name"] = staff_map[d["requested_by_staff_id"]]["name"]
+        else:
+            d["requested_by_name"] = user_map.get(d["requested_by"], "Someone")
+        d["category_name"] = cat_map.get(d.get("category_id")) if d.get("category_id") else None
+    return docs
+
+
+@api_router.post("/household/shopping", response_model=ShoppingRequest)
+async def create_shopping(body: CreateShoppingRequest, user: User = Depends(get_current_user)):
+    await assert_space_member(body.space_id, user.user_id)
+    doc = {
+        "request_id": gen_id("shop"),
+        "space_id": body.space_id,
+        "item_name": body.item_name.strip(),
+        "quantity": body.quantity,
+        "note": body.note,
+        "category_id": body.category_id,
+        "urgency": body.urgency if body.urgency in ("low", "normal", "high") else "normal",
+        "status": "pending",
+        "requested_by": user.user_id,
+        "requested_by_staff_id": body.requested_by_staff_id,
+        "approved_by": None,
+        "fulfilled_at": None,
+        "created_at": now_utc(),
+    }
+    await db.shopping_requests.insert_one(doc)
+    doc.pop("_id", None)
+    return ShoppingRequest(**doc)
+
+
+@api_router.patch("/household/shopping/{request_id}", response_model=ShoppingRequest)
+async def update_shopping(request_id: str, body: UpdateShoppingRequest, user: User = Depends(get_current_user)):
+    r = await db.shopping_requests.find_one({"request_id": request_id}, {"_id": 0})
+    if not r:
+        raise HTTPException(404, "Request not found")
+    await assert_space_member(r["space_id"], user.user_id)
+    updates: Dict[str, Any] = {}
+    for k in ("item_name", "quantity", "note", "category_id", "urgency", "status"):
+        v = getattr(body, k)
+        if v is not None:
+            updates[k] = v
+    if updates.get("status") in ("approved", "purchased", "rejected"):
+        updates["approved_by"] = user.user_id
+    if updates.get("status") == "purchased":
+        updates["fulfilled_at"] = now_utc()
+    if updates:
+        await db.shopping_requests.update_one({"request_id": request_id}, {"$set": updates})
+    out = await db.shopping_requests.find_one({"request_id": request_id}, {"_id": 0})
+    return ShoppingRequest(**out)
+
+
+@api_router.delete("/household/shopping/{request_id}")
+async def delete_shopping(request_id: str, user: User = Depends(get_current_user)):
+    r = await db.shopping_requests.find_one({"request_id": request_id}, {"_id": 0})
+    if not r:
+        raise HTTPException(404, "Request not found")
+    await assert_space_member(r["space_id"], user.user_id)
+    await db.shopping_requests.delete_one({"request_id": request_id})
+    return {"ok": True}
+
+
+# =========================
 # Activity / Recent
 # =========================
 @api_router.get("/activity", response_model=List[ActivityItem])

@@ -79,6 +79,60 @@ export type HandbookEntry = {
   updated_at: string;
 };
 
+export type TaskTemplate = {
+  task_id: string;
+  space_id: string;
+  title: string;
+  description?: string | null;
+  staff_id?: string | null;
+  role_id?: string | null;
+  recurrence: 'daily' | 'weekly' | 'monthly' | 'once';
+  weekdays: number[];
+  monthly_day?: number | null;
+  once_date?: string | null;
+  due_time?: string | null;
+  requires_photo: boolean;
+  active: boolean;
+  created_at: string;
+  // enriched in list response
+  staff_name?: string | null;
+  staff_photo?: string | null;
+  role_name?: string | null;
+  role_color?: string | null;
+  due_today?: boolean;
+  completed_today?: boolean;
+  completion?: { completion_id: string; completed_at: string; photo_base64?: string | null; notes?: string | null } | null;
+};
+
+export type AttendanceLog = {
+  attendance_id: string;
+  space_id: string;
+  staff_id: string;
+  date: string;
+  status: 'present' | 'off' | 'sick' | 'leave' | 'late';
+  notes?: string | null;
+  recorded_by: string;
+  created_at: string;
+};
+
+export type ShoppingReq = {
+  request_id: string;
+  space_id: string;
+  item_name: string;
+  quantity?: string | null;
+  note?: string | null;
+  category_id?: string | null;
+  category_name?: string | null;
+  urgency: 'low' | 'normal' | 'high';
+  status: 'pending' | 'approved' | 'purchased' | 'rejected';
+  requested_by: string;
+  requested_by_name?: string | null;
+  requested_by_staff_id?: string | null;
+  approved_by?: string | null;
+  fulfilled_at?: string | null;
+  created_at: string;
+};
+
 export type CategoryField = {
   key: string;
   label: string;

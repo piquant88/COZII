@@ -457,10 +457,79 @@ frontend:
           Full-screen editor + viewer. Guided template button populates a skeleton. Saving
           resets signatures; each member can sign / re-sign. Linked from Profile.
 
+  - task: "Household Phase 2 — Tasks (/api/household/tasks)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          All 18/18 task scenarios pass against preview URL (2026-XX-XX).
+          - POST recurrence=daily → returns TaskTemplate, active=true, requires_photo=false ✅
+          - POST recurrence=weekly weekdays=[0,2,4] → weekdays list returned ✅
+          - POST recurrence=monthly monthly_day=15 → ok ✅
+          - POST recurrence=once once_date="2026-06-15" → ok ✅
+          - GET ?space_id=&date=TODAY → {date, tasks[]} shape, due_today logic correct
+            for daily/weekly/monthly/once (verified against today.weekday()=5,
+            today.day, exact-date match) ✅
+          - PATCH task title + description updates ✅
+          - POST /complete first call → {completed:true}; GET shows completed_today=true ✅
+          - POST /complete second call → {completed:false} (toggle); GET shows
+            completed_today=false ✅
+          - DELETE task → 200 and disappears from GET ✅
+          - Non-member GET 403 + POST 403 ✅
+
+  - task: "Household Phase 2 — Attendance (/api/household/attendance)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          All 7/7 attendance scenarios pass.
+          - POST {space_id, staff_id, date:"2026-06-01", status:"present"} → AttendanceLog ✅
+          - POST same (staff_id+date) status:"sick" → upsert keeps attendance_id,
+            status flips to "sick" ✅
+          - POST status:"partying" → 400 ✅
+          - GET ?date_from=2026-06-01&date_to=2026-06-01 returns the record ✅
+          - GET ?staff_id=... returns only that staff's records (verified by adding a
+            second staff with their own attendance row, then filtering) ✅
+          - Non-member GET + POST → 403 ✅
+
+  - task: "Household Phase 2 — Shopping requests (/api/household/shopping)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          All 11/11 shopping scenarios pass.
+          - POST {Rice, 5kg, urgency:"high", category_id} → status=pending, urgency=high ✅
+          - POST urgency:"xyz" → normalised to "normal" ✅
+          - GET list sorted by created_at desc ✅
+          - GET entries enriched with requested_by_name + category_name ✅
+          - GET ?status=pending filters correctly ✅
+          - PATCH status:"approved" → approved_by = current user, status updated ✅
+          - PATCH status:"purchased" → fulfilled_at set ✅
+          - DELETE → 200 and disappears from GET ✅
+          - Non-member GET + POST → 403 ✅
+
 metadata:
   created_by: "main_agent"
-  version: "3.1"
-  test_sequence: 4
+  version: "3.2"
+  test_sequence: 5
   run_ui: false
 
 test_plan:
@@ -647,3 +716,29 @@ agent_communication:
       
       Conclusion: new currency + finance report features are production-ready. Existing
       endpoints unaffected. No backend bugs surfaced in this run.
+  - agent: "testing"
+    message: |
+      Household Phase 2 backend testing complete — 36/36 PASS via /app/backend_test.py
+      against the preview URL.
+
+      ✅ Tasks (/api/household/tasks): create with daily / weekly+weekdays /
+         monthly+monthly_day / once+once_date all return correct TaskTemplate.
+         GET ?date=TODAY returns {date, tasks[]} with due_today computed correctly
+         per recurrence (daily=true; weekly only when today.weekday() ∈ weekdays;
+         monthly only when today.day == monthly_day; once only when once_date == TODAY).
+         PATCH updates title/description. POST /complete toggles
+         completed↔not-completed and GET reflects completed_today both ways.
+         DELETE removes from GET. Non-member 403 on GET + POST.
+      ✅ Attendance (/api/household/attendance): present create works, then re-POST
+         with status="sick" upserts (same attendance_id, status flips). Invalid
+         "partying" → 400. Date-range filter and staff_id filter both work
+         (verified by adding a 2nd staff with their own attendance row).
+         Non-member 403 on GET + POST.
+      ✅ Shopping (/api/household/shopping): POST {Rice, 5kg, urgency:"high",
+         category_id} → status=pending, urgency=high. urgency:"xyz" → normalised
+         to "normal". GET sorted desc by created_at and enriched with
+         requested_by_name + category_name. ?status=pending filter works.
+         PATCH status=approved sets approved_by; PATCH status=purchased sets
+         fulfilled_at. DELETE works. Non-member 403.
+
+      No bugs surfaced. All Phase 2 endpoints are production-ready.

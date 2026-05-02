@@ -11,11 +11,14 @@ import { api } from '../../src/api';
 import { colors, radius, spacing, shadows, tints } from '../../src/theme';
 import { Icon } from '../../src/Icon';
 import { formatMoney, getCurrency } from '../../src/currency';
-import type { HouseholdRole, FamilyMember, StaffMember, HandbookEntry } from '../../src/types';
+import type { HouseholdRole, FamilyMember, StaffMember, HandbookEntry, TaskTemplate, AttendanceLog, ShoppingReq } from '../../src/types';
 
 const SECTIONS = [
   { key: 'people', label: 'People', icon: 'Users', tint: 'peach' },
   { key: 'staff', label: 'Staff', icon: 'User', tint: 'blue' },
+  { key: 'tasks', label: 'Tasks', icon: 'Check', tint: 'mint' },
+  { key: 'attendance', label: 'Attendance', icon: 'Calendar', tint: 'yellow' },
+  { key: 'shopping', label: 'Shopping', icon: 'ShoppingBag', tint: 'pink' },
   { key: 'roles', label: 'Roles', icon: 'Tag', tint: 'lavender' },
   { key: 'handbook', label: 'Handbook', icon: 'BookOpen', tint: 'sage' },
 ] as const;
@@ -41,23 +44,34 @@ export default function HouseholdHub() {
   const [people, setPeople] = useState<FamilyMember[]>([]);
   const [staff, setStaff] = useState<StaffMember[]>([]);
   const [handbook, setHandbook] = useState<HandbookEntry[]>([]);
+  const [tasks, setTasks] = useState<TaskTemplate[]>([]);
+  const [taskDate, setTaskDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [attendance, setAttendance] = useState<AttendanceLog[]>([]);
+  const [attendanceDate, setAttendanceDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [shopping, setShopping] = useState<ShoppingReq[]>([]);
+  const [categoriesList, setCategoriesList] = useState<any[]>([]);
 
   // modal state — generic dispatch
-  const [edit, setEdit] = useState<{ kind: 'people' | 'staff' | 'role' | 'handbook'; data?: any } | null>(null);
+  const [edit, setEdit] = useState<{ kind: 'people' | 'staff' | 'role' | 'handbook' | 'task' | 'shopping'; data?: any } | null>(null);
 
   const load = useCallback(async () => {
     if (!activeSpace) return;
     try {
-      const [r, p, s, h] = await Promise.all([
+      const [r, p, s, h, tRes, att, shop, cats] = await Promise.all([
         api.get<HouseholdRole[]>(`/household/roles?space_id=${activeSpace.space_id}`),
         api.get<FamilyMember[]>(`/household/family?space_id=${activeSpace.space_id}`),
         api.get<StaffMember[]>(`/household/staff?space_id=${activeSpace.space_id}`),
         api.get<HandbookEntry[]>(`/household/handbook?space_id=${activeSpace.space_id}`),
+        api.get<{ date: string; tasks: TaskTemplate[] }>(`/household/tasks?space_id=${activeSpace.space_id}&date=${taskDate}`),
+        api.get<AttendanceLog[]>(`/household/attendance?space_id=${activeSpace.space_id}&date_from=${attendanceDate}&date_to=${attendanceDate}`),
+        api.get<ShoppingReq[]>(`/household/shopping?space_id=${activeSpace.space_id}`),
+        api.get<any[]>(`/categories?space_id=${activeSpace.space_id}`),
       ]);
       setRoles(r); setPeople(p); setStaff(s); setHandbook(h);
+      setTasks(tRes.tasks || []); setAttendance(att); setShopping(shop); setCategoriesList(cats);
     } catch (e) { console.warn(e); }
     finally { setLoading(false); }
-  }, [activeSpace]);
+  }, [activeSpace, taskDate, attendanceDate]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
   const onRefresh = async () => { setRefreshing(true); await load(); setRefreshing(false); };
@@ -85,6 +99,8 @@ export default function HouseholdHub() {
             else if (section === 'staff') setEdit({ kind: 'staff' });
             else if (section === 'roles') setEdit({ kind: 'role' });
             else if (section === 'handbook') setEdit({ kind: 'handbook' });
+            else if (section === 'tasks') setEdit({ kind: 'task' });
+            else if (section === 'shopping') setEdit({ kind: 'shopping' });
           }}
           testID="household-add"
         >
@@ -130,6 +146,34 @@ export default function HouseholdHub() {
           <PeopleSection people={people} roles={roles.filter((r) => r.category === 'family')} onEdit={(p) => setEdit({ kind: 'people', data: p })} />
         ) : section === 'staff' ? (
           <StaffSection staff={staff} roles={roles.filter((r) => r.category === 'staff')} currency={activeSpace.currency || 'USD'} onEdit={(s) => setEdit({ kind: 'staff', data: s })} />
+        ) : section === 'tasks' ? (
+          <TasksSection
+            tasks={tasks} date={taskDate} setDate={setTaskDate}
+            onEdit={(t) => setEdit({ kind: 'task', data: t })}
+            onToggle={async (t) => {
+              try { await api.post(`/household/tasks/${t.task_id}/complete`, { date: taskDate }); await load(); }
+              catch (e: any) { Alert.alert('Error', e?.message || ''); }
+            }}
+          />
+        ) : section === 'attendance' ? (
+          <AttendanceSection
+            staff={staff} attendance={attendance} date={attendanceDate} setDate={setAttendanceDate}
+            onSet={async (staffId, status) => {
+              try {
+                await api.post('/household/attendance', { space_id: activeSpace.space_id, staff_id: staffId, date: attendanceDate, status });
+                await load();
+              } catch (e: any) { Alert.alert('Error', e?.message || ''); }
+            }}
+          />
+        ) : section === 'shopping' ? (
+          <ShoppingSection
+            requests={shopping}
+            onEdit={(r) => setEdit({ kind: 'shopping', data: r })}
+            onStatus={async (r, status) => {
+              try { await api.patch(`/household/shopping/${r.request_id}`, { status }); await load(); }
+              catch (e: any) { Alert.alert('Error', e?.message || ''); }
+            }}
+          />
         ) : section === 'roles' ? (
           <RolesSection roles={roles} onEdit={(r) => setEdit({ kind: 'role', data: r })} onDelete={async (r) => {
             try { await api.delete(`/household/roles/${r.role_id}`); await load(); }
@@ -152,6 +196,12 @@ export default function HouseholdHub() {
       )}
       {edit?.kind === 'handbook' && (
         <HandbookForm initial={edit.data} spaceId={activeSpace.space_id} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); load(); }} />
+      )}
+      {edit?.kind === 'task' && (
+        <TaskForm initial={edit.data} spaceId={activeSpace.space_id} staff={staff} roles={roles} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); load(); }} />
+      )}
+      {edit?.kind === 'shopping' && (
+        <ShoppingForm initial={edit.data} spaceId={activeSpace.space_id} categories={categoriesList} staff={staff} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); load(); }} />
       )}
     </SafeAreaView>
   );
@@ -684,6 +734,408 @@ function HandbookForm({ initial, spaceId, onClose, onSaved }: any) {
   );
 }
 
+// ---------- Phase 2 section renderers ----------
+const WEEKDAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const ATT_STATUSES: { key: AttendanceLog['status']; label: string; tint: keyof typeof tints }[] = [
+  { key: 'present', label: 'Present', tint: 'sage' },
+  { key: 'off', label: 'Off', tint: 'lavender' },
+  { key: 'sick', label: 'Sick', tint: 'pink' },
+  { key: 'leave', label: 'Leave', tint: 'peach' },
+  { key: 'late', label: 'Late', tint: 'yellow' },
+];
+
+function DateNav({ date, onChange }: { date: string; onChange: (d: string) => void }) {
+  const d = new Date(date + 'T00:00:00');
+  const shift = (days: number) => {
+    const n = new Date(d); n.setDate(d.getDate() + days);
+    onChange(n.toISOString().slice(0, 10));
+  };
+  const today = new Date().toISOString().slice(0, 10);
+  return (
+    <View style={styles.dateNav}>
+      <TouchableOpacity onPress={() => shift(-1)} style={styles.navBtn}><Icon name="ChevronRight" size={16} color={colors.textMain} /></TouchableOpacity>
+      <View style={{ flex: 1, alignItems: 'center' }}>
+        <Text style={styles.dateTxt}>{d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}</Text>
+        {date !== today && <TouchableOpacity onPress={() => onChange(today)}><Text style={styles.todayLink}>Jump to today</Text></TouchableOpacity>}
+      </View>
+      <TouchableOpacity onPress={() => shift(1)} style={styles.navBtn}><Icon name="ChevronRight" size={16} color={colors.textMain} /></TouchableOpacity>
+    </View>
+  );
+}
+
+function TasksSection({ tasks, date, setDate, onEdit, onToggle }: any) {
+  const visible = tasks.filter((t: TaskTemplate) => t.due_today);
+  const done = visible.filter((t: TaskTemplate) => t.completed_today).length;
+  return (
+    <View style={{ gap: 8 }}>
+      <DateNav date={date} onChange={setDate} />
+      {visible.length === 0 ? (
+        <View style={styles.empty}>
+          <View style={[styles.heroIcon, { backgroundColor: tints.mint.bg }]}>
+            <Icon name="Check" size={28} color={tints.mint.icon} />
+          </View>
+          <Text style={styles.emptyTitle}>No tasks today</Text>
+          <Text style={styles.emptySub}>Create recurring task templates for staff (e.g. "Dust living room — daily") and tick them off as the day goes.</Text>
+          <TouchableOpacity style={styles.ctaBtn} onPress={() => onEdit()} testID="tasks-cta">
+            <Icon name="Plus" color="#fff" size={16} />
+            <Text style={styles.ctaTxt}>Add a task</Text>
+          </TouchableOpacity>
+        </View>
+      ) : (
+        <>
+          <Text style={styles.sectionTitle}>{done} of {visible.length} done</Text>
+          {visible.map((t: TaskTemplate) => (
+            <View key={t.task_id} style={[styles.row, t.completed_today && { opacity: 0.55 }]}>
+              <TouchableOpacity style={[styles.checkBox, t.completed_today && styles.checkBoxDone]} onPress={() => onToggle(t)} testID={`task-toggle-${t.task_id}`}>
+                {t.completed_today && <Icon name="Check" size={14} color="#fff" />}
+              </TouchableOpacity>
+              <TouchableOpacity style={{ flex: 1 }} onPress={() => onEdit(t)}>
+                <Text style={[styles.rowName, t.completed_today && { textDecorationLine: 'line-through' }]} numberOfLines={2}>{t.title}</Text>
+                <Text style={styles.rowSub}>
+                  {t.staff_name ? t.staff_name : t.role_name ? `Any ${t.role_name}` : 'Anyone'}
+                  {t.due_time ? ` · ${t.due_time}` : ''}
+                  {t.recurrence !== 'daily' ? ` · ${t.recurrence}` : ''}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => onEdit(t)} style={{ padding: 6 }}><Icon name="Edit3" size={14} color={colors.textMuted} /></TouchableOpacity>
+            </View>
+          ))}
+          <Text style={[styles.sectionTitle, { marginTop: spacing.md }]}>All tasks</Text>
+          {tasks.filter((t: TaskTemplate) => !t.due_today).map((t: TaskTemplate) => (
+            <TouchableOpacity key={t.task_id} style={[styles.row, { opacity: 0.7 }]} onPress={() => onEdit(t)}>
+              <View style={[styles.checkBox, { backgroundColor: colors.surfaceAlt }]}><Icon name="Clock" size={12} color={colors.textMuted} /></View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.rowName}>{t.title}</Text>
+                <Text style={styles.rowSub}>
+                  {t.recurrence === 'weekly' ? `Weekly · ${(t.weekdays || []).map((w) => WEEKDAY_NAMES[w]).join(', ')}` :
+                   t.recurrence === 'monthly' ? `Monthly · day ${t.monthly_day}` :
+                   t.recurrence === 'once' ? `One time · ${t.once_date}` : 'Daily'}
+                  {t.staff_name ? ` · ${t.staff_name}` : ''}
+                </Text>
+              </View>
+              <Icon name="ChevronRight" size={14} color={colors.textMuted} />
+            </TouchableOpacity>
+          ))}
+        </>
+      )}
+    </View>
+  );
+}
+
+function AttendanceSection({ staff, attendance, date, setDate, onSet }: any) {
+  const statusByStaff: Record<string, AttendanceLog | undefined> = {};
+  (attendance || []).forEach((a: AttendanceLog) => { statusByStaff[a.staff_id] = a; });
+  if (staff.length === 0) {
+    return (
+      <View style={styles.empty}>
+        <View style={[styles.heroIcon, { backgroundColor: tints.yellow.bg }]}><Icon name="Calendar" size={28} color={tints.yellow.icon} /></View>
+        <Text style={styles.emptyTitle}>Add staff first</Text>
+        <Text style={styles.emptySub}>Attendance needs at least one staff member. Head to the Staff tab to add your first helper.</Text>
+      </View>
+    );
+  }
+  return (
+    <View style={{ gap: 8 }}>
+      <DateNav date={date} onChange={setDate} />
+      {staff.map((s: StaffMember) => {
+        const cur = statusByStaff[s.staff_id];
+        return (
+          <View key={s.staff_id} style={styles.row}>
+            <View style={[styles.avatar, { backgroundColor: tints.blue.icon }]}>
+              {s.photo_base64 ? <Image source={{ uri: s.photo_base64 }} style={styles.avatarImg} /> : <Text style={styles.avatarTxt}>{s.name?.[0]?.toUpperCase()}</Text>}
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.rowName}>{s.name}</Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 6 }}>
+                {ATT_STATUSES.map((st) => {
+                  const active = cur?.status === st.key;
+                  const t = tints[st.tint];
+                  return (
+                    <TouchableOpacity
+                      key={st.key}
+                      style={[styles.attChip, active && { backgroundColor: t.bg, borderColor: t.icon }]}
+                      onPress={() => onSet(s.staff_id, st.key)}
+                      testID={`att-${s.staff_id}-${st.key}`}
+                    >
+                      <Text style={[styles.attTxt, active && { color: t.icon, fontWeight: '800' }]}>{st.label}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </View>
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
+function ShoppingSection({ requests, onEdit, onStatus }: any) {
+  const pending = requests.filter((r: ShoppingReq) => r.status === 'pending');
+  const approved = requests.filter((r: ShoppingReq) => r.status === 'approved');
+  const done = requests.filter((r: ShoppingReq) => r.status === 'purchased');
+
+  if (requests.length === 0) {
+    return (
+      <View style={styles.empty}>
+        <View style={[styles.heroIcon, { backgroundColor: tints.pink.bg }]}><Icon name="ShoppingBag" size={28} color={tints.pink.icon} /></View>
+        <Text style={styles.emptyTitle}>Shopping list</Text>
+        <Text style={styles.emptySub}>Your staff will drop things here as they run out — rice, tissue, oil. Approve and buy, or reject. In Phase 4 staff will request directly from their own login.</Text>
+        <TouchableOpacity style={styles.ctaBtn} onPress={() => onEdit()} testID="shopping-cta">
+          <Icon name="Plus" color="#fff" size={16} />
+          <Text style={styles.ctaTxt}>Add request</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+  const card = (r: ShoppingReq, showActions: boolean) => {
+    const urgT = r.urgency === 'high' ? tints.pink : r.urgency === 'low' ? tints.sage : tints.yellow;
+    return (
+      <View key={r.request_id} style={styles.row}>
+        <View style={[styles.avatar, { backgroundColor: urgT.icon }]}>
+          <Icon name="ShoppingBag" size={18} color="#fff" />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.rowName}>{r.item_name}{r.quantity ? ` · ${r.quantity}` : ''}</Text>
+          <Text style={styles.rowSub}>
+            {r.requested_by_name || 'Someone'}
+            {r.category_name ? ` · ${r.category_name}` : ''}
+            {` · ${r.urgency}`}
+          </Text>
+          {r.note ? <Text style={[styles.rowSub, { marginTop: 4 }]}>"{r.note}"</Text> : null}
+          {showActions && (
+            <View style={{ flexDirection: 'row', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
+              {r.status === 'pending' && (
+                <>
+                  <TouchableOpacity style={[styles.miniBtn, { backgroundColor: tints.sage.icon }]} onPress={() => onStatus(r, 'approved')}>
+                    <Text style={styles.miniBtnTxt}>Approve</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={[styles.miniBtn, { backgroundColor: tints.pink.icon }]} onPress={() => onStatus(r, 'rejected')}>
+                    <Text style={styles.miniBtnTxt}>Reject</Text>
+                  </TouchableOpacity>
+                </>
+              )}
+              {r.status === 'approved' && (
+                <TouchableOpacity style={[styles.miniBtn, { backgroundColor: colors.primary }]} onPress={() => onStatus(r, 'purchased')}>
+                  <Text style={styles.miniBtnTxt}>Mark purchased</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          )}
+        </View>
+        <TouchableOpacity onPress={() => onEdit(r)} style={{ padding: 6 }}>
+          <Icon name="Edit3" size={14} color={colors.textMuted} />
+        </TouchableOpacity>
+      </View>
+    );
+  };
+
+  return (
+    <View style={{ gap: 8 }}>
+      {pending.length > 0 && (<><Text style={styles.sectionTitle}>Pending approval</Text>{pending.map((r: ShoppingReq) => card(r, true))}</>)}
+      {approved.length > 0 && (<><Text style={[styles.sectionTitle, { marginTop: spacing.md }]}>Approved — go buy</Text>{approved.map((r: ShoppingReq) => card(r, true))}</>)}
+      {done.length > 0 && (<><Text style={[styles.sectionTitle, { marginTop: spacing.md }]}>Purchased</Text>{done.slice(0, 10).map((r: ShoppingReq) => card(r, false))}</>)}
+    </View>
+  );
+}
+
+function TaskForm({ initial, spaceId, staff, roles, onClose, onSaved }: any) {
+  const [title, setTitle] = useState(initial?.title || '');
+  const [desc, setDesc] = useState(initial?.description || '');
+  const [rec, setRec] = useState<TaskTemplate['recurrence']>(initial?.recurrence || 'daily');
+  const [weekdays, setWeekdays] = useState<number[]>(initial?.weekdays || []);
+  const [monthlyDay, setMonthlyDay] = useState<number>(initial?.monthly_day || 1);
+  const [onceDate, setOnceDate] = useState<string>(initial?.once_date || new Date().toISOString().slice(0, 10));
+  const [dueTime, setDueTime] = useState(initial?.due_time || '');
+  const [staffId, setStaffId] = useState<string | null>(initial?.staff_id || null);
+  const [roleId, setRoleId] = useState<string | null>(initial?.role_id || null);
+  const [requiresPhoto, setRequiresPhoto] = useState<boolean>(!!initial?.requires_photo);
+  const [saving, setSaving] = useState(false);
+
+  const save = async () => {
+    if (!title.trim()) return;
+    setSaving(true);
+    try {
+      const payload: any = { title: title.trim(), description: desc || null, recurrence: rec, weekdays, monthly_day: monthlyDay, once_date: onceDate, due_time: dueTime || null, staff_id: staffId, role_id: roleId, requires_photo: requiresPhoto };
+      if (initial?.task_id) await api.patch(`/household/tasks/${initial.task_id}`, payload);
+      else await api.post('/household/tasks', { space_id: spaceId, ...payload });
+      onSaved();
+    } catch (e: any) { Alert.alert('Error', e?.message || ''); }
+    finally { setSaving(false); }
+  };
+  const remove = async () => {
+    if (!initial?.task_id) return;
+    Alert.alert('Delete task?', 'Past completions stay as records.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Delete', style: 'destructive', onPress: async () => {
+        try { await api.delete(`/household/tasks/${initial.task_id}`); onSaved(); } catch (e: any) { Alert.alert('Error', e?.message || ''); }
+      }},
+    ]);
+  };
+
+  return (
+    <FormSheet title={initial?.task_id ? 'Edit task' : 'New task'} onClose={onClose} onSave={save} saving={saving}>
+      <Text style={styles.label}>What should be done?</Text>
+      <TextInput style={styles.input} value={title} onChangeText={setTitle} placeholder="e.g. Mop kitchen floor" placeholderTextColor={colors.textMuted} testID="task-form-title" />
+      <Text style={styles.label}>Notes (optional)</Text>
+      <TextInput style={[styles.input, { minHeight: 50 }]} value={desc} onChangeText={setDesc} multiline placeholder="Any instructions" placeholderTextColor={colors.textMuted} />
+
+      <Text style={styles.label}>Recurrence</Text>
+      <View style={styles.chipWrap}>
+        {(['daily', 'weekly', 'monthly', 'once'] as const).map((r) => (
+          <TouchableOpacity key={r} style={[styles.chip, rec === r && styles.chipActive]} onPress={() => setRec(r)}>
+            <Text style={[styles.chipTxt, rec === r && styles.chipTxtActive]}>{r[0].toUpperCase() + r.slice(1)}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
+      {rec === 'weekly' && (
+        <>
+          <Text style={styles.label}>Days of week</Text>
+          <View style={styles.chipWrap}>
+            {WEEKDAY_NAMES.map((w, i) => (
+              <TouchableOpacity key={w} style={[styles.chip, weekdays.includes(i) && styles.chipActive]}
+                onPress={() => setWeekdays((cur) => cur.includes(i) ? cur.filter((x) => x !== i) : [...cur, i])}
+              >
+                <Text style={[styles.chipTxt, weekdays.includes(i) && styles.chipTxtActive]}>{w}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </>
+      )}
+      {rec === 'monthly' && (
+        <>
+          <Text style={styles.label}>Day of month (1–31)</Text>
+          <TextInput style={styles.input} value={String(monthlyDay)} onChangeText={(t) => setMonthlyDay(Math.max(1, Math.min(31, parseInt(t || '1', 10) || 1)))} keyboardType="number-pad" />
+        </>
+      )}
+      {rec === 'once' && (
+        <>
+          <Text style={styles.label}>Date (YYYY-MM-DD)</Text>
+          <TextInput style={styles.input} value={onceDate} onChangeText={setOnceDate} placeholder="YYYY-MM-DD" placeholderTextColor={colors.textMuted} />
+        </>
+      )}
+
+      <Text style={styles.label}>Due time (optional)</Text>
+      <TextInput style={styles.input} value={dueTime} onChangeText={setDueTime} placeholder="e.g. 07:30" placeholderTextColor={colors.textMuted} />
+
+      <Text style={styles.label}>Assigned to (pick one)</Text>
+      <View style={styles.chipWrap}>
+        <TouchableOpacity style={[styles.chip, !staffId && !roleId && styles.chipActive]} onPress={() => { setStaffId(null); setRoleId(null); }}>
+          <Text style={[styles.chipTxt, !staffId && !roleId && styles.chipTxtActive]}>Anyone</Text>
+        </TouchableOpacity>
+        {staff.map((s: StaffMember) => (
+          <TouchableOpacity key={s.staff_id} style={[styles.chip, staffId === s.staff_id && styles.chipActive]} onPress={() => { setStaffId(s.staff_id); setRoleId(null); }}>
+            <Text style={[styles.chipTxt, staffId === s.staff_id && styles.chipTxtActive]}>{s.name}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+      <Text style={styles.label}>Or any staff with role</Text>
+      <View style={styles.chipWrap}>
+        {roles.filter((r: HouseholdRole) => r.category === 'staff').map((r: HouseholdRole) => (
+          <TouchableOpacity key={r.role_id} style={[styles.chip, roleId === r.role_id && styles.chipActive]} onPress={() => { setRoleId(r.role_id); setStaffId(null); }}>
+            <Text style={[styles.chipTxt, roleId === r.role_id && styles.chipTxtActive]}>{r.name}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
+      <TouchableOpacity style={styles.photoCheckRow} onPress={() => setRequiresPhoto((v) => !v)}>
+        <View style={[styles.checkBox, requiresPhoto && styles.checkBoxDone]}>
+          {requiresPhoto && <Icon name="Check" size={12} color="#fff" />}
+        </View>
+        <Text style={{ fontSize: 13, color: colors.textMain, fontWeight: '600' }}>Require photo proof when marked done</Text>
+      </TouchableOpacity>
+
+      {initial?.task_id && (
+        <TouchableOpacity onPress={remove} style={styles.deleteRow}>
+          <Icon name="Trash2" size={14} color={colors.dangerText} /><Text style={styles.deleteTxt}>Delete task</Text>
+        </TouchableOpacity>
+      )}
+    </FormSheet>
+  );
+}
+
+function ShoppingForm({ initial, spaceId, categories, staff, onClose, onSaved }: any) {
+  const [name, setName] = useState(initial?.item_name || '');
+  const [qty, setQty] = useState(initial?.quantity || '');
+  const [urgency, setUrgency] = useState<ShoppingReq['urgency']>(initial?.urgency || 'normal');
+  const [categoryId, setCategoryId] = useState<string | null>(initial?.category_id || null);
+  const [staffId, setStaffId] = useState<string | null>(initial?.requested_by_staff_id || null);
+  const [note, setNote] = useState(initial?.note || '');
+  const [saving, setSaving] = useState(false);
+
+  const save = async () => {
+    if (!name.trim()) return;
+    setSaving(true);
+    try {
+      const payload: any = { item_name: name.trim(), quantity: qty || null, urgency, category_id: categoryId, note: note || null, requested_by_staff_id: staffId };
+      if (initial?.request_id) await api.patch(`/household/shopping/${initial.request_id}`, payload);
+      else await api.post('/household/shopping', { space_id: spaceId, ...payload });
+      onSaved();
+    } catch (e: any) { Alert.alert('Error', e?.message || ''); }
+    finally { setSaving(false); }
+  };
+  const remove = async () => {
+    if (!initial?.request_id) return;
+    try { await api.delete(`/household/shopping/${initial.request_id}`); onSaved(); }
+    catch (e: any) { Alert.alert('Error', e?.message || ''); }
+  };
+
+  return (
+    <FormSheet title={initial?.request_id ? 'Edit shopping request' : 'New shopping request'} onClose={onClose} onSave={save} saving={saving}>
+      <Text style={styles.label}>Item</Text>
+      <TextInput style={styles.input} value={name} onChangeText={setName} placeholder="e.g. Rice" placeholderTextColor={colors.textMuted} testID="shop-form-name" />
+      <Text style={styles.label}>Quantity (optional)</Text>
+      <TextInput style={styles.input} value={qty} onChangeText={setQty} placeholder="e.g. 5 kg, 2 bottles" placeholderTextColor={colors.textMuted} />
+      <Text style={styles.label}>Urgency</Text>
+      <View style={styles.chipWrap}>
+        {(['low', 'normal', 'high'] as const).map((u) => (
+          <TouchableOpacity key={u} style={[styles.chip, urgency === u && styles.chipActive]} onPress={() => setUrgency(u)}>
+            <Text style={[styles.chipTxt, urgency === u && styles.chipTxtActive]}>{u[0].toUpperCase() + u.slice(1)}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+      {staff.length > 0 && (
+        <>
+          <Text style={styles.label}>Requested by (optional)</Text>
+          <View style={styles.chipWrap}>
+            <TouchableOpacity style={[styles.chip, !staffId && styles.chipActive]} onPress={() => setStaffId(null)}>
+              <Text style={[styles.chipTxt, !staffId && styles.chipTxtActive]}>Me</Text>
+            </TouchableOpacity>
+            {staff.map((s: StaffMember) => (
+              <TouchableOpacity key={s.staff_id} style={[styles.chip, staffId === s.staff_id && styles.chipActive]} onPress={() => setStaffId(s.staff_id)}>
+                <Text style={[styles.chipTxt, staffId === s.staff_id && styles.chipTxtActive]}>{s.name}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </>
+      )}
+      {categories.length > 0 && (
+        <>
+          <Text style={styles.label}>Log into category (optional)</Text>
+          <View style={styles.chipWrap}>
+            <TouchableOpacity style={[styles.chip, !categoryId && styles.chipActive]} onPress={() => setCategoryId(null)}>
+              <Text style={[styles.chipTxt, !categoryId && styles.chipTxtActive]}>None</Text>
+            </TouchableOpacity>
+            {categories.map((c: any) => (
+              <TouchableOpacity key={c.category_id} style={[styles.chip, categoryId === c.category_id && styles.chipActive]} onPress={() => setCategoryId(c.category_id)}>
+                <Text style={[styles.chipTxt, categoryId === c.category_id && styles.chipTxtActive]}>{c.name}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </>
+      )}
+      <Text style={styles.label}>Note (optional)</Text>
+      <TextInput style={[styles.input, { minHeight: 50 }]} value={note} onChangeText={setNote} multiline placeholder="Any details" placeholderTextColor={colors.textMuted} />
+      {initial?.request_id && (
+        <TouchableOpacity onPress={remove} style={styles.deleteRow}>
+          <Icon name="Trash2" size={14} color={colors.dangerText} /><Text style={styles.deleteTxt}>Delete request</Text>
+        </TouchableOpacity>
+      )}
+    </FormSheet>
+  );
+}
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.md, paddingTop: spacing.sm, paddingBottom: 4 },
@@ -744,4 +1196,15 @@ const styles = StyleSheet.create({
   saveTxt: { color: '#fff', fontWeight: '800' },
   deleteRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, padding: 12, marginTop: 12 },
   deleteTxt: { fontSize: 12, color: colors.dangerText, fontWeight: '700' },
+  checkBox: { width: 28, height: 28, borderRadius: 8, borderWidth: 2, borderColor: colors.border, alignItems: 'center', justifyContent: 'center' },
+  checkBoxDone: { backgroundColor: colors.primary, borderColor: colors.primary },
+  dateNav: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: colors.surface, padding: 8, borderRadius: radius.md, marginBottom: 4, ...shadows.card },
+  navBtn: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceAlt },
+  dateTxt: { fontSize: 14, fontWeight: '800', color: colors.textMain },
+  todayLink: { fontSize: 11, color: colors.primary, marginTop: 2, fontWeight: '700' },
+  attChip: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: radius.full, backgroundColor: colors.surfaceAlt, borderWidth: 1, borderColor: 'transparent' },
+  attTxt: { fontSize: 11, fontWeight: '700', color: colors.textMuted },
+  miniBtn: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: radius.full },
+  miniBtnTxt: { color: '#fff', fontWeight: '800', fontSize: 11 },
+  photoCheckRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 14, padding: 8 },
 });
