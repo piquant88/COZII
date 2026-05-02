@@ -11,11 +11,14 @@ import { colors, radius, spacing, shadows, tints } from '../src/theme';
 import { Icon } from '../src/Icon';
 import { formatMoney } from '../src/currency';
 
-const SECTIONS: Array<{ key: 'today' | 'attendance' | 'shopping' | 'wages'; label: string; icon: string; tint: keyof typeof tints }> = [
+const SECTIONS: Array<{ key: 'today' | 'attendance' | 'shopping' | 'wages' | 'handbook' | 'inventory' | 'finance'; label: string; icon: string; tint: keyof typeof tints }> = [
   { key: 'today', label: 'Today', icon: 'Check', tint: 'mint' },
   { key: 'attendance', label: 'Attendance', icon: 'Calendar', tint: 'yellow' },
   { key: 'shopping', label: 'Shopping', icon: 'ShoppingBag', tint: 'pink' },
+  { key: 'handbook', label: 'Handbook', icon: 'BookOpen', tint: 'sage' },
   { key: 'wages', label: 'Wages', icon: 'Wallet', tint: 'peach' },
+  { key: 'inventory', label: 'Inventory', icon: 'Package', tint: 'lavender' },
+  { key: 'finance', label: 'Finance', icon: 'PieChart', tint: 'blue' },
 ];
 
 const ATT_LABELS: Record<string, string> = { present: 'Present', off: 'Off', sick: 'Sick', leave: 'Leave', late: 'Late' };
@@ -39,6 +42,12 @@ export default function StaffHome() {
   const [notifs, setNotifs] = useState<any[]>([]);
   const [showNotifs, setShowNotifs] = useState(false);
   const [myShop, setMyShop] = useState<any[]>([]);
+  const [handbook, setHandbook] = useState<any[]>([]);
+  const [openHb, setOpenHb] = useState<string | null>(null);
+  const [invCats, setInvCats] = useState<any[]>([]);
+  const [invItems, setInvItems] = useState<any[]>([]);
+  const [openCat, setOpenCat] = useState<string | null>(null);
+  const [finReport, setFinReport] = useState<any>(null);
 
   const load = useCallback(async () => {
     if (!activeSpace) return;
@@ -65,6 +74,26 @@ export default function StaffHome() {
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
   const onRefresh = async () => { setRefreshing(true); await load(); setRefreshing(false); };
+
+  // Lazy fetch when staff opens handbook/inventory/finance tabs (only if permission granted)
+  const perms = data?.permissions || {};
+  const sid = activeSpace?.space_id;
+  React.useEffect(() => {
+    if (!sid) return;
+    if (tab === 'handbook' && perms.view_handbook && handbook.length === 0) {
+      api.get<any[]>(`/household/handbook?space_id=${sid}`).then(setHandbook).catch(() => {});
+    }
+    if (tab === 'inventory' && perms.view_inventory && invCats.length === 0) {
+      Promise.all([
+        api.get<any[]>(`/categories?space_id=${sid}`),
+        api.get<any[]>(`/items?space_id=${sid}`),
+      ]).then(([c, it]) => { setInvCats(c); setInvItems(it); }).catch(() => {});
+    }
+    if (tab === 'finance' && perms.view_finance && !finReport) {
+      const today = new Date();
+      api.get<any>(`/reports/household?space_id=${sid}&year=${today.getFullYear()}&month=${today.getMonth() + 1}`).then(setFinReport).catch(() => {});
+    }
+  }, [tab, sid, perms.view_handbook, perms.view_inventory, perms.view_finance]);
 
   const toggleTask = async (taskId: string) => {
     if (isPreview) { Alert.alert('Preview mode', 'Actions are disabled. This is how the staff sees it.'); return; }
@@ -149,7 +178,6 @@ export default function StaffHome() {
   }
 
   const staff = data.staff;
-  const perms = data.permissions || {};
   const cur = staff.salary_currency || activeSpace.currency || 'USD';
   const today = new Date().toISOString().slice(0, 10);
   const todayAtt = (data.attendance || []).find((a: any) => a.date === today);
@@ -238,6 +266,9 @@ export default function StaffHome() {
               if (s.key === 'shopping' && !perms.request_shopping) return false;
               if (s.key === 'wages' && !perms.view_wage_amount) return false;
               if (s.key === 'attendance' && !perms.log_attendance) return false;
+              if (s.key === 'handbook' && !perms.view_handbook) return false;
+              if (s.key === 'finance' && !perms.view_finance) return false;
+              if (s.key === 'inventory' && !perms.view_inventory) return false;
               return true;
             }).map((s) => {
               const active = tab === s.key;
@@ -439,6 +470,148 @@ export default function StaffHome() {
           </View>
         )}
 
+        {tab === 'handbook' && perms.view_handbook && (
+          <View style={{ gap: 8 }}>
+            <View style={[styles.hero, { backgroundColor: tints.sage.bg }]}>
+              <View>
+                <Text style={styles.heroLabel}>How things work here</Text>
+                <Text style={styles.heroAmt}>Handbook</Text>
+                <Text style={styles.heroSub}>Wifi, emergency contacts, machines & more.</Text>
+              </View>
+              <Icon name="BookOpen" size={40} color={tints.sage.icon} />
+            </View>
+            {handbook.length === 0 ? (
+              <Text style={styles.emptyTxt}>The owner hasn't added any handbook entries yet.</Text>
+            ) : (
+              handbook.map((h: any) => {
+                const open = openHb === h.entry_id;
+                const t = tints[(h.tint as keyof typeof tints) || 'sage'] || tints.sage;
+                return (
+                  <View key={h.entry_id} style={[styles.row, { flexDirection: 'column', alignItems: 'stretch', padding: 0 }]}>
+                    <TouchableOpacity onPress={() => setOpenHb(open ? null : h.entry_id)} activeOpacity={0.8} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, padding: spacing.md }} testID={`hb-${h.entry_id}`}>
+                      <View style={[styles.avatar, { backgroundColor: t.icon }]}>
+                        <Icon name={h.icon || 'BookOpen'} size={18} color="#fff" />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.rowName}>{h.title}</Text>
+                        {h.body ? <Text style={styles.rowSub} numberOfLines={open ? undefined : 1}>{h.body}</Text> : null}
+                      </View>
+                      <Icon name="ChevronRight" size={16} color={colors.textMuted} />
+                    </TouchableOpacity>
+                    {open && h.photo_base64 && (
+                      <Image source={{ uri: h.photo_base64 }} style={{ width: '100%', height: 220, borderBottomLeftRadius: radius.md, borderBottomRightRadius: radius.md }} resizeMode="cover" />
+                    )}
+                  </View>
+                );
+              })
+            )}
+          </View>
+        )}
+
+        {tab === 'inventory' && perms.view_inventory && (
+          <View style={{ gap: 8 }}>
+            <View style={[styles.hero, { backgroundColor: tints.lavender.bg }]}>
+              <View>
+                <Text style={styles.heroLabel}>What's in the house</Text>
+                <Text style={styles.heroAmt}>{invItems.length} items</Text>
+                <Text style={styles.heroSub}>Read-only · {invCats.length} categories</Text>
+              </View>
+              <Icon name="Package" size={40} color={tints.lavender.icon} />
+            </View>
+            {invCats.length === 0 ? (
+              <Text style={styles.emptyTxt}>No categories yet.</Text>
+            ) : (
+              invCats.map((c: any) => {
+                const t = tints[(c.tint as keyof typeof tints) || 'mint'] || tints.mint;
+                const items = invItems.filter((it: any) => it.category_id === c.category_id);
+                const open = openCat === c.category_id;
+                return (
+                  <View key={c.category_id} style={[styles.row, { flexDirection: 'column', alignItems: 'stretch', padding: 0 }]}>
+                    <TouchableOpacity onPress={() => setOpenCat(open ? null : c.category_id)} activeOpacity={0.8} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, padding: spacing.md }} testID={`inv-cat-${c.category_id}`}>
+                      <View style={[styles.avatar, { backgroundColor: t.icon }]}>
+                        <Icon name={c.icon || 'Package'} size={18} color="#fff" />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.rowName}>{c.name}</Text>
+                        <Text style={styles.rowSub}>{items.length} items</Text>
+                      </View>
+                      <Icon name={open ? 'X' : 'ChevronRight'} size={16} color={colors.textMuted} />
+                    </TouchableOpacity>
+                    {open && (
+                      <View style={{ paddingHorizontal: spacing.md, paddingBottom: spacing.md, gap: 6 }}>
+                        {items.length === 0 ? (
+                          <Text style={styles.emptyTxt}>No items in this category.</Text>
+                        ) : (
+                          items.map((it: any) => (
+                            <View key={it.item_id} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                              {it.photo_base64 ? (
+                                <Image source={{ uri: it.photo_base64 }} style={{ width: 36, height: 36, borderRadius: radius.sm }} />
+                              ) : (
+                                <View style={[styles.avatar, { backgroundColor: t.icon, width: 36, height: 36 }]}>
+                                  <Icon name="Box" size={14} color="#fff" />
+                                </View>
+                              )}
+                              <View style={{ flex: 1 }}>
+                                <Text style={[styles.rowName, { fontSize: 13 }]}>{it.name}</Text>
+                                <Text style={styles.rowSub}>{[it.quantity && `Qty: ${it.quantity}`, it.location && it.location].filter(Boolean).join(' · ')}</Text>
+                              </View>
+                              {it.price ? <Text style={styles.rowAmt}>{formatMoney(it.price, activeSpace.currency || 'USD')}</Text> : null}
+                            </View>
+                          ))
+                        )}
+                      </View>
+                    )}
+                  </View>
+                );
+              })
+            )}
+          </View>
+        )}
+
+        {tab === 'finance' && perms.view_finance && (
+          <View style={{ gap: 8 }}>
+            <View style={[styles.hero, { backgroundColor: tints.blue.bg }]}>
+              <View>
+                <Text style={styles.heroLabel}>This month</Text>
+                <Text style={styles.heroAmt}>{finReport ? formatMoney(finReport.total_spent || 0, finReport.currency || cur) : '—'}</Text>
+                <Text style={styles.heroSub}>{finReport?.month || ''}</Text>
+              </View>
+              <Icon name="PieChart" size={40} color={tints.blue.icon} />
+            </View>
+            {!finReport ? (
+              <ActivityIndicator color={colors.primary} />
+            ) : (finReport.top_categories || []).length === 0 ? (
+              <Text style={styles.emptyTxt}>No spending recorded this month.</Text>
+            ) : (
+              <>
+                <Text style={styles.sectionTitle}>Top categories</Text>
+                {finReport.top_categories.map((c: any) => {
+                  const t = tints[(c.tint as keyof typeof tints) || 'mint'] || tints.mint;
+                  const pct = finReport.total_spent ? Math.max(4, Math.round((c.total / finReport.total_spent) * 100)) : 0;
+                  return (
+                    <View key={c.category_id || c.name} style={styles.row}>
+                      <View style={[styles.avatar, { backgroundColor: t.bg, width: 36, height: 36 }]}>
+                        <Icon name={c.icon || 'Package'} size={14} color={t.icon} />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between' }}>
+                          <Text style={styles.rowName}>{c.name}</Text>
+                          <Text style={styles.rowAmt}>{formatMoney(c.total, finReport.currency || cur)}</Text>
+                        </View>
+                        <View style={{ height: 5, borderRadius: 3, backgroundColor: '#EEE7E2', marginTop: 4, overflow: 'hidden' }}>
+                          <View style={{ height: '100%', width: `${pct}%`, backgroundColor: t.icon }} />
+                        </View>
+                        <Text style={styles.rowSub}>{c.count} {c.count === 1 ? 'item' : 'items'} · {pct}%</Text>
+                      </View>
+                    </View>
+                  );
+                })}
+              </>
+            )}
+            <Text style={styles.helperSm}>Read-only view. Owner can edit numbers from their full app.</Text>
+          </View>
+        )}
+
         {isPreview ? (
           <TouchableOpacity style={styles.logoutBtn} onPress={() => router.back()} testID="preview-exit-bottom">
             <Icon name="ChevronRight" size={16} color={colors.textMain} />
@@ -486,6 +659,7 @@ const styles = StyleSheet.create({
   doneThumb: { width: 120, height: 80, borderRadius: radius.sm, marginTop: 6 },
   ownerNote: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: tints.blue.bg, padding: 8, borderRadius: radius.sm, marginTop: 4 },
   ownerNoteTxt: { flex: 1, fontSize: 12, color: tints.blue.icon, fontWeight: '600' },
+  helperSm: { fontSize: 11, color: colors.textMuted, fontStyle: 'italic', textAlign: 'center', marginTop: spacing.sm },
   tabRow: { gap: 8, paddingVertical: 8 },
   tabChip: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 14, paddingVertical: 8, borderRadius: radius.full, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
   tabTxt: { fontSize: 12, fontWeight: '700', color: colors.textMuted },
