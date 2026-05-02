@@ -5,7 +5,7 @@ import { useAuth } from '../src/AuthContext';
 import { colors } from '../src/theme';
 
 export default function Index() {
-  const { user, loading, activeSpace } = useAuth();
+  const { user, loading, activeSpace, spaceRole } = useAuth();
   const router = useRouter();
 
   useEffect(() => {
@@ -14,10 +14,13 @@ export default function Index() {
       router.replace('/welcome');
     } else if (!activeSpace) {
       router.replace('/space-setup');
-    } else {
+    } else if (spaceRole?.role === 'staff') {
+      router.replace('/staff-home');
+    } else if (spaceRole) {
       router.replace('/(tabs)/home');
     }
-  }, [user, loading, activeSpace]);
+    // if spaceRole is still null, wait for it to load (short)
+  }, [user, loading, activeSpace, spaceRole]);
 
   return (
     <View style={styles.container} testID="splash-screen">

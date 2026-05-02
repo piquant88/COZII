@@ -29,12 +29,18 @@ export default function StaffHome() {
   const [tab, setTab] = useState<typeof SECTIONS[number]['key']>('today');
   const [newReq, setNewReq] = useState('');
   const [newQty, setNewQty] = useState('');
+  const [notifs, setNotifs] = useState<any[]>([]);
+  const [showNotifs, setShowNotifs] = useState(false);
 
   const load = useCallback(async () => {
     if (!activeSpace) return;
     try {
-      const d = await api.get<any>(`/household/staff/me?space_id=${activeSpace.space_id}`);
+      const [d, n] = await Promise.all([
+        api.get<any>(`/household/staff/me?space_id=${activeSpace.space_id}`),
+        api.get<any[]>(`/notifications?space_id=${activeSpace.space_id}`).catch(() => []),
+      ]);
       setData(d);
+      setNotifs(n || []);
     } catch (e: any) {
       if (e?.status === 404) {
         Alert.alert('Not linked', 'You are not registered as staff in this space.');
@@ -105,10 +111,53 @@ export default function StaffHome() {
             <Text style={styles.hi}>Hi, {staff.name?.split(' ')[0] || 'there'}!</Text>
             <Text style={styles.greetSub}>{staff.role_name || 'Staff'} · {activeSpace.name}</Text>
           </View>
-          <TouchableOpacity onPress={() => router.push('/(tabs)/profile')} style={styles.iconBtn}>
-            <Icon name="User" size={18} color={colors.textMain} />
+          <TouchableOpacity onPress={() => setShowNotifs((v) => !v)} style={styles.iconBtn} testID="staff-notifs-btn">
+            <Icon name="Heart" size={18} color={colors.textMain} />
+            {notifs.filter((n) => !n.read).length > 0 && (
+              <View style={styles.notifDot}><Text style={styles.notifDotTxt}>{notifs.filter((n) => !n.read).length}</Text></View>
+            )}
           </TouchableOpacity>
         </View>
+
+        {/* Notifications */}
+        {showNotifs && (
+          <View style={styles.notifPanel}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+              <Text style={styles.sectionTitle}>Notifications</Text>
+              {notifs.some((n) => !n.read) && (
+                <TouchableOpacity onPress={async () => {
+                  try {
+                    await api.post(`/notifications/read_all?space_id=${activeSpace.space_id}`, {});
+                    await load();
+                  } catch {}
+                }}>
+                  <Text style={styles.readAllTxt}>Mark all read</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+            {notifs.length === 0 ? (
+              <Text style={styles.emptyTxt}>Nothing new.</Text>
+            ) : (
+              notifs.slice(0, 8).map((n) => (
+                <TouchableOpacity key={n.notification_id} style={[styles.notifRow, !n.read && { backgroundColor: tints.mint.bg }]} onPress={async () => {
+                  if (!n.read) {
+                    try { await api.post(`/notifications/${n.notification_id}/read`, {}); await load(); } catch {}
+                  }
+                }}>
+                  <View style={[styles.notifIcon, { backgroundColor: tints.peach.icon }]}>
+                    <Icon name={n.kind === 'wage_paid' ? 'Wallet' : 'Heart'} size={14} color="#fff" />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.notifTitle}>{n.title}</Text>
+                    {n.body ? <Text style={styles.notifBody} numberOfLines={2}>{n.body}</Text> : null}
+                    <Text style={styles.notifTime}>{new Date(n.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</Text>
+                  </View>
+                  {!n.read && <View style={styles.unreadDot} />}
+                </TouchableOpacity>
+              ))
+            )}
+          </View>
+        )}
 
         {/* Section tabs */}
         <View style={{ height: 56 }}>
@@ -265,6 +314,16 @@ const styles = StyleSheet.create({
   hi: { fontSize: 22, fontWeight: '900', color: colors.textMain },
   greetSub: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
   iconBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: colors.surface, alignItems: 'center', justifyContent: 'center', ...shadows.card },
+  notifDot: { position: 'absolute', top: -2, right: -2, minWidth: 18, height: 18, paddingHorizontal: 4, borderRadius: 9, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' },
+  notifDotTxt: { fontSize: 10, fontWeight: '900', color: '#fff' },
+  notifPanel: { backgroundColor: colors.surface, borderRadius: radius.md, padding: spacing.md, marginBottom: spacing.sm, ...shadows.card },
+  readAllTxt: { fontSize: 12, fontWeight: '700', color: colors.primary },
+  notifRow: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 10, borderRadius: radius.sm, marginBottom: 4 },
+  notifIcon: { width: 30, height: 30, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  notifTitle: { fontSize: 13, fontWeight: '800', color: colors.textMain },
+  notifBody: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  notifTime: { fontSize: 10, color: colors.textMuted, marginTop: 4 },
+  unreadDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.primary },
   tabRow: { gap: 8, paddingVertical: 8 },
   tabChip: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 14, paddingVertical: 8, borderRadius: radius.full, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
   tabTxt: { fontSize: 12, fontWeight: '700', color: colors.textMuted },

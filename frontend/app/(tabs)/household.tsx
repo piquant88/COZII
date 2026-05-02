@@ -92,6 +92,15 @@ export default function HouseholdHub() {
           <Text style={styles.kicker}>{activeSpace.name}</Text>
           <Text style={styles.title}>Household</Text>
         </View>
+        {isHousehold && (
+          <TouchableOpacity
+            style={styles.iconBtn}
+            onPress={() => router.push('/household-report')}
+            testID="household-report"
+          >
+            <Icon name="PieChart" color={colors.textMain} />
+          </TouchableOpacity>
+        )}
         <TouchableOpacity
           style={styles.iconBtn}
           onPress={() => {
@@ -655,6 +664,10 @@ function StaffForm({ initial, roles, spaceId, currency, onClose, onSaved }: any)
         </View>
       )}
 
+      {initial?.staff_id && (
+        <StaffPermissionsEditor staff={initial} onChanged={onSaved} />
+      )}
+
       {initial?.staff_id && initial?.salary ? (
         <View style={styles.payBox}>
           <Text style={styles.label}>Mark salary paid</Text>
@@ -673,6 +686,86 @@ function StaffForm({ initial, roles, spaceId, currency, onClose, onSaved }: any)
     </FormSheet>
   );
 }
+
+function StaffPermissionsEditor({ staff, onChanged }: { staff: StaffMember; onChanged: () => void }) {
+  const initialPerms: Record<string, boolean> = (staff as any).permissions || {};
+  const [perms, setPerms] = useState<Record<string, boolean>>({
+    view_tasks: true, log_attendance: true, request_shopping: true, view_handbook: true,
+    view_wage_amount: true, view_other_staff: false, view_family: false,
+    view_finance: false, view_inventory: false,
+    ...initialPerms,
+  });
+  const [saving, setSaving] = useState(false);
+
+  const toggle = (k: string) => {
+    setPerms((p) => ({ ...p, [k]: !p[k] }));
+  };
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await api.patch(`/household/staff/${staff.staff_id}/permissions`, { permissions: perms });
+      onChanged();
+    } catch (e: any) { Alert.alert('Error', e?.message || 'Could not update'); }
+    finally { setSaving(false); }
+  };
+
+  const groups: Array<{ title: string; items: Array<{ key: string; label: string; hint?: string }> }> = [
+    {
+      title: 'Staff home (on their own app)',
+      items: [
+        { key: 'view_tasks', label: 'See assigned tasks' },
+        { key: 'log_attendance', label: 'Log own attendance', hint: 'Mark themselves present / sick / off' },
+        { key: 'request_shopping', label: 'Send shopping requests' },
+        { key: 'view_handbook', label: 'Open handbook' },
+        { key: 'view_wage_amount', label: 'See own wage amount', hint: 'Turn off to hide salary and history' },
+      ],
+    },
+    {
+      title: 'Extra access (into the main family app)',
+      items: [
+        { key: 'view_inventory', label: 'View inventory tab', hint: 'They can see household inventory (read-only for now)' },
+        { key: 'view_finance', label: 'View finance tab', hint: 'They can see monthly spending' },
+        { key: 'view_family', label: 'See family directory' },
+        { key: 'view_other_staff', label: 'See other staff list' },
+      ],
+    },
+  ];
+
+  return (
+    <View style={styles.payBox}>
+      <Text style={styles.label}>Permissions</Text>
+      <Text style={styles.helper}>Choose what {staff.name?.split(' ')[0] || 'this person'} can see and do. Off means the tab or section stays hidden.</Text>
+      {groups.map((g) => (
+        <View key={g.title} style={{ marginTop: spacing.sm }}>
+          <Text style={styles.sectionTitle}>{g.title}</Text>
+          {g.items.map((it) => (
+            <TouchableOpacity
+              key={it.key}
+              style={styles.permRow}
+              onPress={() => toggle(it.key)}
+              testID={`perm-${it.key}`}
+              activeOpacity={0.7}
+            >
+              <View style={{ flex: 1 }}>
+                <Text style={styles.rowName}>{it.label}</Text>
+                {it.hint ? <Text style={styles.rowSub}>{it.hint}</Text> : null}
+              </View>
+              <View style={[styles.switch, perms[it.key] && { backgroundColor: colors.primary }]}>
+                <View style={[styles.switchDot, perms[it.key] && { left: 22, backgroundColor: '#fff' }]} />
+              </View>
+            </TouchableOpacity>
+          ))}
+        </View>
+      ))}
+      <TouchableOpacity style={[styles.payNowBtn, saving && { opacity: 0.6 }]} onPress={save} disabled={saving}>
+        <Icon name="Check" size={14} color="#fff" />
+        <Text style={styles.payNowTxt}>{saving ? 'Saving...' : 'Save permissions'}</Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
 
 function RoleForm({ initial, spaceId, onClose, onSaved }: any) {
   const [name, setName] = useState(initial?.name || '');
@@ -1252,6 +1345,9 @@ const styles = StyleSheet.create({
   copyTxt: { fontSize: 12, fontWeight: '800', color: colors.textMain },
   payBox: { backgroundColor: tints.peach.bg, padding: spacing.md, borderRadius: radius.md, marginTop: spacing.md, gap: 8 },
   payNowBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, backgroundColor: colors.primary, paddingVertical: 12, borderRadius: radius.full, ...shadows.button },
+  permRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10 },
+  switch: { width: 44, height: 24, borderRadius: 12, backgroundColor: '#D6CFC9', padding: 2 },
+  switchDot: { width: 20, height: 20, borderRadius: 10, backgroundColor: '#fff', position: 'absolute', top: 2, left: 2 },
   payNowTxt: { color: '#fff', fontWeight: '800' },
   checkBox: { width: 28, height: 28, borderRadius: 8, borderWidth: 2, borderColor: colors.border, alignItems: 'center', justifyContent: 'center' },
   checkBoxDone: { backgroundColor: colors.primary, borderColor: colors.primary },

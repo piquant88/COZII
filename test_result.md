@@ -742,3 +742,356 @@ agent_communication:
          fulfilled_at. DELETE works. Non-member 403.
 
       No bugs surfaced. All Phase 2 endpoints are production-ready.
+
+
+## 2026-06-XX — Phase 4 additions (staff permissions, notifications, household report)
+
+backend:
+  - task: "Staff permissions incl. view_inventory"
+    implemented: true
+    working: false
+    file: "/app/backend/server.py"
+    stuck_count: 1
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Added `view_inventory` key to DEFAULT_STAFF_PERMS (default False).
+          /api/spaces/{space_id}/my_role returns permissions merged with new key.
+          PATCH /api/household/staff/{staff_id}/permissions accepts the new key.
+      - working: false
+        agent: "testing"
+        comment: |
+          Tested 2026-06-?? via /app/backend_test_phase4.py against the preview URL.
+          Functional flow IS working end-to-end (verified through /spaces/{id}/my_role
+          and via direct MongoDB inspection):
+            ✅ DEFAULT_STAFF_PERMS now includes `view_inventory: False` (mongo doc on
+               new staff has all 9 keys: view_tasks, log_attendance, request_shopping,
+               view_handbook, view_wage_amount, view_other_staff, view_family,
+               view_finance, view_inventory)
+            ✅ Owner PATCH /household/staff/{id}/permissions merges new keys (set
+               view_inventory=True + view_finance=True; other defaults preserved:
+               view_tasks=True, view_handbook=True, view_other_staff=False)
+            ✅ Non-member PATCH → 403 ("Not a member of this space")
+            ✅ Staff (non-owner member) PATCH after joining → 403 ("Only the space
+               owner can change staff permissions")
+            ✅ POST /household/staff/join with invite_code links the user as staff,
+               adds them to space.member_ids, returns {ok, space_id, staff_id}
+            ✅ GET /spaces/{space_id}/my_role as staff user returns
+               {role:"staff", staff_id, permissions:{... view_inventory:true,
+               view_finance:true ...}}
+
+          ❌ CRITICAL — `StaffMember` Pydantic response model
+             (server.py:1672-1689) is missing the `invite_code` and `permissions`
+             fields. Because POST /household/staff, GET /household/staff, and
+             PATCH /household/staff/{id}/permissions all return
+             `StaffMember(**doc)`, these two fields are stripped from every
+             response — even though the data is correctly stored in MongoDB.
+
+             Repro:
+               POST /household/staff (owner) →
+                 response.invite_code == null   (mongo has 'E4F8E9')
+                 response.permissions == null   (mongo has full 9-key dict)
+               GET /household/staff →
+                 each entry's permissions == {}
+               PATCH /household/staff/{id}/permissions →
+                 response keys = [..., 'salary', 'salary_currency', ...]
+                 (no 'permissions' or 'invite_code')
+
+             Impact (frontend-blocking):
+               - The owner UI cannot read the invite_code from the create-staff
+                 response → cannot show / share the invite code with the staff
+                 member, breaking the Phase 4 staff-join flow entirely.
+               - The Staff list cannot render permission toggles (always empty).
+               - The "perms editor" PATCH UI cannot reflect the merged result
+                 returned by the server.
+
+             Fix (3 lines in server.py around line 1689 — add to StaffMember):
+               invite_code: Optional[str] = None
+               permissions: Dict[str, bool] = Field(default_factory=dict)
+
+             (Permissions are also currently being read by the frontend via
+             /spaces/{id}/my_role, which works — but invite_code must come from
+             the staff record itself, so the response model fix is required.)
+
+  - task: "Notifications collection + endpoints (GET /notifications, POST /notifications/{id}/read, POST /notifications/read_all)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          New Notification model + CRUD endpoints. POST /household/payroll now
+          creates a `wage_paid` notification for the linked staff user (if
+          staff.user_id is set). User can list own notifications, optionally
+          filtered by space_id + unread_only, and mark individual or all read.
+      - working: true
+        agent: "testing"
+        comment: |
+          All 14/14 notification scenarios pass via /app/backend_test_phase4.py:
+            ✅ GET /api/notifications?space_id=... initially returns []
+            ✅ POST /api/household/payroll creates a `wage_paid` notification
+               addressed to the linked staff user_id (verified after staff
+               joined via invite_code).
+            ✅ Notification fields:
+                 - kind == "wage_paid"
+                 - title == "Wage received · 2026-05"
+                 - body  == "Sari Putri, your monthly pay of IDR 2500000.00
+                            was logged by the owner."
+                 - data  == {payment_id:"pay_…", period:"2026-05",
+                            net:2500000.0, currency:"IDR"}
+                 - read  == false initially
+            ✅ GET ?unread_only=true returns only the unread record
+            ✅ POST /notifications/{id}/read → 200; subsequent GET shows read=true
+            ✅ Second POST /household/payroll creates a 2nd wage_paid notification
+            ✅ POST /notifications/read_all?space_id=… marks all in scope as read
+               (verified count=2, both reads=true)
+            ✅ Outsider account (not a member of the space) gets [] from
+               /api/notifications (cannot see other users' notifications)
+          No bugs surfaced in this area. Production-ready.
+
+  - task: "Household monthly report (/api/reports/household)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          GET /api/reports/household?space_id=...&year=YYYY&month=MM returns:
+            { month, year, month_num, currency, total_spent, total_wages,
+              top_categories:[...], staff:[...], shopping:{...}, tasks_done }
+      - working: true
+        agent: "testing"
+        comment: |
+          18/18 report scenarios pass:
+            ✅ Default (no year/month) returns current month — month="May 2026",
+               year=2026, month_num=5
+            ✅ All required top-level keys present: month, year, month_num,
+               currency, total_spent, total_wages, top_categories, staff,
+               shopping, tasks_done
+            ✅ currency inherited from space ("IDR")
+            ✅ total_wages (5,000,000) == sum of two payroll.net in window
+            ✅ staff[] item has all required fields: staff_id, name,
+               photo_base64, role_id, days_present, days_off, days_sick,
+               days_leave, tasks_done, paid, salary, pay_cycle.
+               days_present=2 (we logged 2 'present' attendance rows),
+               paid=5,000,000 (sum of that staff's payroll in window).
+            ✅ top_categories[] items: category_id, name, icon, tint, total, count.
+               Sum(top_categories.total) == total_spent (5,175,000).
+               Includes "Staff wages" (auto-created by payroll) AND a Food&Pantry
+               category with the seeded 175,000 IDR item.
+            ✅ shopping summary {total:1, pending:1, approved:0, purchased:0}
+               reflects the request created in window.
+            ✅ Far-past month (year=2020 month=1) returns 200 with total_spent=0,
+               total_wages=0, top_categories=[], shopping all zeros, tasks_done=0,
+               currency still "IDR" from space.
+            ✅ Non-member (outsider account) GET → 403 "Not a member of this space".
+
+  - task: "GET /api/categories after payroll regression"
+    implemented: true
+    working: false
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: false
+        agent: "testing"
+        comment: |
+          ❌ CRITICAL REGRESSION surfaced while running Phase 4 tests — once
+          POST /api/household/payroll runs in any space, GET /api/categories
+          for that space starts returning 500 Internal Server Error.
+
+          Root cause: `_ensure_wages_category` (server.py:2048-2063) inserts a
+          new "Staff wages" category document WITHOUT a `created_by` field.
+          The `Category` response model (server.py:157-166) declares
+          `created_by: str` as required. When `list_categories`
+          (server.py:567) does `[Category(**d) for d in accessible]`, the
+          auto-created Staff wages doc fails validation:
+
+            pydantic_core._pydantic_core.ValidationError: 1 validation error
+            for Category
+            created_by
+              Field required [type=missing, input_value={'category_id': 'cat_…
+              =datetime.timezone.utc)}, input_type=dict]
+
+          Reproduction (curl, fresh household space):
+            POST /api/household/staff (owner)
+            POST /api/household/payroll (owner) → 200
+            GET  /api/categories?space_id=…  → 500 Internal Server Error
+
+          This makes the entire categories listing endpoint unusable for ANY
+          household space the moment payroll is logged, which cascades to
+          every UI screen that calls /categories (Inventory tabs, Add-item
+          modals, Finance pickers, etc.).
+
+          Fix (one line in _ensure_wages_category, ~line 2052):
+            "created_by": "system",   # or pass user.user_id from caller
+
+          Or, alternatively, make `Category.created_by` Optional[str] with a
+          default — but stamping the system identifier is cleaner.
+
+          Note: This bug almost certainly existed before Phase 4 (since the
+          payroll auto-category code is from Phase 3) but only surfaced now
+          because previous tests reused a space whose Staff wages category
+          had been seeded by an earlier API path that did include
+          created_by, OR because tests didn't hit /categories after payroll
+          in a fresh household space. The Phase 4 review request asks for
+          the household report to be tested in a fresh household with
+          payroll already run, which exposes the issue.
+
+frontend:
+  - task: "Permission-based staff routing & tab filtering"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/(tabs)/_layout.tsx, /app/frontend/src/AuthContext.tsx, /app/frontend/app/index.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          AuthContext exposes spaceRole (role+permissions) from /api/spaces/{id}/my_role.
+          Index redirects staff → /staff-home. Tabs layout hides inventory/finance
+          tabs unless staff has view_inventory / view_finance.
+  - task: "Staff join flow from /space-setup"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/space-setup.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Added 'I'm staff' tab, enters invite code, calls joinAsStaff which hits /api/household/staff/join"
+  - task: "Staff permission toggles inside owner's Staff form"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/(tabs)/household.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "StaffPermissionsEditor renders groups of toggles; PATCHes /api/household/staff/{id}/permissions"
+  - task: "Household monthly report screen"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/household-report.tsx, /app/frontend/app/(tabs)/household.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Simple glanceable monthly dashboard for housewives: spending hero, top categories bars, staff cards (attendance+wages+tasks), shopping summary. Linked via PieChart icon in Household hub header."
+  - task: "Staff notifications (wage paid)"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/staff-home.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Heart-icon bell with unread count badge, toggles a panel of notifications with per-item and mark-all-read actions."
+
+metadata:
+  created_by: "main_agent"
+  version: "1.5"
+  test_sequence: 8
+  run_ui: false
+
+test_plan:
+  current_focus:
+    - "Staff permissions incl. view_inventory"
+    - "GET /api/categories after payroll regression"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Phase 4 extensions (backend) ready for testing.
+      Please verify:
+        1) DEFAULT_STAFF_PERMS now includes `view_inventory` (defaults false).
+           PATCH /api/household/staff/{staff_id}/permissions accepts it.
+           GET /api/spaces/{space_id}/my_role returns it.
+        2) Notification endpoints + auto-create on payroll.
+        3) /api/reports/household?space_id=X aggregations.
+      Credentials: /app/memory/test_credentials.md (test@cozii.app / test1234).
+
+  - agent: "testing"
+    message: |
+      Phase 4 backend testing complete via /app/backend_test_phase4.py
+      (46/51 assertions pass). Two distinct backend bugs surfaced — both
+      easy fixes; the underlying business logic in all three Phase 4 areas
+      is functionally correct.
+
+      ❌ BUG #1 (HIGH) — StaffMember response model strips `invite_code`
+         and `permissions` fields.
+         File: /app/backend/server.py
+         Class: StaffMember (server.py:1672-1689)
+         Endpoints affected (3): POST /household/staff,
+            GET /household/staff, PATCH /household/staff/{id}/permissions.
+         Symptom: response.invite_code is null and response.permissions is
+            null, even though MongoDB has them populated correctly. Means
+            owner cannot read the invite_code from create-staff to share
+            with the new staff member, blocking the staff-join UX.
+         Fix:
+            class StaffMember(BaseModel):
+                ...
+                invite_code: Optional[str] = None
+                permissions: Dict[str, bool] = Field(default_factory=dict)
+
+      ❌ BUG #2 (HIGH, regression) — GET /api/categories returns 500 once
+         payroll has run in a space.
+         File: /app/backend/server.py
+         Function: _ensure_wages_category (lines 2048-2063)
+         Cause: doc inserted without `created_by`; Category model (line 165)
+            requires it → ValidationError on /api/categories listing.
+         Fix (one line):
+            doc = {
+              ...
+              "created_by": "system",  # or pass user.user_id
+              "created_at": now_utc(),
+            }
+
+      ✅ Staff permissions FUNCTIONALITY (verified via /spaces/{id}/my_role
+         and direct mongo) — DEFAULT_STAFF_PERMS now has 9 keys including
+         view_inventory:false; PATCH merges correctly; non-owner gets 403;
+         after join, /spaces/{id}/my_role returns role=staff with merged
+         permissions.
+
+      ✅ Notifications — wage_paid auto-created on payroll, title format
+         "Wage received · YYYY-MM", body contains staff name + cycle + net,
+         data has payment_id+period+net+currency, /read flips read=true,
+         /read_all bulk-marks, ?unread_only filters, outsiders cannot see
+         other users' notifications. 14/14 PASS.
+
+      ✅ Household monthly report — all keys present, currency from space,
+         total_wages == sum(payroll.net), staff[] complete with
+         days_present/days_off/days_sick/days_leave/tasks_done/paid/salary/
+         pay_cycle/name/photo_base64/role_id, top_categories sum ≈
+         total_spent, includes Staff wages auto-category, shopping counts
+         match window, far-past month returns zeros with currency=IDR,
+         non-member 403. 18/18 PASS.
+
+      Once main agent applies the two fixes above (StaffMember response
+      model + _ensure_wages_category created_by), the Phase 4 surface is
+      production-ready. No frontend testing performed (per protocol).

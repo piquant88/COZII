@@ -11,11 +11,12 @@ import { Icon } from '../src/Icon';
 
 export default function SpaceSetup() {
   const router = useRouter();
-  const { createSpace, joinSpace, logout, spaces } = useAuth();
-  const [mode, setMode] = useState<'create' | 'join'>('create');
+  const { createSpace, joinSpace, joinAsStaff, logout, spaces } = useAuth();
+  const [mode, setMode] = useState<'create' | 'join' | 'staff'>('create');
   const [step, setStep] = useState<'form' | 'pickType'>('form');
   const [spaceName, setSpaceName] = useState('');
   const [inviteCode, setInviteCode] = useState('');
+  const [staffCode, setStaffCode] = useState('');
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -33,6 +34,11 @@ export default function SpaceSetup() {
 
   const onContinue = () => {
     setErr(null);
+    if (mode === 'staff') {
+      if (!staffCode.trim()) { setErr('Enter the 6-character code your employer gave you'); return; }
+      onJoinStaff();
+      return;
+    }
     if (mode === 'join') {
       if (!inviteCode.trim()) { setErr('Enter an invite code'); return; }
       onJoin();
@@ -48,6 +54,15 @@ export default function SpaceSetup() {
       await joinSpace(inviteCode.trim());
       router.replace('/(tabs)/home');
     } catch (e: any) { setErr(e?.message || 'Something went wrong'); }
+    finally { setLoading(false); }
+  };
+
+  const onJoinStaff = async () => {
+    setErr(null); setLoading(true);
+    try {
+      await joinAsStaff(staffCode.trim().toUpperCase());
+      router.replace('/staff-home');
+    } catch (e: any) { setErr(e?.message || 'Invalid code'); }
     finally { setLoading(false); }
   };
 
@@ -107,6 +122,13 @@ export default function SpaceSetup() {
               >
                 <Text style={[styles.tabTxt, mode === 'join' && styles.tabTxtActive]}>Join</Text>
               </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.tab, mode === 'staff' && styles.tabActive]}
+                onPress={() => setMode('staff')}
+                testID="space-setup-tab-staff"
+              >
+                <Text style={[styles.tabTxt, mode === 'staff' && styles.tabTxtActive]}>I'm staff</Text>
+              </TouchableOpacity>
             </View>
           )}
 
@@ -138,6 +160,22 @@ export default function SpaceSetup() {
                 testID="space-setup-invite"
               />
               <Text style={styles.hint}>Ask your roommate for the 6-character code from their Profile.</Text>
+            </View>
+          )}
+          {step === 'form' && mode === 'staff' && (
+            <View style={styles.field}>
+              <Text style={styles.label}>Your staff invite code</Text>
+              <TextInput
+                style={[styles.input, { letterSpacing: 3, fontWeight: '700', textAlign: 'center' }]}
+                placeholder="XXXXXX"
+                placeholderTextColor="#95A5A6"
+                autoCapitalize="characters"
+                maxLength={6}
+                value={staffCode}
+                onChangeText={(t) => setStaffCode(t.toUpperCase())}
+                testID="space-setup-staff-code"
+              />
+              <Text style={styles.hint}>Your employer will give you a 6-character code. After joining you'll see your own simple home screen with tasks, attendance and wages.</Text>
             </View>
           )}
 
@@ -190,7 +228,7 @@ export default function SpaceSetup() {
               testID="space-setup-submit"
             >
               <Text style={styles.primaryText}>
-                {loading ? 'Please wait...' : mode === 'create' ? 'Continue' : 'Join space'}
+                {loading ? 'Please wait...' : mode === 'create' ? 'Continue' : mode === 'staff' ? 'Join as staff' : 'Join space'}
               </Text>
             </TouchableOpacity>
           )}

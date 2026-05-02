@@ -1924,6 +1924,7 @@ DEFAULT_STAFF_PERMS = {
     "view_other_staff": False,
     "view_family": False,
     "view_finance": False,
+    "view_inventory": False,
 }
 
 
@@ -2134,6 +2135,16 @@ async def create_payroll(body: CreateStaffPaymentRequest, user: User = Depends(g
     }
     await db.staff_payments.insert_one(payment)
     payment.pop("_id", None)
+    # Notify the staff member (if linked)
+    if staff.get("user_id"):
+        await _create_notification(
+            space_id=body.space_id,
+            user_id=staff["user_id"],
+            kind="wage_paid",
+            title=f"Wage received · {period}",
+            body=f"{staff['name']}, your {cycle} pay of {payment['currency']} {payment['net']:.2f} was logged by the owner.",
+            data={"payment_id": payment["payment_id"], "period": period, "net": payment["net"], "currency": payment["currency"]},
+        )
     return StaffPayment(**payment)
 
 
@@ -2641,6 +2652,189 @@ async def delete_shopping(request_id: str, user: User = Depends(get_current_user
     await assert_space_member(r["space_id"], user.user_id)
     await db.shopping_requests.delete_one({"request_id": request_id})
     return {"ok": True}
+
+
+# =========================
+# Notifications (in-app)
+# =========================
+class Notification(BaseModel):
+    notification_id: str
+    space_id: str
+    user_id: str
+    kind: str  # 'wage_paid' | 'task_assigned' | 'info'
+    title: str
+    body: Optional[str] = None
+    data: Dict[str, Any] = Field(default_factory=dict)
+    read: bool = False
+    created_at: datetime
+
+
+async def _create_notification(space_id: str, user_id: Optional[str], kind: str, title: str, body: str = "", data: Optional[Dict[str, Any]] = None):
+    if not user_id:
+        return
+    doc = {
+        "notification_id": gen_id("ntf"),
+        "space_id": space_id,
+        "user_id": user_id,
+        "kind": kind,
+        "title": title,
+        "body": body or "",
+        "data": data or {},
+        "read": False,
+        "created_at": now_utc(),
+    }
+    await db.notifications.insert_one(doc)
+
+
+@api_router.get("/notifications", response_model=List[Notification])
+async def list_notifications(space_id: Optional[str] = None, unread_only: bool = False, user: User = Depends(get_current_user)):
+    q: Dict[str, Any] = {"user_id": user.user_id}
+    if space_id:
+        q["space_id"] = space_id
+    if unread_only:
+        q["read"] = False
+    docs = await db.notifications.find(q, {"_id": 0}).sort("created_at", -1).to_list(100)
+    return [Notification(**d) for d in docs]
+
+
+@api_router.post("/notifications/{notification_id}/read")
+async def mark_notification_read(notification_id: str, user: User = Depends(get_current_user)):
+    n = await db.notifications.find_one({"notification_id": notification_id, "user_id": user.user_id}, {"_id": 0})
+    if not n:
+        raise HTTPException(404, "Notification not found")
+    await db.notifications.update_one({"notification_id": notification_id}, {"$set": {"read": True}})
+    return {"ok": True}
+
+
+@api_router.post("/notifications/read_all")
+async def mark_all_notifications_read(space_id: Optional[str] = None, user: User = Depends(get_current_user)):
+    q: Dict[str, Any] = {"user_id": user.user_id, "read": False}
+    if space_id:
+        q["space_id"] = space_id
+    await db.notifications.update_many(q, {"$set": {"read": True}})
+    return {"ok": True}
+
+
+# =========================
+# Household Report (Monthly summary for housewives)
+# =========================
+@api_router.get("/reports/household")
+async def household_report(space_id: str, year: Optional[int] = None, month: Optional[int] = None, user: User = Depends(get_current_user)):
+    space = await assert_space_member(space_id, user.user_id)
+    now = now_utc()
+    y = year or now.year
+    m = month or now.month
+    # month start/end
+    start = datetime(y, m, 1, tzinfo=timezone.utc)
+    if m == 12:
+        end = datetime(y + 1, 1, 1, tzinfo=timezone.utc)
+    else:
+        end = datetime(y, m + 1, 1, tzinfo=timezone.utc)
+    start_str = start.strftime("%Y-%m-%d")
+    end_str = end.strftime("%Y-%m-%d")
+    currency = space.get("currency") or "USD"
+
+    # --- Spending (items with price in window) ---
+    # We use items as the finance ledger (as seen in /reports/finance + payroll logs).
+    item_pipeline = [
+        {"$match": {"space_id": space_id, "created_at": {"$gte": start, "$lt": end}, "price": {"$ne": None, "$gt": 0}}},
+        {"$group": {"_id": "$category_id", "total": {"$sum": "$price"}, "count": {"$sum": 1}}},
+        {"$sort": {"total": -1}},
+    ]
+    cat_totals = []
+    async for row in db.items.aggregate(item_pipeline):
+        cat_totals.append(row)
+    total_spent = sum((c.get("total") or 0) for c in cat_totals)
+    # attach category names
+    cat_ids = [c["_id"] for c in cat_totals if c.get("_id")]
+    cats = await db.categories.find({"category_id": {"$in": cat_ids}}, {"_id": 0}).to_list(200)
+    cat_name = {c["category_id"]: c["name"] for c in cats}
+    cat_icon = {c["category_id"]: c.get("icon") or "Package" for c in cats}
+    cat_tint = {c["category_id"]: c.get("tint") or c.get("color") or "mint" for c in cats}
+    top_categories = []
+    for c in cat_totals[:5]:
+        cid = c.get("_id")
+        top_categories.append({
+            "category_id": cid,
+            "name": cat_name.get(cid, "Uncategorized"),
+            "icon": cat_icon.get(cid, "Package"),
+            "tint": cat_tint.get(cid, "mint"),
+            "total": round(c.get("total") or 0, 2),
+            "count": c.get("count") or 0,
+        })
+
+    # --- Staff summary ---
+    staff_docs = await db.staff_members.find({"space_id": space_id}, {"_id": 0}).to_list(500)
+    # Attendance in window
+    att_docs = await db.attendance_logs.find({"space_id": space_id, "date": {"$gte": start_str, "$lt": end_str}}, {"_id": 0}).to_list(5000)
+    att_by_staff: Dict[str, Dict[str, int]] = {}
+    for a in att_docs:
+        sid = a["staff_id"]; st = a["status"]
+        att_by_staff.setdefault(sid, {"present": 0, "off": 0, "sick": 0, "leave": 0, "late": 0})
+        att_by_staff[sid][st] = att_by_staff[sid].get(st, 0) + 1
+    # Payments in window
+    pay_docs = await db.staff_payments.find({"space_id": space_id, "paid_at": {"$gte": start, "$lt": end}}, {"_id": 0}).to_list(1000)
+    paid_by_staff: Dict[str, float] = {}
+    for p in pay_docs:
+        paid_by_staff[p["staff_id"]] = paid_by_staff.get(p["staff_id"], 0) + float(p.get("net") or 0)
+    total_wages = sum(paid_by_staff.values())
+    # Task completions per staff in window
+    task_ids = [t["task_id"] for t in await db.task_templates.find({"space_id": space_id}, {"_id": 0, "task_id": 1, "staff_id": 1, "role_id": 1}).to_list(2000)]
+    task_owner = {t["task_id"]: t for t in await db.task_templates.find({"space_id": space_id}, {"_id": 0, "task_id": 1, "staff_id": 1, "role_id": 1}).to_list(2000)}
+    comp_docs = await db.task_completions.find({"space_id": space_id, "date": {"$gte": start_str, "$lt": end_str}, "task_id": {"$in": task_ids}}, {"_id": 0}).to_list(5000)
+    done_by_staff: Dict[str, int] = {}
+    total_tasks_done = 0
+    for c in comp_docs:
+        total_tasks_done += 1
+        # prefer completion staff_id, fall back to task owner
+        sid = c.get("staff_id") or (task_owner.get(c["task_id"], {}) or {}).get("staff_id")
+        if sid:
+            done_by_staff[sid] = done_by_staff.get(sid, 0) + 1
+
+    staff_summary = []
+    for s in staff_docs:
+        sid = s["staff_id"]
+        att = att_by_staff.get(sid, {})
+        staff_summary.append({
+            "staff_id": sid,
+            "name": s.get("name"),
+            "photo_base64": s.get("photo_base64"),
+            "role_id": s.get("role_id"),
+            "days_present": att.get("present", 0) + att.get("late", 0),
+            "days_off": att.get("off", 0),
+            "days_sick": att.get("sick", 0),
+            "days_leave": att.get("leave", 0),
+            "tasks_done": done_by_staff.get(sid, 0),
+            "paid": round(paid_by_staff.get(sid, 0), 2),
+            "salary": s.get("salary"),
+            "pay_cycle": s.get("pay_cycle"),
+        })
+
+    # --- Shopping requests in window ---
+    shop_docs = await db.shopping_requests.find({"space_id": space_id, "created_at": {"$gte": start, "$lt": end}}, {"_id": 0}).to_list(2000)
+    shop_pending = sum(1 for r in shop_docs if r.get("status") == "pending")
+    shop_approved = sum(1 for r in shop_docs if r.get("status") == "approved")
+    shop_purchased = sum(1 for r in shop_docs if r.get("status") == "purchased")
+
+    # --- Headline blurb for housewife ---
+    month_name = start.strftime("%B %Y")
+    return {
+        "month": month_name,
+        "year": y,
+        "month_num": m,
+        "currency": currency,
+        "total_spent": round(total_spent, 2),
+        "total_wages": round(total_wages, 2),
+        "top_categories": top_categories,
+        "staff": staff_summary,
+        "shopping": {
+            "total": len(shop_docs),
+            "pending": shop_pending,
+            "approved": shop_approved,
+            "purchased": shop_purchased,
+        },
+        "tasks_done": total_tasks_done,
+    }
 
 
 # =========================
