@@ -27,13 +27,18 @@ export function getCurrency(code?: string | null): CurrencyInfo {
 export function formatMoney(amount: number, code?: string | null): string {
   if (amount === null || amount === undefined || Number.isNaN(amount)) amount = 0;
   const cur = getCurrency(code);
+  const noDecimals = cur.code === 'JPY' || cur.code === 'IDR' || cur.code === 'KRW' || cur.code === 'VND';
   try {
     return new Intl.NumberFormat(cur.locale || 'en-US', {
-      style: 'currency', currency: cur.code,
-      maximumFractionDigits: cur.code === 'JPY' || cur.code === 'IDR' ? 0 : 2,
+      style: 'currency',
+      currency: cur.code,
+      minimumFractionDigits: noDecimals ? 0 : 2,
+      maximumFractionDigits: noDecimals ? 0 : 2,
+      currencyDisplay: 'symbol',
     }).format(amount);
   } catch {
-    const fixed = (cur.code === 'JPY' || cur.code === 'IDR') ? amount.toFixed(0) : amount.toFixed(2);
+    // Fallback if currency code isn't recognised by Intl
+    const fixed = noDecimals ? Math.round(amount).toLocaleString() : amount.toFixed(2);
     return `${cur.symbol}${fixed}`;
   }
 }

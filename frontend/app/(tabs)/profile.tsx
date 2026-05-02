@@ -63,23 +63,29 @@ export default function Profile() {
   const flipSpaceType = () => {
     if (!activeSpace) return;
     const next = activeSpace.space_type === 'household' ? 'roommates' : 'household';
-    Alert.alert(
-      next === 'household' ? 'Switch to Household?' : 'Switch to Roommates?',
-      next === 'household'
-        ? 'You\'ll see a Household tab to manage family + staff (maids, drivers, nannies), with roles & a house handbook.'
-        : 'The Household tab will be hidden. Your staff/family/handbook data is kept and will return if you switch back.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Switch', onPress: async () => {
-            try {
-              await api.patch(`/spaces/${activeSpace.space_id}`, { space_type: next });
-              await refreshSpaces?.();
-            } catch (e: any) { Alert.alert('Error', e?.message || ''); }
-          }
-        },
-      ],
-    );
+    const title = next === 'household' ? 'Switch to Household?' : 'Switch to Roommates?';
+    const msg = next === 'household'
+      ? 'You\'ll see a Household tab to manage family + staff (maids, drivers, nannies), with roles & a house handbook.'
+      : 'The Household tab will be hidden. Your staff/family/handbook data is kept and will return if you switch back.';
+
+    const doFlip = async () => {
+      try {
+        await api.patch(`/spaces/${activeSpace.space_id}`, { space_type: next });
+        await refreshSpaces?.();
+      } catch (e: any) { Alert.alert('Error', e?.message || ''); }
+    };
+
+    if (Platform.OS === 'web') {
+      // Native Alert.alert with multiple buttons doesn't render on web
+      if (typeof window !== 'undefined' && window.confirm(`${title}\n\n${msg}`)) {
+        doFlip();
+      }
+      return;
+    }
+    Alert.alert(title, msg, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Switch', onPress: doFlip },
+    ]);
   };
 
   const currentCur = getCurrency(activeSpace?.currency);
