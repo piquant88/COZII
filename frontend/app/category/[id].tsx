@@ -166,8 +166,8 @@ export default function CategoryDetail() {
                 testID={`item-${it.item_id}`}
               >
                 <View style={styles.itemImg}>
-                  {it.photo_base64 ? (
-                    <Image source={{ uri: it.photo_base64 }} style={styles.itemImgInner} />
+                  {(it.image_url || it.photo_base64) ? (
+                    <Image source={{ uri: it.image_url || it.photo_base64 }} style={styles.itemImgInner} />
                   ) : (
                     <Icon name="Package" size={22} color={colors.textMuted} />
                   )}

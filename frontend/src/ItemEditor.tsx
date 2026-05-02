@@ -33,6 +33,8 @@ export default function ItemEditor({ mode, itemId, preselectCategoryId }: Props)
   const [expiryDate, setExpiryDate] = useState('');
   const [notes, setNotes] = useState('');
   const [photo, setPhoto] = useState<string | null>(null);
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [searchingImg, setSearchingImg] = useState(false);
   const [fields, setFields] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -55,6 +57,7 @@ export default function ItemEditor({ mode, itemId, preselectCategoryId }: Props)
           setExpiryDate(it.expiry_date || '');
           setNotes(it.notes || '');
           setPhoto(it.photo_base64 || null);
+          setImageUrl(it.image_url || null);
           setFields(it.fields || {});
         } else if (!categoryId && cats.length > 0) {
           setCategoryId(cats[0].category_id);
@@ -83,8 +86,27 @@ export default function ItemEditor({ mode, itemId, preselectCategoryId }: Props)
         const a = result.assets[0];
         const base64 = a.base64 ? `data:image/jpeg;base64,${a.base64}` : a.uri;
         setPhoto(base64);
+        setImageUrl(null); // user-uploaded photo overrides web image
       }
     } catch (e) { console.warn(e); }
+  };
+
+  const findImage = async () => {
+    if (!name.trim()) { Alert.alert('Add a name first', 'Type the product name (e.g. "Dior Joy Bag") then tap Find image.'); return; }
+    setSearchingImg(true);
+    try {
+      const r = await api.get<{ image_url: string | null }>(`/products/image-search?q=${encodeURIComponent(name.trim())}`);
+      if (r.image_url) {
+        setImageUrl(r.image_url);
+        setPhoto(null);
+      } else {
+        Alert.alert('No image found', 'Try a more specific name, or tap the photo box to upload one yourself.');
+      }
+    } catch (e: any) {
+      Alert.alert('Search failed', e?.message || 'Try again, or upload a photo manually.');
+    } finally {
+      setSearchingImg(false);
+    }
   };
 
   const save = async () => {
@@ -97,6 +119,7 @@ export default function ItemEditor({ mode, itemId, preselectCategoryId }: Props)
       category_id: categoryId,
       name: name.trim(),
       photo_base64: photo,
+      image_url: imageUrl,
       status,
       quantity: parseFloat(quantity) || 1,
       price: price ? parseFloat(price) : null,
@@ -152,18 +175,43 @@ export default function ItemEditor({ mode, itemId, preselectCategoryId }: Props)
         </View>
 
         <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-          <TouchableOpacity style={styles.photoBox} onPress={pickImage} testID="item-editor-photo">
-            {photo ? (
-              <Image source={{ uri: photo }} style={styles.photoImg} />
-            ) : (
-              <>
-                <View style={[styles.photoPlaceholder, { backgroundColor: tints.pink.bg }]}>
-                  <Icon name="ImageIcon" color={tints.pink.icon} size={24} />
-                </View>
-                <Text style={styles.photoTxt}>Add photo</Text>
-              </>
-            )}
-          </TouchableOpacity>
+          <View style={{ gap: 6 }}>
+            <TouchableOpacity style={styles.photoBox} onPress={pickImage} testID="item-editor-photo">
+              {(photo || imageUrl) ? (
+                <Image source={{ uri: photo || imageUrl! }} style={styles.photoImg} />
+              ) : (
+                <>
+                  <View style={[styles.photoPlaceholder, { backgroundColor: tints.pink.bg }]}>
+                    <Icon name="ImageIcon" color={tints.pink.icon} size={24} />
+                  </View>
+                  <Text style={styles.photoTxt}>Add photo</Text>
+                </>
+              )}
+            </TouchableOpacity>
+            <View style={{ flexDirection: 'row', gap: 6 }}>
+              <TouchableOpacity
+                style={styles.findImgBtn}
+                onPress={findImage}
+                disabled={searchingImg || !name.trim()}
+                testID="item-editor-find-image"
+              >
+                <Icon name="Sparkles" size={14} color={searchingImg ? colors.textMuted : colors.primary} />
+                <Text style={[styles.findImgTxt, (searchingImg || !name.trim()) && { color: colors.textMuted }]}>
+                  {searchingImg ? 'Searching…' : 'Find image online'}
+                </Text>
+              </TouchableOpacity>
+              {(photo || imageUrl) && (
+                <TouchableOpacity
+                  style={styles.findImgBtn}
+                  onPress={() => { setPhoto(null); setImageUrl(null); }}
+                  testID="item-editor-clear-image"
+                >
+                  <Icon name="X" size={14} color={colors.dangerText} />
+                  <Text style={[styles.findImgTxt, { color: colors.dangerText }]}>Clear</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
 
           <View style={styles.field}>
             <Text style={styles.label}>Name</Text>
@@ -369,6 +417,8 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   photoTxt: { color: colors.textMuted, fontWeight: '600', fontSize: 14 },
+  findImgBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 10, borderRadius: radius.full, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+  findImgTxt: { fontSize: 12, fontWeight: '800', color: colors.primary },
   field: { marginBottom: spacing.md },
   fieldRow: { flexDirection: 'row', marginBottom: spacing.md },
   label: { fontSize: 11, fontWeight: '800', color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 },

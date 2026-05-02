@@ -815,12 +815,22 @@ async def scan_receipt(body: ScanReceiptRequest, user: User = Depends(get_curren
         raise HTTPException(status_code=400, detail="No image provided")
 
     system_message = (
-        "You are a helpful assistant that extracts shopping items from receipt or product images. "
-        "Return STRICT JSON only, no prose, in this schema: "
-        '{"items":[{"name":"string","quantity":number,"price":number_or_null,"category_hint":"food|skincare|toiletries|closet|cleaning|other","fields":{}}]}. '
-        "Skip tax, subtotal, total, fees, change, tip, payment type, and store name. "
-        "Use lowercase category_hint values. If price is unclear, set it to null. Quantity defaults to 1. "
-        "The 'fields' object must contain extra structured details for each item."
+        "You are a helpful assistant that extracts shopping or transaction info from images. "
+        "Return STRICT JSON only, no prose, no markdown, in this exact schema: "
+        '{"items":[{"name":"string","quantity":number,"price":number_or_null,"category_hint":"food|skincare|toiletries|closet|cleaning|electronics|services|other","fields":{}}]}. '
+        "\n\nThe image may be one of: \n"
+        "  (A) A typical store receipt with multiple line items → extract each line as a separate item. \n"
+        "  (B) A bank transfer / payment proof / e-wallet screenshot → return ONE item with name like 'Transfer to <recipient>' or 'Payment to <merchant>' and price = total amount. category_hint='services' or 'other'. \n"
+        "  (C) A product photo (one item only) → return ONE item with the product name and price if visible. \n"
+        "  (D) A handwritten list / note → extract each line as a separate item. \n"
+        "\nIMPORTANT: \n"
+        "- ALWAYS return at least 1 item if anything is readable. \n"
+        "- Skip subtotal/tax/total/fees/change/tip lines; instead use them only as price if the doc is a single transaction. \n"
+        "- Use lowercase category_hint values. \n"
+        "- If price is unclear, set it to null. Quantity defaults to 1. \n"
+        "- For bank transfers, the 'name' must mention what kind of transaction (e.g. 'Transfer to Windi A.O.', 'Top-up GoPay', 'Bill payment PLN'). \n"
+        "- Currency in the image may not be USD; ignore the currency symbol and just put the number. \n"
+        "- The 'fields' object must contain extra structured details for each item."
     )
 
     if body.target_fields:
@@ -865,12 +875,27 @@ async def scan_receipt(body: ScanReceiptRequest, user: User = Depends(get_curren
     text = response if isinstance(response, str) else str(response)
     json_text = _extract_json_block(text)
 
+    parsed = None
     try:
         parsed = json.loads(json_text)
     except Exception:
-        raise HTTPException(status_code=502, detail="AI returned unparseable response")
+        # Retry: one more LLM call asking it to return ONLY JSON, very strict
+        try:
+            retry_chat = LlmChat(
+                api_key=EMERGENT_LLM_KEY,
+                session_id=f"scan_retry_{user.user_id}_{uuid.uuid4().hex[:6]}",
+                system_message=(
+                    "You convert receipt-like text to STRICT JSON. "
+                    'Output ONLY the JSON object: {"items":[{"name":"string","quantity":number,"price":number_or_null,"category_hint":"string","fields":{}}]}. '
+                    "No markdown, no commentary. If the input is a transfer/payment, return one item describing it."
+                ),
+            ).with_model(AI_SCAN_MODEL_PROVIDER, AI_SCAN_MODEL_NAME)
+            r2 = await retry_chat.send_message(UserMessage(text=f"Convert this OCR/text to JSON (strict): {text[:1500]}"))
+            parsed = json.loads(_extract_json_block(r2 if isinstance(r2, str) else str(r2)))
+        except Exception:
+            parsed = None
 
-    items_raw = parsed.get("items", []) if isinstance(parsed, dict) else []
+    items_raw = (parsed.get("items", []) if isinstance(parsed, dict) else []) if parsed else []
     items: List[ScannedItem] = []
     for it in items_raw:
         if not isinstance(it, dict):
@@ -894,6 +919,27 @@ async def scan_receipt(body: ScanReceiptRequest, user: User = Depends(get_curren
         if not isinstance(fields, dict):
             fields = {}
         items.append(ScannedItem(name=name, quantity=qty, price=price, category_hint=hint, fields=fields))
+
+    # Fallback: if AI returned nothing useful, try to infer at least an amount from raw text
+    if not items:
+        # Try to find a number in the text (e.g. "97.000" or "97,000.00") for the price
+        amount_match = re.search(r"(\d{1,3}(?:[\.,]\d{3})+(?:[\.,]\d{2})?|\d+[\.,]\d{2})", text or "")
+        price_val: Optional[float] = None
+        if amount_match:
+            raw_n = amount_match.group(1)
+            # Heuristic: if it has multiple dots/commas, treat dots/commas as thousand sep
+            stripped = raw_n.replace(".", "").replace(",", "") if raw_n.count(".") + raw_n.count(",") >= 2 else raw_n.replace(",", ".")
+            try:
+                price_val = float(stripped)
+            except Exception:
+                price_val = None
+        items.append(ScannedItem(
+            name="Transaction (please rename)",
+            quantity=1,
+            price=price_val,
+            category_hint="other",
+            fields={"_raw": (text or "")[:200]},
+        ))
 
     return ScanReceiptResponse(items=items, raw=text[:2000])
 
