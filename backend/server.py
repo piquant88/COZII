@@ -786,7 +786,13 @@ async def _search_product_image(query: str) -> Optional[str]:
                 return None
             data = r2.json()
             results = data.get("results") or []
-            for it in results[:5]:
+            # Prefer Bing-hosted thumbnails (tse*.mm.bing.net) — they don't require Referer headers
+            # and load reliably in mobile apps. Only fall back to the original image URL.
+            for it in results[:10]:
+                thumb = it.get("thumbnail")
+                if thumb and thumb.startswith("http"):
+                    return thumb
+            for it in results[:10]:
                 img = it.get("image")
                 if img and img.startswith("http"):
                     return img
