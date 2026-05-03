@@ -739,6 +739,7 @@ function StaffForm({ initial, roles, spaceId, currency, onClose, onSaved }: any)
   const [startDate, setStartDate] = useState(initial?.start_date || '');
   const [endDate, setEndDate] = useState(initial?.end_date || '');
   const [active, setActive] = useState<boolean>(initial?.active !== false);
+  const [requiresConfirm, setRequiresConfirm] = useState<boolean>(!!initial?.requires_wage_confirmation);
   const [notes, setNotes] = useState(initial?.notes || '');
   const [saving, setSaving] = useState(false);
   const [payNote, setPayNote] = useState('');
@@ -756,6 +757,7 @@ function StaffForm({ initial, roles, spaceId, currency, onClose, onSaved }: any)
         pay_cycle: cycle, salary_currency: currency,
         off_day: offDay || null, start_date: startDate || null,
         end_date: endDate || null, active: active,
+        requires_wage_confirmation: requiresConfirm,
         notes: notes || null,
       };
       if (initial?.staff_id) await api.patch(`/household/staff/${initial.staff_id}`, payload);
@@ -864,6 +866,18 @@ function StaffForm({ initial, roles, spaceId, currency, onClose, onSaved }: any)
         </TouchableOpacity>
       </View>
       <Text style={styles.helper}>Former staff won't appear in monthly reports from the current month onward — past records (wages paid, attendance) stay intact for history.</Text>
+
+      <TouchableOpacity
+        style={[styles.activeToggle, requiresConfirm && { backgroundColor: tints.lavender.bg, borderColor: tints.lavender.icon }]}
+        onPress={() => setRequiresConfirm((v) => !v)}
+        testID="staff-confirm-toggle"
+      >
+        <Icon name={requiresConfirm ? 'Check' : 'X'} size={12} color={requiresConfirm ? tints.lavender.icon : colors.textMuted} />
+        <Text style={[styles.activeToggleTxt, requiresConfirm && { color: tints.lavender.icon }]}>
+          {requiresConfirm ? 'Staff must confirm wage receipt' : 'Wages auto-confirmed'}
+        </Text>
+      </TouchableOpacity>
+      <Text style={styles.helper}>When ON, paid wages stay "pending" in the report until {initial?.name?.split(' ')[0] || 'they'} taps "I received" in their app — keeps the record clean and avoids he-said-she-said.</Text>
       <Text style={styles.label}>Notes</Text>
       <TextInput style={[styles.input, { minHeight: 60 }]} value={notes} onChangeText={setNotes} multiline placeholder="responsibilities, agreement, anything important" placeholderTextColor={colors.textMuted} />
       {initial?.staff_id && initial?.invite_code && (
@@ -938,6 +952,7 @@ function StaffPermissionsEditor({ staff, onChanged }: { staff: StaffMember; onCh
       title: 'Extra access (into the main family app)',
       items: [
         { key: 'view_inventory', label: 'View inventory tab', hint: 'They can see household inventory (read-only for now)' },
+        { key: 'view_inventory_prices', label: '↳ Show prices in inventory', hint: 'Hide for staff who shouldn\'t know item costs' },
         { key: 'view_finance', label: 'View finance tab', hint: 'They can see monthly spending' },
         { key: 'view_family', label: 'See family directory' },
         { key: 'view_other_staff', label: 'See other staff list' },

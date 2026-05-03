@@ -1851,6 +1851,7 @@ class StaffMember(BaseModel):
     user_id: Optional[str] = None  # set when staff signs up to the app
     invite_code: Optional[str] = None
     permissions: Dict[str, bool] = Field(default_factory=dict)
+    requires_wage_confirmation: bool = False  # if True, staff must confirm receipt of payment
     created_at: datetime
 
 
@@ -1870,6 +1871,7 @@ class CreateStaffRequest(BaseModel):
     end_date: Optional[str] = None
     active: bool = True
     notes: Optional[str] = None
+    requires_wage_confirmation: bool = False
 
 
 class UpdateStaffRequest(BaseModel):
@@ -1887,6 +1889,7 @@ class UpdateStaffRequest(BaseModel):
     end_date: Optional[str] = None
     active: Optional[bool] = None
     notes: Optional[str] = None
+    requires_wage_confirmation: Optional[bool] = None
 
 
 class HandbookEntry(BaseModel):
@@ -2108,6 +2111,7 @@ DEFAULT_STAFF_PERMS = {
     "view_family": False,
     "view_finance": False,
     "view_inventory": False,
+    "view_inventory_prices": True,  # only matters when view_inventory is also True
 }
 
 
@@ -2139,6 +2143,7 @@ async def create_staff(body: CreateStaffRequest, user: User = Depends(get_curren
         "end_date": body.end_date,
         "active": True if body.active is None else bool(body.active),
         "notes": body.notes,
+        "requires_wage_confirmation": bool(body.requires_wage_confirmation),
         "user_id": None,
         "invite_code": _gen_staff_invite_code(),
         "permissions": DEFAULT_STAFF_PERMS.copy(),
@@ -2216,6 +2221,13 @@ class StaffPayment(BaseModel):
     notes: Optional[str] = None
     item_id: Optional[str] = None
     paid_at: datetime
+    confirmed_at: Optional[datetime] = None
+    confirmed_by_staff_id: Optional[str] = None
+    requires_confirmation: bool = False
+
+
+class ConfirmPaymentRequest(BaseModel):
+    note: Optional[str] = None
 
 
 class CreateStaffPaymentRequest(BaseModel):
@@ -2321,20 +2333,57 @@ async def create_payroll(body: CreateStaffPaymentRequest, user: User = Depends(g
         "notes": body.notes,
         "item_id": item_doc["item_id"],
         "paid_at": today,
+        "requires_confirmation": bool(staff.get("requires_wage_confirmation")),
+        "confirmed_at": None,
+        "confirmed_by_staff_id": None,
     }
     await db.staff_payments.insert_one(payment)
     payment.pop("_id", None)
     # Notify the staff member (if linked)
     if staff.get("user_id"):
+        confirm_blurb = "  Tap to confirm receipt." if payment["requires_confirmation"] else ""
         await _create_notification(
             space_id=body.space_id,
             user_id=staff["user_id"],
             kind="wage_paid",
             title=f"Wage received · {period}",
-            body=f"{staff['name']}, your {cycle} pay of {payment['currency']} {payment['net']:.2f} was logged by the owner.",
-            data={"payment_id": payment["payment_id"], "period": period, "net": payment["net"], "currency": payment["currency"]},
+            body=f"{staff['name']}, your {cycle} pay of {payment['currency']} {payment['net']:.2f} was logged by the owner.{confirm_blurb}",
+            data={"payment_id": payment["payment_id"], "period": period, "net": payment["net"], "currency": payment["currency"], "requires_confirmation": payment["requires_confirmation"]},
         )
     return StaffPayment(**payment)
+
+
+@api_router.post("/household/payroll/{payment_id}/confirm", response_model=StaffPayment)
+async def confirm_payroll(payment_id: str, body: ConfirmPaymentRequest, user: User = Depends(get_current_user)):
+    p = await db.staff_payments.find_one({"payment_id": payment_id}, {"_id": 0})
+    if not p:
+        raise HTTPException(404, "Payment not found")
+    # Only the linked staff (or owner override) can confirm
+    staff = await db.staff_members.find_one({"staff_id": p["staff_id"]}, {"_id": 0})
+    if not staff:
+        raise HTTPException(404, "Staff not found")
+    if staff.get("user_id") != user.user_id:
+        # Allow owner to also confirm on staff's behalf
+        space = await db.family_spaces.find_one({"space_id": p["space_id"]}, {"_id": 0})
+        if not space or space.get("owner_id") != user.user_id:
+            raise HTTPException(403, "Only this staff member or the space owner can confirm")
+    updates = {"confirmed_at": now_utc(), "confirmed_by_staff_id": staff["staff_id"]}
+    if body.note:
+        updates["notes"] = (p.get("notes") or "") + ("\n" if p.get("notes") else "") + f"[Confirmed] {body.note}"
+    await db.staff_payments.update_one({"payment_id": payment_id}, {"$set": updates})
+    out = await db.staff_payments.find_one({"payment_id": payment_id}, {"_id": 0})
+    # Notify owner that confirmation happened
+    space = await db.family_spaces.find_one({"space_id": p["space_id"]}, {"_id": 0})
+    if space and staff.get("user_id") == user.user_id and space.get("owner_id") != user.user_id:
+        await _create_notification(
+            space_id=p["space_id"],
+            user_id=space["owner_id"],
+            kind="wage_confirmed",
+            title=f"{staff['name']} confirmed receipt",
+            body=f"{p['period']} · {p['currency']} {p['net']:.2f}",
+            data={"payment_id": payment_id},
+        )
+    return StaffPayment(**out)
 
 
 @api_router.delete("/household/payroll/{payment_id}")
@@ -2560,6 +2609,7 @@ class ShoppingRequest(BaseModel):
     category_name: Optional[str] = None
     urgency: str = "normal"  # low | normal | high
     status: str = "pending"  # pending | approved | purchased | rejected
+    kind: str = "request"  # 'request' (asking for approval to buy) | 'reimbursement' (already bought, needs payback)
     estimated_price: Optional[float] = None
     actual_price: Optional[float] = None
     currency: Optional[str] = None
@@ -2586,6 +2636,8 @@ class CreateShoppingRequest(BaseModel):
     requested_by_staff_id: Optional[str] = None
     estimated_price: Optional[float] = None
     photo_base64: Optional[str] = None
+    kind: str = "request"  # 'request' | 'reimbursement'
+    actual_price: Optional[float] = None  # for reimbursements (already spent)
 
 
 class UpdateShoppingRequest(BaseModel):
@@ -3048,6 +3100,8 @@ async def list_shopping(space_id: str, status: Optional[str] = None, user: User 
 @api_router.post("/household/shopping", response_model=ShoppingRequest)
 async def create_shopping(body: CreateShoppingRequest, user: User = Depends(get_current_user)):
     space = await assert_space_member(body.space_id, user.user_id)
+    is_reimbursement = body.kind == "reimbursement"
+    initial_status = "approved" if is_reimbursement else "pending"  # reimbursements come pre-approved (already spent), waiting for owner to confirm payback
     doc = {
         "request_id": gen_id("shop"),
         "space_id": body.space_id,
@@ -3056,9 +3110,10 @@ async def create_shopping(body: CreateShoppingRequest, user: User = Depends(get_
         "note": body.note,
         "category_id": body.category_id,
         "urgency": body.urgency if body.urgency in ("low", "normal", "high") else "normal",
-        "status": "pending",
+        "status": initial_status,
+        "kind": "reimbursement" if is_reimbursement else "request",
         "estimated_price": body.estimated_price,
-        "actual_price": None,
+        "actual_price": body.actual_price if is_reimbursement else None,
         "currency": (space.get("currency") if isinstance(space, dict) else None) or "USD",
         "photo_base64": body.photo_base64,
         "requested_by": user.user_id,
@@ -3300,6 +3355,175 @@ async def list_doc_folders(space_id: str, user: User = Depends(get_current_user)
     async for r in db.documents.aggregate(pipeline):
         folders.append({"folder": r["_id"], "count": r["count"]})
     return folders
+
+
+# =========================
+# Export household report (CSV + PDF)
+# =========================
+import io
+import csv as _csv
+from fastapi.responses import StreamingResponse, Response
+
+
+@api_router.get("/reports/household/export")
+async def export_household_report(space_id: str, year: Optional[int] = None, month: Optional[int] = None, format: str = "csv", user: User = Depends(get_current_user)):
+    space = await assert_space_member(space_id, user.user_id)
+    fmt = (format or "csv").lower()
+    if fmt not in ("csv", "pdf"):
+        raise HTTPException(400, "format must be 'csv' or 'pdf'")
+    now = now_utc()
+    y = year or now.year
+    m = month or now.month
+    start = datetime(y, m, 1, tzinfo=timezone.utc)
+    end = datetime(y + 1, 1, 1, tzinfo=timezone.utc) if m == 12 else datetime(y, m + 1, 1, tzinfo=timezone.utc)
+    start_str = start.strftime("%Y-%m-%d")
+    end_str = end.strftime("%Y-%m-%d")
+    currency = space.get("currency") or "USD"
+    space_name = space.get("name") or "Household"
+    period_label = start.strftime("%B %Y")
+
+    # Pull raw rows
+    items = await db.items.find({"space_id": space_id, "created_at": {"$gte": start, "$lt": end}}, {"_id": 0}).sort("created_at", 1).to_list(5000)
+    payments = await db.staff_payments.find({"space_id": space_id, "paid_at": {"$gte": start, "$lt": end}}, {"_id": 0}).sort("paid_at", 1).to_list(2000)
+    shopping = await db.shopping_requests.find({"space_id": space_id, "created_at": {"$gte": start, "$lt": end}}, {"_id": 0}).sort("created_at", 1).to_list(5000)
+    attendance = await db.attendance_logs.find({"space_id": space_id, "date": {"$gte": start_str, "$lt": end_str}}, {"_id": 0}).sort("date", 1).to_list(10000)
+    cat_map = {c["category_id"]: c.get("name") or "?" for c in await db.categories.find({"space_id": space_id}, {"_id": 0}).to_list(500)}
+    staff_map = {s["staff_id"]: s.get("name") or "?" for s in await db.staff_members.find({"space_id": space_id}, {"_id": 0}).to_list(500)}
+
+    if fmt == "csv":
+        buf = io.StringIO()
+        w = _csv.writer(buf)
+        w.writerow([f"# {space_name} — Household report — {period_label}"])
+        w.writerow([f"# Currency: {currency}", f"Generated: {now.strftime('%Y-%m-%d %H:%M UTC')}"])
+        w.writerow([])
+        # Spending
+        w.writerow(["[ TRANSACTIONS / EXPENSES ]"])
+        w.writerow(["Date", "Category", "Item", "Quantity", "Unit", "Price", "Event tag", "Added by", "Notes"])
+        for it in items:
+            w.writerow([
+                (it.get("purchase_date") or it.get("created_at").strftime("%Y-%m-%d") if it.get("created_at") else ""),
+                cat_map.get(it.get("category_id"), ""),
+                it.get("name") or "",
+                it.get("quantity") or "",
+                it.get("unit") or "",
+                it.get("price") or "",
+                it.get("event_tag") or "",
+                it.get("created_by_name") or "",
+                (it.get("notes") or "").replace("\n", " "),
+            ])
+        w.writerow([])
+        # Wages
+        w.writerow(["[ STAFF WAGES PAID ]"])
+        w.writerow(["Paid at", "Staff", "Period", "Gross", "Bonus", "Advances", "Deductions", "Net", "Currency", "Confirmed at", "Notes"])
+        for p in payments:
+            paid_at = p.get("paid_at"); paid_at_s = paid_at.strftime("%Y-%m-%d %H:%M") if paid_at else ""
+            conf = p.get("confirmed_at"); conf_s = conf.strftime("%Y-%m-%d %H:%M") if conf else ""
+            w.writerow([
+                paid_at_s, p.get("staff_name") or staff_map.get(p["staff_id"], ""), p.get("period") or "",
+                p.get("gross") or 0, p.get("bonus") or 0, p.get("advances") or 0,
+                p.get("deductions") or 0, p.get("net") or 0, p.get("currency") or currency,
+                conf_s, (p.get("notes") or "").replace("\n", " "),
+            ])
+        w.writerow([])
+        # Shopping
+        w.writerow(["[ SHOPPING & REIMBURSEMENT REQUESTS ]"])
+        w.writerow(["Created", "Type", "Status", "Item", "Qty", "Requested by", "Estimated", "Actual paid", "Note"])
+        for s in shopping:
+            created = s.get("created_at"); created_s = created.strftime("%Y-%m-%d") if created else ""
+            req_name = s.get("requested_by_name") or staff_map.get(s.get("requested_by_staff_id"), "")
+            w.writerow([
+                created_s, s.get("kind", "request"), s.get("status", ""), s.get("item_name", ""),
+                s.get("quantity") or "", req_name, s.get("estimated_price") or "", s.get("actual_price") or "",
+                (s.get("note") or "").replace("\n", " "),
+            ])
+        w.writerow([])
+        # Attendance
+        w.writerow(["[ ATTENDANCE LOGS ]"])
+        w.writerow(["Date", "Staff", "Status", "Notes"])
+        for a in attendance:
+            w.writerow([
+                a.get("date", ""), staff_map.get(a.get("staff_id"), ""), a.get("status", ""),
+                (a.get("notes") or "").replace("\n", " "),
+            ])
+        buf.seek(0)
+        filename = f"household-report-{y}-{m:02d}.csv"
+        return Response(content=buf.getvalue(), media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+    # PDF — use reportlab
+    try:
+        from reportlab.lib.pagesizes import LETTER
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib import colors as rl_colors
+    except ImportError:
+        raise HTTPException(500, "reportlab not installed; please use format=csv")
+
+    pdf_buf = io.BytesIO()
+    doc = SimpleDocTemplate(pdf_buf, pagesize=LETTER, leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36)
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("Title", parent=styles["Heading1"], fontSize=20, spaceAfter=8)
+    h2 = ParagraphStyle("H2", parent=styles["Heading2"], fontSize=13, spaceBefore=14, spaceAfter=6, textColor=rl_colors.HexColor("#3D6F2A"))
+    body = styles["Normal"]
+    elems = []
+    elems.append(Paragraph(f"<b>{space_name}</b> — Monthly report", title_style))
+    elems.append(Paragraph(f"<font color='#888'>Period: {period_label} · Currency: {currency} · Generated {now.strftime('%Y-%m-%d %H:%M UTC')}</font>", body))
+    elems.append(Spacer(1, 8))
+
+    # Summary
+    total_spent = sum((it.get("price") or 0) for it in items)
+    total_wages = sum((p.get("net") or 0) for p in payments)
+    elems.append(Paragraph("<b>Summary</b>", h2))
+    sumtbl = Table([
+        ["Total expenses (incl. wages)", f"{currency} {total_spent:,.2f}"],
+        ["Staff wages paid", f"{currency} {total_wages:,.2f}"],
+        ["Other household spend", f"{currency} {max(total_spent - total_wages, 0):,.2f}"],
+        ["Number of transactions", str(len(items))],
+        ["Shopping / reimbursement requests", str(len(shopping))],
+    ], colWidths=[260, 260])
+    sumtbl.setStyle(TableStyle([("FONTNAME", (0, 0), (-1, -1), "Helvetica"), ("FONTSIZE", (0, 0), (-1, -1), 10), ("BOTTOMPADDING", (0, 0), (-1, -1), 6), ("BACKGROUND", (0, 0), (0, -1), rl_colors.HexColor("#F5F5F0"))]))
+    elems.append(sumtbl)
+
+    # Wages
+    if payments:
+        elems.append(Paragraph("<b>Staff wages paid</b>", h2))
+        rows = [["Date", "Staff", "Period", "Net", "Confirmed"]]
+        for p in payments:
+            paid_at = p.get("paid_at"); paid_s = paid_at.strftime("%b %d") if paid_at else ""
+            conf = "Yes" if p.get("confirmed_at") else ("Pending" if p.get("requires_confirmation") else "—")
+            rows.append([paid_s, p.get("staff_name") or staff_map.get(p["staff_id"], ""), p.get("period") or "", f"{p.get('currency') or currency} {(p.get('net') or 0):,.0f}", conf])
+        t = Table(rows, colWidths=[60, 130, 80, 110, 90])
+        t.setStyle(TableStyle([("FONTNAME", (0, 0), (-1, -1), "Helvetica"), ("FONTSIZE", (0, 0), (-1, -1), 9), ("BACKGROUND", (0, 0), (-1, 0), rl_colors.HexColor("#3D6F2A")), ("TEXTCOLOR", (0, 0), (-1, 0), rl_colors.white), ("GRID", (0, 0), (-1, -1), 0.4, rl_colors.HexColor("#DDD")), ("ROWBACKGROUNDS", (0, 1), (-1, -1), [rl_colors.white, rl_colors.HexColor("#FAFAF8")])]))
+        elems.append(t)
+
+    # Shopping
+    if shopping:
+        elems.append(Paragraph("<b>Shopping & reimbursements</b>", h2))
+        rows = [["Date", "Type", "Item", "Status", "Amount"]]
+        for s in shopping:
+            created = s.get("created_at"); created_s = created.strftime("%b %d") if created else ""
+            amt = s.get("actual_price") or s.get("estimated_price") or 0
+            rows.append([created_s, (s.get("kind") or "request").title(), s.get("item_name", "")[:30], s.get("status", "").title(), f"{currency} {amt:,.0f}"])
+        t = Table(rows, colWidths=[55, 90, 180, 75, 90])
+        t.setStyle(TableStyle([("FONTNAME", (0, 0), (-1, -1), "Helvetica"), ("FONTSIZE", (0, 0), (-1, -1), 9), ("BACKGROUND", (0, 0), (-1, 0), rl_colors.HexColor("#9B5A3F")), ("TEXTCOLOR", (0, 0), (-1, 0), rl_colors.white), ("GRID", (0, 0), (-1, -1), 0.4, rl_colors.HexColor("#DDD")), ("ROWBACKGROUNDS", (0, 1), (-1, -1), [rl_colors.white, rl_colors.HexColor("#FAFAF8")])]))
+        elems.append(t)
+
+    # All transactions (raw)
+    if items:
+        elems.append(Paragraph("<b>All transactions</b>", h2))
+        rows = [["Date", "Category", "Item", "Qty", "Price", "Tag"]]
+        for it in items[:200]:  # cap to avoid huge PDFs
+            d = (it.get("purchase_date") or (it.get("created_at").strftime("%Y-%m-%d") if it.get("created_at") else ""))
+            rows.append([d, cat_map.get(it.get("category_id"), "")[:18], (it.get("name") or "")[:30], str(it.get("quantity") or 1), f"{currency} {(it.get('price') or 0):,.0f}", (it.get("event_tag") or "")[:14]])
+        if len(items) > 200:
+            rows.append([f"… and {len(items) - 200} more (CSV has all)", "", "", "", "", ""])
+        t = Table(rows, colWidths=[60, 80, 170, 40, 90, 70])
+        t.setStyle(TableStyle([("FONTNAME", (0, 0), (-1, -1), "Helvetica"), ("FONTSIZE", (0, 0), (-1, -1), 8), ("BACKGROUND", (0, 0), (-1, 0), rl_colors.HexColor("#1F4F88")), ("TEXTCOLOR", (0, 0), (-1, 0), rl_colors.white), ("GRID", (0, 0), (-1, -1), 0.3, rl_colors.HexColor("#EEE")), ("ROWBACKGROUNDS", (0, 1), (-1, -1), [rl_colors.white, rl_colors.HexColor("#FAFAF8")])]))
+        elems.append(t)
+
+    doc.build(elems)
+    pdf_buf.seek(0)
+    filename = f"household-report-{y}-{m:02d}.pdf"
+    return Response(content=pdf_buf.getvalue(), media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 @api_router.delete("/household/shopping/{request_id}")

@@ -13,6 +13,29 @@ import { formatMoney } from '../src/currency';
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
+async function downloadFile(url: string, fileName: string, token: string | null) {
+  try {
+    const FS = await import('expo-file-system');
+    const Sharing = await import('expo-sharing');
+    const { Alert } = await import('react-native');
+    const dest = `${FS.documentDirectory}${fileName}`;
+    const dl = FS.createDownloadResumable(url, dest, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    const result = await dl.downloadAsync();
+    if (!result?.uri) { Alert.alert('Download failed'); return; }
+    const can = await Sharing.isAvailableAsync();
+    if (can) {
+      await Sharing.shareAsync(result.uri, { dialogTitle: 'Save report', mimeType: fileName.endsWith('.pdf') ? 'application/pdf' : 'text/csv' });
+    } else {
+      Alert.alert('Saved', `Report saved to ${result.uri}`);
+    }
+  } catch (e: any) {
+    const { Alert } = await import('react-native');
+    Alert.alert('Download failed', e?.message || '');
+  }
+}
+
 type Report = any;
 
 export default function HouseholdReportScreen() {
@@ -61,6 +84,32 @@ export default function HouseholdReportScreen() {
           <Text style={styles.kicker}>{activeSpace?.name}</Text>
           <Text style={styles.title}>Monthly Report</Text>
         </View>
+        <TouchableOpacity
+          style={styles.downloadBtn}
+          onPress={async () => {
+            try {
+              const Linking = await import('expo-linking');
+              const base = process.env.EXPO_PUBLIC_BACKEND_URL || '';
+              const { tokenStorage } = await import('../src/api');
+              const token = await tokenStorage.get();
+              // CSV
+              const csvUrl = `${base}/api/reports/household/export?space_id=${activeSpace?.space_id}&year=${year}&month=${month}&format=csv&t=${token}`;
+              const pdfUrl = `${base}/api/reports/household/export?space_id=${activeSpace?.space_id}&year=${year}&month=${month}&format=pdf&t=${token}`;
+              const { Alert } = await import('react-native');
+              Alert.alert('Download report', `Choose format for ${MONTHS[month - 1]} ${year}.`, [
+                { text: 'PDF', onPress: () => downloadFile(pdfUrl, `household-${year}-${String(month).padStart(2,'0')}.pdf`, token) },
+                { text: 'CSV (Excel)', onPress: () => downloadFile(csvUrl, `household-${year}-${String(month).padStart(2,'0')}.csv`, token) },
+                { text: 'Cancel', style: 'cancel' },
+              ]);
+            } catch (e: any) {
+              const { Alert } = await import('react-native');
+              Alert.alert('Error', e?.message || '');
+            }
+          }}
+          testID="hh-download"
+        >
+          <Icon name="Download" size={16} color="#fff" />
+        </TouchableOpacity>
       </View>
 
       {/* Month selector */}
@@ -228,6 +277,12 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
     transform: [{ rotate: '180deg' }],
     ...shadows.card,
+  },
+  downloadBtn: {
+    width: 40, height: 40, borderRadius: 20,
+    backgroundColor: colors.primary,
+    alignItems: 'center', justifyContent: 'center',
+    ...shadows.button,
   },
   kicker: { fontSize: 11, color: colors.textMuted, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5 },
   title: { fontSize: 24, fontWeight: '900', color: colors.textMain, letterSpacing: -0.5 },

@@ -42,6 +42,7 @@ export default function StaffHome() {
   const [notifs, setNotifs] = useState<any[]>([]);
   const [showNotifs, setShowNotifs] = useState(false);
   const [myShop, setMyShop] = useState<any[]>([]);
+  const [shopKind, setShopKind] = useState<'request' | 'reimbursement'>('request');
   const [handbook, setHandbook] = useState<any[]>([]);
   const [openHb, setOpenHb] = useState<string | null>(null);
   const [invCats, setInvCats] = useState<any[]>([]);
@@ -132,17 +133,21 @@ export default function StaffHome() {
     if (!activeSpace || !newReq.trim() || !data?.staff) return;
     try {
       const priceNum = parseFloat(newPrice.replace(/[^0-9.]/g, '')) || null;
+      const isReimb = shopKind === 'reimbursement';
+      if (isReimb && !priceNum) { Alert.alert('Add the amount', 'For reimbursements please enter what you actually paid.'); return; }
       await api.post('/household/shopping', {
         space_id: activeSpace.space_id,
         item_name: newReq.trim(),
         quantity: newQty || null,
         requested_by_staff_id: data.staff.staff_id,
         urgency: 'normal',
-        estimated_price: priceNum,
+        kind: shopKind,
+        estimated_price: !isReimb ? priceNum : null,
+        actual_price: isReimb ? priceNum : null,
         photo_base64: newPhoto,
       });
       setNewReq(''); setNewQty(''); setNewPrice(''); setNewPhoto(null);
-      Alert.alert('Sent', 'Your request is waiting for approval.');
+      Alert.alert(isReimb ? 'Reimbursement requested' : 'Sent', isReimb ? 'Your reimbursement is waiting for owner to mark paid.' : 'Your request is waiting for approval.');
       await load();
     } catch (e: any) { Alert.alert('Error', e?.message || ''); }
   };
@@ -400,13 +405,21 @@ export default function StaffHome() {
           <View style={{ gap: 8 }}>
             <View style={[styles.hero, { backgroundColor: tints.pink.bg }]}>
               <View>
-                <Text style={styles.heroLabel}>Need something?</Text>
-                <Text style={styles.heroAmt}>Send a request</Text>
-                <Text style={styles.heroSub}>Add a rough price + photo if you can.</Text>
+                <Text style={styles.heroLabel}>{shopKind === 'reimbursement' ? 'Already paid out of pocket?' : 'Need something?'}</Text>
+                <Text style={styles.heroAmt}>{shopKind === 'reimbursement' ? 'Ask for reimbursement' : 'Send a request'}</Text>
+                <Text style={styles.heroSub}>{shopKind === 'reimbursement' ? 'Add the receipt photo + how much you spent.' : 'Add a rough price + photo if you can.'}</Text>
               </View>
               <Icon name="ShoppingBag" size={40} color={tints.pink.icon} />
             </View>
-            <Text style={styles.label}>What's running low?</Text>
+            <View style={{ flexDirection: 'row', gap: 6, marginBottom: 4 }}>
+              <TouchableOpacity style={[styles.kindChip, shopKind === 'request' && styles.kindChipActive]} onPress={() => setShopKind('request')} testID="staff-kind-request">
+                <Text style={[styles.kindTxt, shopKind === 'request' && styles.kindTxtActive]}>Need to buy</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.kindChip, shopKind === 'reimbursement' && styles.kindChipActive]} onPress={() => setShopKind('reimbursement')} testID="staff-kind-reimb">
+                <Text style={[styles.kindTxt, shopKind === 'reimbursement' && styles.kindTxtActive]}>Already bought (reimburse me)</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.label}>{shopKind === 'reimbursement' ? 'What did you buy?' : "What's running low?"}</Text>
             <TextInput style={styles.input} value={newReq} onChangeText={setNewReq} placeholder="e.g. Rice" placeholderTextColor={colors.textMuted} testID="staff-shop-name" />
             <View style={{ flexDirection: 'row', gap: 8 }}>
               <View style={{ flex: 1 }}>
@@ -414,7 +427,7 @@ export default function StaffHome() {
                 <TextInput style={styles.input} value={newQty} onChangeText={setNewQty} placeholder="e.g. 5 kg" placeholderTextColor={colors.textMuted} />
               </View>
               <View style={{ flex: 1 }}>
-                <Text style={styles.label}>Estimated price ({cur})</Text>
+                <Text style={styles.label}>{shopKind === 'reimbursement' ? `Actual price (${cur})` : `Estimated price (${cur})`}</Text>
                 <TextInput style={styles.input} value={newPrice} onChangeText={setNewPrice} placeholder="e.g. 50000" placeholderTextColor={colors.textMuted} keyboardType="numeric" testID="staff-shop-price" />
               </View>
             </View>
@@ -424,7 +437,7 @@ export default function StaffHome() {
               ) : (
                 <View style={{ alignItems: 'center', gap: 4 }}>
                   <Icon name="Camera" size={18} color={colors.primary} />
-                  <Text style={styles.photoTxt}>Add photo (optional)</Text>
+                  <Text style={styles.photoTxt}>{shopKind === 'reimbursement' ? 'Add receipt photo (optional but recommended)' : 'Add photo (optional)'}</Text>
                 </View>
               )}
             </TouchableOpacity>
@@ -435,7 +448,7 @@ export default function StaffHome() {
             )}
             <TouchableOpacity style={[styles.sendBtn, !newReq.trim() && { opacity: 0.5 }]} onPress={submitRequest} disabled={!newReq.trim()} testID="staff-shop-send">
               <Icon name="ArrowRight" size={16} color="#fff" />
-              <Text style={styles.sendTxt}>Send request</Text>
+              <Text style={styles.sendTxt}>{shopKind === 'reimbursement' ? 'Submit reimbursement' : 'Send request'}</Text>
             </TouchableOpacity>
           </View>
         )}
@@ -458,12 +471,41 @@ export default function StaffHome() {
               <Text style={styles.emptyTxt}>No payments yet.</Text>
             ) : (
               (data.payments || []).map((p: any) => (
-                <View key={p.payment_id} style={styles.row}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.rowName}>{p.period}</Text>
-                    <Text style={styles.rowSub}>{new Date(p.paid_at).toLocaleDateString()}</Text>
+                <View key={p.payment_id} style={[styles.row, { flexDirection: 'column', alignItems: 'stretch' }]}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.rowName}>{p.period}</Text>
+                      <Text style={styles.rowSub}>Paid {new Date(p.paid_at).toLocaleDateString()}</Text>
+                    </View>
+                    <Text style={styles.rowAmt}>{formatMoney(p.net, p.currency)}</Text>
                   </View>
-                  <Text style={styles.rowAmt}>{formatMoney(p.net, p.currency)}</Text>
+                  {p.requires_confirmation && !p.confirmed_at && !isPreview && (
+                    <TouchableOpacity
+                      style={styles.confirmPill}
+                      onPress={async () => {
+                        try {
+                          await api.post(`/household/payroll/${p.payment_id}/confirm`, {});
+                          await load();
+                        } catch (e: any) { Alert.alert('Error', e?.message || ''); }
+                      }}
+                      testID={`confirm-pay-${p.payment_id}`}
+                    >
+                      <Icon name="Check" size={12} color="#fff" />
+                      <Text style={styles.confirmPillTxt}>Confirm I received this</Text>
+                    </TouchableOpacity>
+                  )}
+                  {p.confirmed_at && (
+                    <View style={styles.pendingPill}>
+                      <Icon name="Check" size={12} color={tints.sage.icon} />
+                      <Text style={[styles.pendingPillTxt, { color: tints.sage.icon }]}>Confirmed {new Date(p.confirmed_at).toLocaleDateString()}</Text>
+                    </View>
+                  )}
+                  {p.requires_confirmation && !p.confirmed_at && isPreview && (
+                    <View style={styles.pendingPill}>
+                      <Icon name="X" size={12} color={tints.yellow.icon} />
+                      <Text style={styles.pendingPillTxt}>Awaiting staff confirmation</Text>
+                    </View>
+                  )}
                 </View>
               ))
             )}
@@ -555,7 +597,7 @@ export default function StaffHome() {
                                 <Text style={[styles.rowName, { fontSize: 13 }]}>{it.name}</Text>
                                 <Text style={styles.rowSub}>{[it.quantity && `Qty: ${it.quantity}`, it.location && it.location].filter(Boolean).join(' · ')}</Text>
                               </View>
-                              {it.price ? <Text style={styles.rowAmt}>{formatMoney(it.price, activeSpace.currency || 'USD')}</Text> : null}
+                              {it.price && perms.view_inventory_prices !== false ? <Text style={styles.rowAmt}>{formatMoney(it.price, activeSpace.currency || 'USD')}</Text> : null}
                             </View>
                           ))
                         )}
@@ -660,6 +702,14 @@ const styles = StyleSheet.create({
   ownerNote: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: tints.blue.bg, padding: 8, borderRadius: radius.sm, marginTop: 4 },
   ownerNoteTxt: { flex: 1, fontSize: 12, color: tints.blue.icon, fontWeight: '600' },
   helperSm: { fontSize: 11, color: colors.textMuted, fontStyle: 'italic', textAlign: 'center', marginTop: spacing.sm },
+  kindChip: { flex: 1, paddingHorizontal: 10, paddingVertical: 8, borderRadius: radius.full, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, alignItems: 'center' },
+  kindChipActive: { backgroundColor: colors.textMain, borderColor: colors.textMain },
+  kindTxt: { fontSize: 11, fontWeight: '700', color: colors.textMain },
+  kindTxtActive: { color: '#fff' },
+  confirmPill: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, paddingVertical: 8, borderRadius: radius.full, backgroundColor: tints.sage.icon, alignSelf: 'flex-start', marginTop: 6 },
+  confirmPillTxt: { color: '#fff', fontSize: 11, fontWeight: '800' },
+  pendingPill: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, paddingVertical: 8, borderRadius: radius.full, backgroundColor: tints.yellow.bg, alignSelf: 'flex-start', marginTop: 6 },
+  pendingPillTxt: { color: tints.yellow.icon, fontSize: 11, fontWeight: '800' },
   tabRow: { gap: 8, paddingVertical: 8 },
   tabChip: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 14, paddingVertical: 8, borderRadius: radius.full, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
   tabTxt: { fontSize: 12, fontWeight: '700', color: colors.textMuted },
