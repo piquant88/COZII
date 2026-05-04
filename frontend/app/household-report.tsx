@@ -6,33 +6,66 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useAuth } from '../src/AuthContext';
-import { api } from '../src/api';
+import { api, BASE_URL, tokenStorage } from '../src/api';
 import { colors, radius, spacing, shadows, tints } from '../src/theme';
 import { Icon } from '../src/Icon';
 import { formatMoney } from '../src/currency';
+import { Alert } from 'react-native';
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 async function downloadFile(url: string, fileName: string, token: string | null) {
   try {
-    const FS = await import('expo-file-system');
-    const Sharing = await import('expo-sharing');
+    const FS: any = await import('expo-file-system');
+    const Sharing: any = await import('expo-sharing');
     const { Alert } = await import('react-native');
-    const dest = `${FS.documentDirectory}${fileName}`;
-    const dl = FS.createDownloadResumable(url, dest, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    });
-    const result = await dl.downloadAsync();
-    if (!result?.uri) { Alert.alert('Download failed'); return; }
+    // Use FileSystem.legacy if available (SDK 54+) with proper Auth header
+    const dir = FS.documentDirectory || FS.cacheDirectory || (FS.Paths?.cache?.uri ?? '');
+    const dest = `${dir}${fileName}`;
+    let resultUri: string | null = null;
+    if (FS.createDownloadResumable) {
+      const dl = FS.createDownloadResumable(url, dest, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      const r = await dl.downloadAsync();
+      resultUri = r?.uri || null;
+    } else {
+      // Fallback: fetch and write
+      const res = await fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const reader = new FileReader();
+      const b64 = await new Promise<string>((resolve, reject) => {
+        reader.onerror = () => reject(reader.error);
+        reader.onload = () => resolve((reader.result as string).split(',')[1]);
+        reader.readAsDataURL(blob);
+      });
+      if (FS.writeAsStringAsync) {
+        await FS.writeAsStringAsync(dest, b64, { encoding: FS.EncodingType?.Base64 || 'base64' });
+        resultUri = dest;
+      } else {
+        // Web fallback: trigger browser download
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = fileName;
+        link.click();
+        return;
+      }
+    }
+    if (!resultUri) { Alert.alert('Download failed'); return; }
     const can = await Sharing.isAvailableAsync();
     if (can) {
-      await Sharing.shareAsync(result.uri, { dialogTitle: 'Save report', mimeType: fileName.endsWith('.pdf') ? 'application/pdf' : 'text/csv' });
+      await Sharing.shareAsync(resultUri, {
+        dialogTitle: 'Save report',
+        mimeType: fileName.endsWith('.pdf') ? 'application/pdf' : 'text/csv',
+        UTI: fileName.endsWith('.pdf') ? 'com.adobe.pdf' : 'public.comma-separated-values-text',
+      });
     } else {
-      Alert.alert('Saved', `Report saved to ${result.uri}`);
+      Alert.alert('Saved', `Report saved to ${resultUri}`);
     }
   } catch (e: any) {
     const { Alert } = await import('react-native');
-    Alert.alert('Download failed', e?.message || '');
+    Alert.alert('Download failed', e?.message || 'Try again with a stable network.');
   }
 }
 
