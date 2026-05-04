@@ -54,6 +54,7 @@ export default function ContractViewScreen() {
   const [typedName, setTypedName] = useState('');
   const [drawing, setDrawing] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [assignedStaff, setAssignedStaff] = useState<any>(null);
 
   const load = useCallback(async () => {
     if (!params.id) return;
@@ -63,10 +64,17 @@ export default function ContractViewScreen() {
       setContract(c);
       const r = await api.get<{ rendered_body: string }>(`/contracts/${params.id}/render`);
       setRenderedBody(r.rendered_body || c.body);
+      // If owner, look up the assigned staff (to show invite code if not joined)
+      if (c.assigned_staff_id && activeSpace) {
+        try {
+          const staffList = await api.get<any[]>(`/household/staff?space_id=${activeSpace.space_id}`);
+          setAssignedStaff((staffList || []).find((s) => s.staff_id === c.assigned_staff_id) || null);
+        } catch {}
+      }
     } catch (e: any) {
       Alert.alert('Could not load', e?.message || 'Try again.');
     } finally { setLoading(false); }
-  }, [params.id]);
+  }, [params.id, activeSpace]);
   useEffect(() => { load(); }, [load]);
 
   const isOwner = useMemo(() => spaceRole?.role !== 'staff', [spaceRole]);
@@ -204,6 +212,36 @@ export default function ContractViewScreen() {
           ) : null}
         </View>
 
+        {/* Invite-code callout: owner viewing, staff not yet joined */}
+        {isOwner && assignedStaff && !assignedStaff.user_id && contract.status !== 'void' && (
+          <View style={[styles.inviteBox]}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.inviteTitle}>Staff hasn't joined yet</Text>
+              <Text style={styles.inviteSub}>
+                {contract.assigned_staff_name} needs to register in Cozii and enter this code under "I'm staff" to see and sign this agreement.
+              </Text>
+              <View style={styles.inviteCodeRow}>
+                <Text style={styles.inviteCode}>{assignedStaff.invite_code || '—'}</Text>
+                <TouchableOpacity
+                  onPress={async () => {
+                    try {
+                      const Clipboard = await import('expo-clipboard');
+                      await Clipboard.setStringAsync(assignedStaff.invite_code || '');
+                      Alert.alert('Copied', 'Invite code copied to clipboard.');
+                    } catch {
+                      Alert.alert('Invite code', assignedStaff.invite_code || '—');
+                    }
+                  }}
+                  style={styles.copyBtn}
+                >
+                  <Icon name="Copy" size={14} color={colors.textMain} />
+                  <Text style={styles.copyTxt}>Copy code</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        )}
+
         {/* Body */}
         <View style={styles.bodyCard}>
           <Text style={styles.bodyTxt}>{renderedBody}</Text>
@@ -339,6 +377,24 @@ const styles = StyleSheet.create({
   statusPill: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 4, borderRadius: radius.full },
   statusTxt: { fontSize: 11, fontWeight: '800' },
   assignedTxt: { fontSize: 12, color: colors.textMuted, fontWeight: '700' },
+  inviteBox: {
+    flexDirection: 'row', gap: 10,
+    backgroundColor: tints.peach.bg,
+    padding: spacing.md, borderRadius: radius.md,
+    marginBottom: spacing.md,
+    borderWidth: 1, borderColor: tints.peach.icon,
+  },
+  inviteTitle: { fontSize: 14, fontWeight: '800', color: tints.peach.icon },
+  inviteSub: { fontSize: 12, color: colors.textMain, marginTop: 4, lineHeight: 17 },
+  inviteCodeRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 10 },
+  inviteCode: { fontSize: 22, fontWeight: '900', color: colors.textMain, letterSpacing: 2, fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace' }) as any },
+  copyBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingHorizontal: 10, paddingVertical: 6,
+    backgroundColor: '#fff', borderRadius: radius.full,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  copyTxt: { fontSize: 11, fontWeight: '800', color: colors.textMain },
   bodyCard: {
     backgroundColor: '#FFFEFB',
     borderWidth: 1, borderColor: colors.border,

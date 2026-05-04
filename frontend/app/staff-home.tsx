@@ -49,6 +49,7 @@ export default function StaffHome() {
   const [invItems, setInvItems] = useState<any[]>([]);
   const [openCat, setOpenCat] = useState<string | null>(null);
   const [finReport, setFinReport] = useState<any>(null);
+  const [pendingContracts, setPendingContracts] = useState<any[]>([]);
 
   const load = useCallback(async () => {
     if (!activeSpace) return;
@@ -57,13 +58,18 @@ export default function StaffHome() {
         const d = await api.get<any>(`/household/staff/${previewStaffId}/view`);
         setData(d);
         setNotifs([]);
+        setPendingContracts([]);
       } else {
-        const [d, n] = await Promise.all([
+        const [d, n, cs] = await Promise.all([
           api.get<any>(`/household/staff/me?space_id=${activeSpace.space_id}`),
           api.get<any[]>(`/notifications?space_id=${activeSpace.space_id}`).catch(() => []),
+          api.get<any[]>(`/contracts?space_id=${activeSpace.space_id}`).catch(() => []),
         ]);
         setData(d);
         setNotifs(n || []);
+        // Pending = assigned to me and I haven't signed yet and not void
+        const mine = (cs || []).filter((c: any) => c.status !== 'void' && !c.staff_signature && c.require_staff_signature !== false);
+        setPendingContracts(mine);
       }
     } catch (e: any) {
       if (e?.status === 404) {
@@ -218,6 +224,9 @@ export default function StaffHome() {
           </View>
           <TouchableOpacity onPress={() => router.push('/contracts')} style={styles.iconBtn} testID="staff-contracts-btn" disabled={isPreview}>
             <Icon name="FileText" size={18} color={isPreview ? colors.textMuted : colors.textMain} />
+            {!isPreview && pendingContracts.length > 0 && (
+              <View style={styles.notifDot}><Text style={styles.notifDotTxt}>{pendingContracts.length}</Text></View>
+            )}
           </TouchableOpacity>
           <TouchableOpacity onPress={() => setShowNotifs((v) => !v)} style={styles.iconBtn} testID="staff-notifs-btn" disabled={isPreview}>
             <Icon name="Heart" size={18} color={isPreview ? colors.textMuted : colors.textMain} />
@@ -298,6 +307,25 @@ export default function StaffHome() {
 
         {tab === 'today' && (
           <View style={{ gap: 8 }}>
+            {/* Pending agreements callout */}
+            {pendingContracts.length > 0 && !isPreview && (
+              <TouchableOpacity
+                style={[styles.hero, { backgroundColor: tints.peach.bg }]}
+                onPress={() => router.push({ pathname: '/contract-view', params: { id: pendingContracts[0].contract_id } })}
+                testID="staff-pending-contracts"
+              >
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.heroLabel, { color: tints.peach.icon }]}>Action needed</Text>
+                  <Text style={styles.heroAmt}>
+                    {pendingContracts.length} agreement{pendingContracts.length === 1 ? '' : 's'} to sign
+                  </Text>
+                  <Text style={styles.heroSub} numberOfLines={1}>
+                    "{pendingContracts[0].title}"{pendingContracts.length > 1 ? ` +${pendingContracts.length - 1} more` : ''}
+                  </Text>
+                </View>
+                <Icon name="Pen" size={32} color={tints.peach.icon} />
+              </TouchableOpacity>
+            )}
             <View style={[styles.hero, { backgroundColor: tints.mint.bg }]}>
               <View>
                 <Text style={styles.heroLabel}>Today</Text>

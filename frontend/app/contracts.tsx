@@ -121,6 +121,8 @@ export default function ContractsScreen() {
             const sm = STATUS_META[c.status] || STATUS_META.pending;
             const ownerSigned = !!c.owner_signature;
             const staffSigned = !!c.staff_signature;
+            const assignedStaff = c.assigned_staff_id ? staffList.find((s) => s.staff_id === c.assigned_staff_id) : null;
+            const staffNotJoined = isOwner && assignedStaff && !assignedStaff.user_id && c.status !== 'void';
             return (
               <TouchableOpacity
                 key={c.contract_id}
@@ -135,7 +137,7 @@ export default function ContractsScreen() {
                   <Text style={styles.rowName} numberOfLines={1}>{c.title}</Text>
                   <Text style={styles.rowSub}>
                     {meta.label}
-                    {c.assigned_staff_name ? ` · ${c.assigned_staff_name}` : ''}
+                    {c.assigned_staff_name ? ` · ${c.assigned_staff_name}` : ' · Not assigned'}
                     {' · '}
                     {new Date(c.created_at).toLocaleDateString()}
                   </Text>
@@ -143,6 +145,11 @@ export default function ContractsScreen() {
                     <View style={[styles.miniBadge, { backgroundColor: tints[sm.tint].bg }]}>
                       <Text style={[styles.miniTxt, { color: tints[sm.tint].icon }]}>{sm.label}</Text>
                     </View>
+                    {staffNotJoined && (
+                      <View style={[styles.miniBadge, { backgroundColor: tints.peach.bg }]}>
+                        <Text style={[styles.miniTxt, { color: tints.peach.icon }]}>Staff hasn't joined yet · share invite code</Text>
+                      </View>
+                    )}
                     {c.status !== 'void' && (
                       <View style={[styles.miniBadge, { backgroundColor: ownerSigned ? tints.sage.bg : tints.yellow.bg }]}>
                         <Text style={[styles.miniTxt, { color: ownerSigned ? tints.sage.icon : tints.yellow.icon }]}>

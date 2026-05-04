@@ -2334,3 +2334,85 @@ agent_communication:
 
           Records and shows IP + user-agent + timestamp on each signature
           card. Owner can void/delete from header.
+
+
+## 2026-06-XX — Phase 7: Retroactive contract notification on staff join
+
+backend:
+  - task: "Retroactive contract notification on staff join"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Updated POST /api/household/staff/join (~lines 2188-2222) to backfill
+          contract_assigned notifications. After linking the staff record's
+          user_id and adding the user to space.member_ids, the handler queries
+          db.contracts for any non-void, unsigned contract assigned to the
+          staff_id, and inserts a contract_assigned notification per pending
+          contract. Idempotent: skips if a notification with same kind +
+          data.contract_id already exists for the user.
+      - working: true
+        agent: "testing"
+        comment: |
+          Verified end-to-end via /app/backend_test_retro_contract.py against the
+          preview URL — 21/21 assertions PASS.
+          Flow:
+            1. Registered owner A (owner_retro_<ts>@cozii.app), created household
+               space (currency=USD).
+            2. Created staff "RetroStaff" (salary=1,000,000 monthly) — captured
+               staff_id and 6-char invite_code; verified user_id is null.
+            3. As A, POST /api/contracts {template_kind:"confidentiality",
+               assigned_staff_id, title:"Retro test NDA", body, ...} → 200,
+               returned contract_id. Because staff.user_id was null, no
+               notification was created at this point (verified via a 3rd
+               throwaway user account: their notifications are empty).
+            4. Registered staff user B (staff_retro_<ts>@cozii.app); confirmed
+               B has no contract_assigned notifications BEFORE joining.
+            5. POST /api/household/staff/join {invite_code} as B → 200
+               {ok:true, space_id, staff_id} (matches owner-side values).
+            6. GET /api/notifications?space_id=...&unread_only=true as B →
+               returned exactly one contract_assigned notification with:
+                 - data.contract_id == retro contract id
+                 - title == "Please review & sign: Retro test NDA"
+                 - read == false
+            7. Idempotency: second POST /api/household/staff/join with the same
+               invite_code as B → 200. GET /notifications (full list) → still
+               exactly 1 contract_assigned for that contract_id (no duplicate
+               created — find_one({user_id, kind, data.contract_id}) check
+               works as designed).
+            8. Created a SECOND contract assigned to the same now-linked staff:
+               POST /api/contracts {template_kind:"nda", title:"Post-join
+               contract", ...}. As B, GET /notifications returned BOTH
+               contract_assigned entries (retro NDA + post-join NDA),
+               confirming the existing immediate-create flow still works.
+            9. Voided-contract exclusion: created a 2nd unlinked staff
+               (RetroStaff2) → created a contract assigned to it →
+               POST /api/contracts/{id}/void (status="void"). Registered staff
+               user C and joined via the 2nd invite_code → GET /notifications
+               for C contains NO entry for the voided contract.
+          All scenarios match the spec. Production-ready.
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Retroactive contract notification on staff join — fully verified against
+      the preview URL via /app/backend_test_retro_contract.py (21/21 PASS).
+
+      ✅ Pending contract assigned BEFORE staff joins → backfilled
+         contract_assigned notification on join (title contains contract title,
+         data.contract_id matches, read=false).
+      ✅ Idempotent: re-join with same invite_code does NOT create duplicate
+         notification.
+      ✅ Existing immediate notification flow on /api/contracts still creates
+         the post-join notification, so B sees both retro + post-join entries.
+      ✅ Voided contracts are excluded from the backfill (status:{$ne:"void"}
+         filter behaves correctly): a freshly-joined user does not receive a
+         contract_assigned for a contract that was voided before their join.
+
+      No bugs found. No frontend testing performed (per protocol).

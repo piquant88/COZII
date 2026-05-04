@@ -2189,6 +2189,37 @@ async def join_staff(body: JoinStaffRequest, user: User = Depends(get_current_us
     space = await db.family_spaces.find_one({"space_id": s["space_id"]}, {"_id": 0})
     if space and user.user_id not in (space.get("member_ids") or []):
         await db.family_spaces.update_one({"space_id": s["space_id"]}, {"$addToSet": {"member_ids": user.user_id}})
+    # Retro-notify: send notifications for any pending contracts that were assigned
+    # to this staff record BEFORE the user joined. Idempotent — only creates
+    # notifications that don't already exist.
+    try:
+        pending = await db.contracts.find({
+            "space_id": s["space_id"],
+            "assigned_staff_id": s["staff_id"],
+            "status": {"$ne": "void"},
+            "staff_signature": None,
+        }, {"_id": 0}).to_list(100)
+        for c in pending:
+            exists = await db.notifications.find_one({
+                "user_id": user.user_id,
+                "kind": "contract_assigned",
+                "data.contract_id": c["contract_id"],
+            })
+            if exists:
+                continue
+            await db.notifications.insert_one({
+                "notification_id": gen_id("ntf"),
+                "user_id": user.user_id,
+                "space_id": s["space_id"],
+                "kind": "contract_assigned",
+                "title": f"Please review & sign: {c.get('title')}",
+                "body": f"An agreement ({c.get('template_kind')}) is waiting for your signature.",
+                "data": {"contract_id": c["contract_id"]},
+                "read": False,
+                "created_at": now_utc(),
+            })
+    except Exception as e:
+        logger.warning(f"Could not backfill contract notifications on staff join: {e}")
     return {"ok": True, "space_id": s["space_id"], "staff_id": s["staff_id"]}
 
 

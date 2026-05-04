@@ -59,8 +59,13 @@ export default function ContractNewScreen() {
       ]);
       setTemplates(tpls || []);
       setStaffList(staff || []);
+      // Auto-pick first active staff by default so the contract is assigned right away.
+      if (!staffId && (staff || []).length > 0) {
+        const firstActive = (staff || []).find((s: any) => s.active !== false) || staff![0];
+        if (firstActive) setStaffId(firstActive.staff_id);
+      }
     } catch (e) { console.warn(e); }
-  }, [activeSpace]);
+  }, [activeSpace, staffId]);
   useEffect(() => { load(); }, [load]);
 
   // Pre-fill default variables from the active context (household name, currency, today's date)
