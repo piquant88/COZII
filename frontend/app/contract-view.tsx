@@ -1,0 +1,372 @@
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import {
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput,
+  ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Image, Modal,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { useRouter, useLocalSearchParams } from 'expo-router';
+import { useAuth } from '../src/AuthContext';
+import { api } from '../src/api';
+import { colors, radius, spacing, shadows, tints } from '../src/theme';
+import { Icon } from '../src/Icon';
+import { SignaturePad } from '../src/SignaturePad';
+
+type Sig = {
+  role: 'owner' | 'staff';
+  user_id: string;
+  name?: string | null;
+  typed_name?: string | null;
+  drawing_base64?: string | null;
+  signed_at: string;
+  ip?: string | null;
+  user_agent?: string | null;
+};
+
+type Contract = {
+  contract_id: string;
+  space_id: string;
+  template_kind: string;
+  title: string;
+  body: string;
+  variables: Record<string, any>;
+  assigned_staff_id?: string | null;
+  assigned_staff_name?: string | null;
+  require_owner_signature: boolean;
+  require_staff_signature: boolean;
+  require_drawn_signature_owner: boolean;
+  require_drawn_signature_staff: boolean;
+  status: 'pending' | 'signed' | 'void';
+  owner_signature: Sig | null;
+  staff_signature: Sig | null;
+  created_by: string;
+  created_by_name?: string | null;
+  created_at: string;
+};
+
+export default function ContractViewScreen() {
+  const router = useRouter();
+  const params = useLocalSearchParams<{ id: string }>();
+  const { activeSpace, user, spaceRole } = useAuth();
+  const [contract, setContract] = useState<Contract | null>(null);
+  const [renderedBody, setRenderedBody] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [signOpen, setSignOpen] = useState(false);
+  const [typedName, setTypedName] = useState('');
+  const [drawing, setDrawing] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!params.id) return;
+    setLoading(true);
+    try {
+      const c = await api.get<Contract>(`/contracts/${params.id}`);
+      setContract(c);
+      const r = await api.get<{ rendered_body: string }>(`/contracts/${params.id}/render`);
+      setRenderedBody(r.rendered_body || c.body);
+    } catch (e: any) {
+      Alert.alert('Could not load', e?.message || 'Try again.');
+    } finally { setLoading(false); }
+  }, [params.id]);
+  useEffect(() => { load(); }, [load]);
+
+  const isOwner = useMemo(() => spaceRole?.role !== 'staff', [spaceRole]);
+
+  const myRole: 'owner' | 'staff' | null = useMemo(() => {
+    if (!contract) return null;
+    if (isOwner) return 'owner';
+    return 'staff';
+  }, [contract, isOwner]);
+
+  const mySignature: Sig | null = useMemo(() => {
+    if (!contract || !myRole) return null;
+    return myRole === 'owner' ? contract.owner_signature : contract.staff_signature;
+  }, [contract, myRole]);
+
+  const otherSignature: Sig | null = useMemo(() => {
+    if (!contract || !myRole) return null;
+    return myRole === 'owner' ? contract.staff_signature : contract.owner_signature;
+  }, [contract, myRole]);
+
+  const requireDrawnForMe = useMemo(() => {
+    if (!contract || !myRole) return false;
+    return myRole === 'owner' ? contract.require_drawn_signature_owner : contract.require_drawn_signature_staff;
+  }, [contract, myRole]);
+
+  const myTurnToSign = useMemo(() => {
+    if (!contract || !myRole) return false;
+    if (contract.status === 'void') return false;
+    if (myRole === 'owner' && contract.require_owner_signature && !contract.owner_signature) return true;
+    if (myRole === 'staff' && contract.require_staff_signature && !contract.staff_signature) return true;
+    return false;
+  }, [contract, myRole]);
+
+  const submitSign = async () => {
+    if (!contract) return;
+    if (requireDrawnForMe && !drawing) {
+      Alert.alert('Draw your signature', 'This contract requires a hand-drawn signature.');
+      return;
+    }
+    if (!drawing && !typedName.trim()) {
+      Alert.alert('Sign first', 'Type your name or draw your signature.');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const updated = await api.post<Contract>(`/contracts/${contract.contract_id}/sign`, {
+        typed_name: typedName.trim() || null,
+        drawing_base64: drawing || null,
+      });
+      setContract(updated);
+      setSignOpen(false);
+      setTypedName('');
+      setDrawing(null);
+      Alert.alert('Signed', 'Your signature has been recorded.');
+    } catch (e: any) {
+      Alert.alert('Could not sign', e?.message || 'Try again.');
+    } finally { setSubmitting(false); }
+  };
+
+  const voidIt = () => {
+    if (!contract) return;
+    Alert.alert('Void this contract?', 'This will mark the agreement as void. It cannot be signed any more.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Void it', style: 'destructive', onPress: async () => {
+        try {
+          const updated = await api.post<Contract>(`/contracts/${contract.contract_id}/void`, {});
+          setContract(updated);
+        } catch (e: any) { Alert.alert('Error', e?.message || ''); }
+      }},
+    ]);
+  };
+
+  const deleteIt = () => {
+    if (!contract) return;
+    Alert.alert('Delete contract?', 'Permanently remove this draft.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Delete', style: 'destructive', onPress: async () => {
+        try {
+          await api.delete(`/contracts/${contract.contract_id}`);
+          router.back();
+        } catch (e: any) { Alert.alert('Error', e?.message || ''); }
+      }},
+    ]);
+  };
+
+  if (loading || !contract) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <ActivityIndicator color={colors.primary} style={{ marginTop: 80 }} />
+      </SafeAreaView>
+    );
+  }
+
+  return (
+    <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
+      <View style={styles.header}>
+        <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
+          <Icon name="ChevronRight" size={18} color={colors.textMain} />
+        </TouchableOpacity>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.kicker}>{contract.template_kind.toUpperCase()}</Text>
+          <Text style={styles.title} numberOfLines={1}>{contract.title}</Text>
+        </View>
+        {isOwner && contract.status !== 'void' && (
+          <TouchableOpacity onPress={voidIt} style={styles.iconBtn} testID="contract-void">
+            <Icon name="X" size={16} color={colors.dangerText} />
+          </TouchableOpacity>
+        )}
+        {isOwner && (
+          <TouchableOpacity onPress={deleteIt} style={styles.iconBtn} testID="contract-delete">
+            <Icon name="Trash2" size={16} color={colors.dangerText} />
+          </TouchableOpacity>
+        )}
+      </View>
+
+      <ScrollView contentContainerStyle={styles.scroll}>
+        {/* Status pill */}
+        <View style={styles.statusRow}>
+          <View style={[styles.statusPill, {
+            backgroundColor: contract.status === 'signed' ? tints.sage.bg : contract.status === 'void' ? tints.pink.bg : tints.yellow.bg,
+          }]}>
+            <Icon
+              name={contract.status === 'signed' ? 'CheckCircle2' : contract.status === 'void' ? 'X' : 'Clock'}
+              size={14}
+              color={contract.status === 'signed' ? tints.sage.icon : contract.status === 'void' ? tints.pink.icon : tints.yellow.icon}
+            />
+            <Text style={[styles.statusTxt, {
+              color: contract.status === 'signed' ? tints.sage.icon : contract.status === 'void' ? tints.pink.icon : tints.yellow.icon,
+            }]}>
+              {contract.status === 'signed' ? 'Fully signed' : contract.status === 'void' ? 'Voided' : 'Pending signatures'}
+            </Text>
+          </View>
+          {contract.assigned_staff_name ? (
+            <Text style={styles.assignedTxt}>For {contract.assigned_staff_name}</Text>
+          ) : null}
+        </View>
+
+        {/* Body */}
+        <View style={styles.bodyCard}>
+          <Text style={styles.bodyTxt}>{renderedBody}</Text>
+        </View>
+
+        {/* Signatures section */}
+        <Text style={styles.sectionLabel}>Signatures</Text>
+        <SignatureCard sig={contract.owner_signature} who="Owner" required={contract.require_owner_signature} />
+        <SignatureCard sig={contract.staff_signature} who={contract.assigned_staff_name ? `Staff · ${contract.assigned_staff_name}` : 'Staff'} required={contract.require_staff_signature} />
+
+        {/* Sign action */}
+        {myTurnToSign && (
+          <TouchableOpacity style={styles.signBtn} onPress={() => setSignOpen(true)} testID="contract-open-sign">
+            <Icon name="Pen" size={16} color="#fff" />
+            <Text style={styles.signTxt}>Agree & Sign</Text>
+          </TouchableOpacity>
+        )}
+        {!myTurnToSign && contract.status === 'pending' && otherSignature == null && mySignature && (
+          <Text style={styles.helpTxt}>Waiting for the other party to sign.</Text>
+        )}
+        {!myTurnToSign && contract.status === 'pending' && !mySignature && !myRole && (
+          <Text style={styles.helpTxt}>You are not a signing party for this contract.</Text>
+        )}
+
+        <View style={{ height: 60 }} />
+      </ScrollView>
+
+      {/* Sign Modal */}
+      <Modal visible={signOpen} animationType="slide" transparent onRequestClose={() => setSignOpen(false)}>
+        <View style={styles.modalBg}>
+          <SafeAreaView style={styles.modalSheet} edges={['bottom']}>
+            <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>Sign as {myRole === 'owner' ? 'Owner' : 'Staff'}</Text>
+                <TouchableOpacity onPress={() => setSignOpen(false)} style={styles.iconBtn}>
+                  <Icon name="X" size={18} color={colors.textMain} />
+                </TouchableOpacity>
+              </View>
+              <ScrollView contentContainerStyle={{ padding: spacing.md, gap: 10 }} keyboardShouldPersistTaps="handled">
+                <Text style={styles.helpTxt}>
+                  By signing below, you confirm you have read and agree to the terms of "{contract.title}".
+                  Your signature, IP address, device info and timestamp will be recorded.
+                </Text>
+
+                <Text style={styles.label}>Type your full name {requireDrawnForMe ? '(optional)' : ''}</Text>
+                <TextInput
+                  style={styles.input}
+                  value={typedName}
+                  onChangeText={setTypedName}
+                  placeholder={user?.name || 'Your full name'}
+                  placeholderTextColor={colors.textMuted}
+                  autoCapitalize="words"
+                />
+
+                <Text style={styles.label}>Hand-drawn signature {requireDrawnForMe ? '(required)' : '(optional)'}</Text>
+                <SignaturePad onChange={setDrawing} testID="sigpad" />
+
+                <TouchableOpacity
+                  style={[styles.signBtn, (submitting || (requireDrawnForMe && !drawing) || (!drawing && !typedName.trim())) && { opacity: 0.5 }]}
+                  onPress={submitSign}
+                  disabled={submitting || (requireDrawnForMe && !drawing) || (!drawing && !typedName.trim())}
+                  testID="sign-submit"
+                >
+                  {submitting ? <ActivityIndicator color="#fff" /> : (
+                    <>
+                      <Icon name="CheckCircle2" size={16} color="#fff" />
+                      <Text style={styles.signTxt}>Agree & Sign</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </ScrollView>
+            </KeyboardAvoidingView>
+          </SafeAreaView>
+        </View>
+      </Modal>
+    </SafeAreaView>
+  );
+}
+
+function SignatureCard({ sig, who, required }: { sig: Sig | null; who: string; required: boolean }) {
+  if (!sig) {
+    return (
+      <View style={[styles.sigCard, { borderStyle: 'dashed', borderWidth: 1, borderColor: colors.border, backgroundColor: 'transparent' }]}>
+        <View style={styles.sigCardHead}>
+          <Icon name="Clock" size={14} color={colors.textMuted} />
+          <Text style={styles.sigWho}>{who}</Text>
+          <View style={[styles.statusPill, { backgroundColor: required ? tints.yellow.bg : tints.lavender.bg, paddingVertical: 2 }]}>
+            <Text style={[styles.statusTxt, { color: required ? tints.yellow.icon : tints.lavender.icon }]}>
+              {required ? 'Pending' : 'Optional · not required'}
+            </Text>
+          </View>
+        </View>
+      </View>
+    );
+  }
+  return (
+    <View style={styles.sigCard}>
+      <View style={styles.sigCardHead}>
+        <Icon name="CheckCircle2" size={14} color={tints.sage.icon} />
+        <Text style={styles.sigWho}>{who}</Text>
+        <View style={[styles.statusPill, { backgroundColor: tints.sage.bg, paddingVertical: 2 }]}>
+          <Text style={[styles.statusTxt, { color: tints.sage.icon }]}>Signed</Text>
+        </View>
+      </View>
+      {sig.drawing_base64 ? (
+        <View style={styles.drawingWrap}>
+          <Image source={{ uri: sig.drawing_base64 }} style={styles.drawing} resizeMode="contain" />
+        </View>
+      ) : null}
+      {sig.typed_name ? <Text style={styles.typedName}>{sig.typed_name}</Text> : null}
+      <Text style={styles.sigMeta}>
+        Signed by <Text style={{ fontWeight: '700' }}>{sig.name || sig.typed_name || '—'}</Text>
+        {' · '}{new Date(sig.signed_at).toLocaleString()}
+      </Text>
+      {(sig.ip || sig.user_agent) && (
+        <Text style={styles.sigMetaSmall}>
+          {sig.ip ? `IP: ${sig.ip}` : ''}{sig.ip && sig.user_agent ? ' · ' : ''}{sig.user_agent ? `Device: ${(sig.user_agent || '').slice(0, 80)}` : ''}
+        </Text>
+      )}
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: colors.background },
+  header: { flexDirection: 'row', alignItems: 'center', gap: 8, padding: spacing.md },
+  backBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: colors.surface, alignItems: 'center', justifyContent: 'center', transform: [{ rotate: '180deg' }], ...shadows.card },
+  iconBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.surface, alignItems: 'center', justifyContent: 'center', ...shadows.card },
+  kicker: { fontSize: 11, color: colors.textMuted, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5 },
+  title: { fontSize: 22, fontWeight: '900', color: colors.textMain, letterSpacing: -0.5 },
+  scroll: { padding: spacing.md, paddingTop: 0 },
+  statusRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: spacing.md },
+  statusPill: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 4, borderRadius: radius.full },
+  statusTxt: { fontSize: 11, fontWeight: '800' },
+  assignedTxt: { fontSize: 12, color: colors.textMuted, fontWeight: '700' },
+  bodyCard: {
+    backgroundColor: '#FFFEFB',
+    borderWidth: 1, borderColor: colors.border,
+    borderRadius: radius.md, padding: spacing.md,
+    marginBottom: spacing.md,
+  },
+  bodyTxt: { fontSize: 13, color: colors.textMain, lineHeight: 21 },
+  sectionLabel: { fontSize: 12, fontWeight: '800', color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: spacing.sm, marginTop: spacing.sm },
+  sigCard: { backgroundColor: colors.surface, padding: spacing.md, borderRadius: radius.md, marginBottom: 8, ...shadows.card },
+  sigCardHead: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 },
+  sigWho: { flex: 1, fontSize: 13, fontWeight: '800', color: colors.textMain },
+  drawingWrap: { backgroundColor: '#FFFEFB', borderRadius: radius.sm, marginVertical: 6, height: 100, overflow: 'hidden' },
+  drawing: { width: '100%', height: '100%' },
+  typedName: { fontSize: 18, fontStyle: 'italic', fontWeight: '700', color: colors.textMain, marginVertical: 4 },
+  sigMeta: { fontSize: 11, color: colors.textMuted, marginTop: 4 },
+  sigMetaSmall: { fontSize: 10, color: colors.textMuted, marginTop: 2, fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace' }) as any },
+  signBtn: {
+    flexDirection: 'row', gap: 8, marginTop: spacing.md,
+    backgroundColor: colors.primary, padding: 14, borderRadius: radius.full,
+    alignItems: 'center', justifyContent: 'center',
+    ...shadows.button,
+  },
+  signTxt: { color: '#fff', fontWeight: '800', fontSize: 14 },
+  helpTxt: { fontSize: 12, color: colors.textMuted, marginTop: spacing.sm, textAlign: 'center', lineHeight: 17 },
+  modalBg: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
+  modalSheet: { backgroundColor: colors.background, borderTopLeftRadius: 24, borderTopRightRadius: 24, maxHeight: '92%' },
+  modalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: spacing.md, borderBottomWidth: 1, borderBottomColor: colors.border },
+  modalTitle: { fontSize: 18, fontWeight: '800', color: colors.textMain },
+  label: { fontSize: 12, fontWeight: '800', color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 },
+  input: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, padding: 12, fontSize: 14, color: colors.textMain },
+});

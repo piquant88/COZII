@@ -3798,6 +3798,474 @@ async def root():
     return {"message": "Cozii API running"}
 
 
+# =========================
+# Contract Templates + e-Sign
+# =========================
+def _client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for") or request.headers.get("X-Forwarded-For")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    real = request.headers.get("x-real-ip") or request.headers.get("X-Real-IP")
+    if real:
+        return real.strip()
+    try:
+        return request.client.host if request.client else "unknown"
+    except Exception:
+        return "unknown"
+
+
+CONTRACT_TEMPLATES: List[Dict[str, Any]] = [
+    {
+        "kind": "nda",
+        "title": "Non-Disclosure Agreement",
+        "icon": "Shield",
+        "summary": "Keeps household information, photos, schedules and family details strictly confidential.",
+        "default_variables": {
+            "household_name": "{{household_name}}",
+            "staff_name": "{{staff_name}}",
+            "start_date": "{{start_date}}",
+            "city": "{{city}}",
+        },
+        "body": (
+            "NON-DISCLOSURE AGREEMENT\n\n"
+            "This Non-Disclosure Agreement (\"Agreement\") is entered into on {{start_date}} by and between "
+            "{{household_name}} (the \"Household\") and {{staff_name}} (the \"Employee\"), residing in {{city}}.\n\n"
+            "1. CONFIDENTIAL INFORMATION\n"
+            "The Employee agrees to keep strictly confidential all information about the Household, its "
+            "members, children, schedules, finances, addresses, security arrangements, photos, videos, "
+            "guests, medical or personal matters that may come to the Employee's knowledge during their "
+            "employment.\n\n"
+            "2. NO DISCLOSURE\n"
+            "The Employee shall not share, post, publish, forward or discuss any such information with any "
+            "third party — including on social media — during or after employment.\n\n"
+            "3. RETURN OF MATERIALS\n"
+            "Upon end of employment the Employee shall return all keys, devices, documents and copies of "
+            "any household-related materials.\n\n"
+            "4. DURATION\n"
+            "This obligation of confidentiality shall continue in force indefinitely after the end of "
+            "employment.\n\n"
+            "5. ACKNOWLEDGEMENT\n"
+            "By signing below, the Employee acknowledges they have read, understood and accepted these "
+            "terms freely and without coercion."
+        ),
+    },
+    {
+        "kind": "employment",
+        "title": "Employment Agreement",
+        "icon": "FileText",
+        "summary": "Standard household employment terms — wages, hours, days off, probation.",
+        "default_variables": {
+            "household_name": "{{household_name}}",
+            "staff_name": "{{staff_name}}",
+            "role": "{{role}}",
+            "start_date": "{{start_date}}",
+            "monthly_wage": "{{monthly_wage}}",
+            "currency": "{{currency}}",
+            "pay_cycle": "monthly",
+            "off_day": "{{off_day}}",
+            "working_hours": "{{working_hours}}",
+            "probation_months": "1",
+            "city": "{{city}}",
+        },
+        "body": (
+            "HOUSEHOLD EMPLOYMENT AGREEMENT\n\n"
+            "Made on {{start_date}} between {{household_name}} (the \"Employer\") and {{staff_name}} "
+            "(the \"Employee\") for the position of {{role}} at the Employer's residence in {{city}}.\n\n"
+            "1. POSITION AND DUTIES\n"
+            "The Employee is engaged as {{role}} and will perform the duties reasonably assigned by the "
+            "Employer, with diligence, care, honesty and respect.\n\n"
+            "2. START DATE & PROBATION\n"
+            "Employment begins on {{start_date}}. The first {{probation_months}} month(s) shall be a "
+            "probation period during which either party may end employment with 7 days' written notice.\n\n"
+            "3. WORKING HOURS & DAYS OFF\n"
+            "Working hours: {{working_hours}}. Weekly day off: {{off_day}}. Public holidays as agreed "
+            "verbally between Employer and Employee.\n\n"
+            "4. WAGES\n"
+            "The Employee shall be paid {{monthly_wage}} {{currency}} per {{pay_cycle}}, payable on or "
+            "around the same date each cycle. Wages will be recorded inside the Cozii household app and the "
+            "Employee will receive a digital receipt for each payment.\n\n"
+            "5. CONDUCT\n"
+            "The Employee shall behave respectfully toward all members of the Household, keep their work "
+            "area clean, and report any breakage, accident or concern promptly.\n\n"
+            "6. CONFIDENTIALITY\n"
+            "The Employee shall keep all household information strictly private (see Non-Disclosure "
+            "Agreement, if signed separately).\n\n"
+            "7. END OF EMPLOYMENT\n"
+            "After probation, either side may end employment with 30 days' written notice, or immediately "
+            "in case of serious misconduct, dishonesty or breach of confidentiality.\n\n"
+            "8. ACKNOWLEDGEMENT\n"
+            "Both parties confirm by signing below that they have read, understood and freely accept these "
+            "terms."
+        ),
+    },
+    {
+        "kind": "confidentiality",
+        "title": "Confidentiality & Privacy Pledge",
+        "icon": "Lock",
+        "summary": "Lighter pledge focused on family privacy, photos, social media and guests.",
+        "default_variables": {
+            "household_name": "{{household_name}}",
+            "staff_name": "{{staff_name}}",
+            "start_date": "{{start_date}}",
+        },
+        "body": (
+            "CONFIDENTIALITY & PRIVACY PLEDGE\n\n"
+            "I, {{staff_name}}, joining the {{household_name}} household on {{start_date}}, pledge:\n\n"
+            "• I will not take, share, post or forward any photos or videos of any member of the household, "
+            "their children, their guests, the home interior, or any documents — on any platform — at any "
+            "time.\n\n"
+            "• I will not discuss the family's whereabouts, travel plans, schedule, finances, medical "
+            "matters or personal life with anyone outside the household.\n\n"
+            "• I will treat all keys, alarm codes, passwords and access cards as private property of the "
+            "household and never share them.\n\n"
+            "• I understand that breaking this pledge is grounds for immediate dismissal and may result in "
+            "legal action.\n\n"
+            "I sign below freely, having read and understood this pledge."
+        ),
+    },
+    {
+        "kind": "blank",
+        "title": "Blank Custom Agreement",
+        "icon": "Edit3",
+        "summary": "Start from scratch — write your own custom terms.",
+        "default_variables": {},
+        "body": "",
+    },
+]
+
+
+class ContractSignature(BaseModel):
+    role: str  # "owner" | "staff"
+    user_id: str
+    name: Optional[str] = None
+    typed_name: Optional[str] = None
+    drawing_base64: Optional[str] = None  # PNG/SVG base64 dataURL
+    signed_at: datetime
+    ip: Optional[str] = None
+    user_agent: Optional[str] = None
+
+
+class Contract(BaseModel):
+    contract_id: str
+    space_id: str
+    template_kind: str  # nda | employment | confidentiality | blank | custom
+    title: str
+    body: str
+    variables: Dict[str, Any] = Field(default_factory=dict)
+    assigned_staff_id: Optional[str] = None
+    assigned_staff_name: Optional[str] = None
+    require_owner_signature: bool = True
+    require_staff_signature: bool = True
+    require_drawn_signature_owner: bool = False
+    require_drawn_signature_staff: bool = False
+    status: str = "pending"  # pending | signed | void
+    owner_signature: Optional[ContractSignature] = None
+    staff_signature: Optional[ContractSignature] = None
+    created_by: str
+    created_by_name: Optional[str] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+
+class CreateContractRequest(BaseModel):
+    space_id: str
+    template_kind: str = "blank"
+    title: str
+    body: str
+    variables: Dict[str, Any] = {}
+    assigned_staff_id: Optional[str] = None
+    require_owner_signature: bool = True
+    require_staff_signature: bool = True
+    require_drawn_signature_owner: bool = False
+    require_drawn_signature_staff: bool = False
+
+
+class UpdateContractRequest(BaseModel):
+    title: Optional[str] = None
+    body: Optional[str] = None
+    variables: Optional[Dict[str, Any]] = None
+    assigned_staff_id: Optional[str] = None
+    require_owner_signature: Optional[bool] = None
+    require_staff_signature: Optional[bool] = None
+    require_drawn_signature_owner: Optional[bool] = None
+    require_drawn_signature_staff: Optional[bool] = None
+
+
+class SignContractRequest(BaseModel):
+    typed_name: Optional[str] = None
+    drawing_base64: Optional[str] = None
+
+
+def _render_contract_body(body: str, variables: Dict[str, Any]) -> str:
+    """Replace {{key}} with values from `variables`. Missing keys stay as-is."""
+    if not body:
+        return body
+    out = body
+    for k, v in (variables or {}).items():
+        try:
+            out = out.replace("{{" + str(k) + "}}", str(v) if v is not None else "")
+        except Exception:
+            continue
+    return out
+
+
+@api_router.get("/contract-templates")
+async def list_contract_templates(user: User = Depends(get_current_user)):
+    return CONTRACT_TEMPLATES
+
+
+@api_router.get("/contracts", response_model=List[Contract])
+async def list_contracts(space_id: str, staff_id: Optional[str] = None, status: Optional[str] = None, user: User = Depends(get_current_user)):
+    space = await assert_space_member(space_id, user.user_id)
+    is_owner = space.get("owner_id") == user.user_id
+    q: Dict[str, Any] = {"space_id": space_id}
+    if staff_id:
+        q["assigned_staff_id"] = staff_id
+    if status:
+        q["status"] = status
+    if not is_owner:
+        # Staff: only see contracts assigned to them
+        my_staff = await db.staff_members.find_one({"space_id": space_id, "user_id": user.user_id}, {"_id": 0})
+        if not my_staff:
+            return []
+        q["assigned_staff_id"] = my_staff["staff_id"]
+    docs = await db.contracts.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return [Contract(**d) for d in docs]
+
+
+@api_router.post("/contracts", response_model=Contract)
+async def create_contract(body: CreateContractRequest, user: User = Depends(get_current_user)):
+    space = await assert_space_member(body.space_id, user.user_id)
+    if space.get("owner_id") != user.user_id:
+        raise HTTPException(403, "Only the space owner can create contracts")
+    title = (body.title or "").strip() or "Agreement"
+    if not body.body or not body.body.strip():
+        raise HTTPException(400, "body cannot be empty")
+    assigned_staff_name = None
+    if body.assigned_staff_id:
+        sm = await db.staff_members.find_one({"staff_id": body.assigned_staff_id, "space_id": body.space_id}, {"_id": 0})
+        if not sm:
+            raise HTTPException(404, "Staff not found")
+        assigned_staff_name = sm.get("name")
+    doc = {
+        "contract_id": gen_id("ctr"),
+        "space_id": body.space_id,
+        "template_kind": body.template_kind or "custom",
+        "title": title,
+        "body": body.body,
+        "variables": body.variables or {},
+        "assigned_staff_id": body.assigned_staff_id,
+        "assigned_staff_name": assigned_staff_name,
+        "require_owner_signature": bool(body.require_owner_signature),
+        "require_staff_signature": bool(body.require_staff_signature),
+        "require_drawn_signature_owner": bool(body.require_drawn_signature_owner),
+        "require_drawn_signature_staff": bool(body.require_drawn_signature_staff),
+        "status": "pending",
+        "owner_signature": None,
+        "staff_signature": None,
+        "created_by": user.user_id,
+        "created_by_name": user.name,
+        "created_at": now_utc(),
+        "updated_at": None,
+    }
+    await db.contracts.insert_one(doc)
+    doc.pop("_id", None)
+    # Notify the staff user if linked
+    if body.assigned_staff_id:
+        sm = await db.staff_members.find_one({"staff_id": body.assigned_staff_id}, {"_id": 0})
+        if sm and sm.get("user_id"):
+            await db.notifications.insert_one({
+                "notification_id": gen_id("ntf"),
+                "user_id": sm["user_id"],
+                "space_id": body.space_id,
+                "kind": "contract_assigned",
+                "title": f"Please review & sign: {title}",
+                "body": f"{user.name} has assigned a {doc['template_kind']} agreement for you to sign.",
+                "data": {"contract_id": doc["contract_id"]},
+                "read": False,
+                "created_at": now_utc(),
+            })
+    return Contract(**doc)
+
+
+@api_router.get("/contracts/{contract_id}", response_model=Contract)
+async def get_contract(contract_id: str, user: User = Depends(get_current_user)):
+    d = await db.contracts.find_one({"contract_id": contract_id}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Contract not found")
+    space = await assert_space_member(d["space_id"], user.user_id)
+    is_owner = space.get("owner_id") == user.user_id
+    if not is_owner:
+        my_staff = await db.staff_members.find_one({"space_id": d["space_id"], "user_id": user.user_id}, {"_id": 0})
+        if not my_staff or my_staff["staff_id"] != d.get("assigned_staff_id"):
+            raise HTTPException(403, "Not authorized to view this contract")
+    return Contract(**d)
+
+
+@api_router.patch("/contracts/{contract_id}", response_model=Contract)
+async def update_contract(contract_id: str, body: UpdateContractRequest, user: User = Depends(get_current_user)):
+    d = await db.contracts.find_one({"contract_id": contract_id}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Contract not found")
+    space = await assert_space_member(d["space_id"], user.user_id)
+    if space.get("owner_id") != user.user_id:
+        raise HTTPException(403, "Only the owner can edit contracts")
+    if d.get("owner_signature") or d.get("staff_signature"):
+        raise HTTPException(400, "Cannot edit a contract once any party has signed. Void it first.")
+    updates = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
+    if "assigned_staff_id" in updates and updates["assigned_staff_id"]:
+        sm = await db.staff_members.find_one({"staff_id": updates["assigned_staff_id"], "space_id": d["space_id"]}, {"_id": 0})
+        if not sm:
+            raise HTTPException(404, "Staff not found")
+        updates["assigned_staff_name"] = sm.get("name")
+    if updates:
+        updates["updated_at"] = now_utc()
+        await db.contracts.update_one({"contract_id": contract_id}, {"$set": updates})
+    out = await db.contracts.find_one({"contract_id": contract_id}, {"_id": 0})
+    return Contract(**out)
+
+
+@api_router.post("/contracts/{contract_id}/sign", response_model=Contract)
+async def sign_contract(contract_id: str, body: SignContractRequest, request: Request, user: User = Depends(get_current_user)):
+    d = await db.contracts.find_one({"contract_id": contract_id}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Contract not found")
+    if d.get("status") == "void":
+        raise HTTPException(400, "Contract has been voided")
+    space = await assert_space_member(d["space_id"], user.user_id)
+    is_owner = space.get("owner_id") == user.user_id
+    role = "owner" if is_owner else "staff"
+
+    if role == "staff":
+        my_staff = await db.staff_members.find_one({"space_id": d["space_id"], "user_id": user.user_id}, {"_id": 0})
+        if not my_staff or my_staff["staff_id"] != d.get("assigned_staff_id"):
+            raise HTTPException(403, "This contract is not assigned to you")
+
+    # Validate sig requirements
+    require_drawn = bool(d.get(f"require_drawn_signature_{role}"))
+    typed = (body.typed_name or "").strip()
+    drawn = (body.drawing_base64 or "").strip()
+    if require_drawn and not drawn:
+        raise HTTPException(400, "A hand-drawn signature is required for this contract.")
+    if not typed and not drawn:
+        raise HTTPException(400, "Type your name or draw your signature to sign.")
+
+    sig = {
+        "role": role,
+        "user_id": user.user_id,
+        "name": user.name,
+        "typed_name": typed or None,
+        "drawing_base64": drawn or None,
+        "signed_at": now_utc(),
+        "ip": _client_ip(request),
+        "user_agent": (request.headers.get("user-agent") or "")[:300],
+    }
+    field = "owner_signature" if role == "owner" else "staff_signature"
+    update: Dict[str, Any] = {field: sig, "updated_at": now_utc()}
+
+    # Check if both required signatures are present after this one
+    other = d.get("staff_signature" if role == "owner" else "owner_signature")
+    require_other = bool(d.get(f"require_{'staff' if role == 'owner' else 'owner'}_signature"))
+    if (not require_other) or other:
+        update["status"] = "signed"
+
+    await db.contracts.update_one({"contract_id": contract_id}, {"$set": update})
+
+    # Notify the other party if they still need to sign
+    if update.get("status") != "signed":
+        # If owner just signed, notify staff
+        if role == "owner" and d.get("assigned_staff_id"):
+            sm = await db.staff_members.find_one({"staff_id": d["assigned_staff_id"]}, {"_id": 0})
+            if sm and sm.get("user_id"):
+                await db.notifications.insert_one({
+                    "notification_id": gen_id("ntf"),
+                    "user_id": sm["user_id"],
+                    "space_id": d["space_id"],
+                    "kind": "contract_owner_signed",
+                    "title": f"{user.name} signed: {d.get('title')}",
+                    "body": "Your turn — open the contract to review and sign.",
+                    "data": {"contract_id": contract_id},
+                    "read": False,
+                    "created_at": now_utc(),
+                })
+        # If staff just signed, notify owner
+        if role == "staff":
+            await db.notifications.insert_one({
+                "notification_id": gen_id("ntf"),
+                "user_id": space.get("owner_id"),
+                "space_id": d["space_id"],
+                "kind": "contract_staff_signed",
+                "title": f"{user.name} signed: {d.get('title')}",
+                "body": "The staff member has signed the agreement.",
+                "data": {"contract_id": contract_id},
+                "read": False,
+                "created_at": now_utc(),
+            })
+    else:
+        # Fully signed — store a copy in Documents Vault as a record
+        try:
+            await db.documents.insert_one({
+                "document_id": gen_id("doc"),
+                "space_id": d["space_id"],
+                "name": f"{d.get('title')} — signed {now_utc().strftime('%Y-%m-%d')}",
+                "folder": "contracts",
+                "mime": "application/contract+json",
+                "file_base64": None,
+                "note": f"Signed agreement (kind={d.get('template_kind')}). View in Contracts.",
+                "tags": ["contract", d.get("template_kind") or "custom", "signed"],
+                "size_kb": max(1, int(len(d.get("body") or "") / 1024)),
+                "uploaded_by": user.user_id,
+                "uploaded_by_name": user.name,
+                "created_at": now_utc(),
+                "related_to": {"kind": "contract", "id": contract_id},
+            })
+        except Exception as e:
+            logger.warning(f"Could not archive contract to documents: {e}")
+
+    out = await db.contracts.find_one({"contract_id": contract_id}, {"_id": 0})
+    return Contract(**out)
+
+
+@api_router.post("/contracts/{contract_id}/void", response_model=Contract)
+async def void_contract(contract_id: str, user: User = Depends(get_current_user)):
+    d = await db.contracts.find_one({"contract_id": contract_id}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Contract not found")
+    space = await assert_space_member(d["space_id"], user.user_id)
+    if space.get("owner_id") != user.user_id:
+        raise HTTPException(403, "Only the owner can void contracts")
+    await db.contracts.update_one({"contract_id": contract_id}, {"$set": {"status": "void", "updated_at": now_utc()}})
+    out = await db.contracts.find_one({"contract_id": contract_id}, {"_id": 0})
+    return Contract(**out)
+
+
+@api_router.delete("/contracts/{contract_id}")
+async def delete_contract(contract_id: str, user: User = Depends(get_current_user)):
+    d = await db.contracts.find_one({"contract_id": contract_id}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Contract not found")
+    space = await assert_space_member(d["space_id"], user.user_id)
+    if space.get("owner_id") != user.user_id:
+        raise HTTPException(403, "Only the owner can delete contracts")
+    await db.contracts.delete_one({"contract_id": contract_id})
+    return {"ok": True}
+
+
+@api_router.get("/contracts/{contract_id}/render")
+async def render_contract(contract_id: str, user: User = Depends(get_current_user)):
+    d = await db.contracts.find_one({"contract_id": contract_id}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Contract not found")
+    space = await assert_space_member(d["space_id"], user.user_id)
+    is_owner = space.get("owner_id") == user.user_id
+    if not is_owner:
+        my_staff = await db.staff_members.find_one({"space_id": d["space_id"], "user_id": user.user_id}, {"_id": 0})
+        if not my_staff or my_staff["staff_id"] != d.get("assigned_staff_id"):
+            raise HTTPException(403, "Not authorized")
+    rendered = _render_contract_body(d.get("body") or "", d.get("variables") or {})
+    return {"title": d.get("title"), "rendered_body": rendered, "status": d.get("status"), "variables": d.get("variables") or {}}
+
+
 app.include_router(api_router)
 
 app.add_middleware(

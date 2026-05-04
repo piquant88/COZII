@@ -7,7 +7,7 @@ import {
   Calendar, DollarSign, Package, Tag, Image as ImageIcon, CircleDot,
   ShoppingBag, Droplet, BookOpen, Apple, Pill, Heart, Star, Lock, Globe, ImagePlus,
   Receipt, ArrowRight, FileText, FilePlus, Clock, CreditCard, Zap, Wifi, Phone, Lightbulb,
-  Repeat, PenLine, Bell,
+  Repeat, PenLine, Bell, Shield, Download, CheckCircle2, Pen, Eraser, Send,
 } from 'lucide-react-native';
 
 export const ICON_MAP: Record<string, any> = {
@@ -17,7 +17,7 @@ export const ICON_MAP: Record<string, any> = {
   Calendar, DollarSign, Package, Tag, ImageIcon, CircleDot,
   ShoppingBag, Droplet, BookOpen, Apple, Pill, Heart, Star, Lock, Globe, ImagePlus,
   Receipt, ArrowRight, FileText, FilePlus, Clock, CreditCard, Zap, Wifi, Phone, Lightbulb,
-  Repeat, PenLine, Bell,
+  Repeat, PenLine, Bell, Shield, Download, CheckCircle2, Pen, Eraser, Send,
 };
 
 export const CATEGORY_ICON_OPTIONS = [

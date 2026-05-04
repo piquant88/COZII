@@ -56,6 +56,9 @@ export default function DocumentsScreen() {
           <Text style={styles.kicker}>{activeSpace?.name}</Text>
           <Text style={styles.title}>Documents</Text>
         </View>
+        <TouchableOpacity style={styles.iconBtn} onPress={() => router.push('/contracts')} testID="docs-contracts">
+          <Icon name="FileText" size={18} color={colors.textMain} />
+        </TouchableOpacity>
         <TouchableOpacity style={styles.addBtn} onPress={() => setAdding(true)} testID="docs-add">
           <Icon name="Plus" size={18} color="#fff" />
         </TouchableOpacity>
@@ -253,6 +256,7 @@ const styles = StyleSheet.create({
   header: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: spacing.md },
   backBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: colors.surface, alignItems: 'center', justifyContent: 'center', transform: [{ rotate: '180deg' }], ...shadows.card },
   addBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center', ...shadows.button },
+  iconBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: colors.surface, alignItems: 'center', justifyContent: 'center', ...shadows.card },
   kicker: { fontSize: 11, color: colors.textMuted, fontWeight: '700', textTransform: 'uppercase' },
   title: { fontSize: 24, fontWeight: '900', color: colors.textMain, letterSpacing: -0.5 },
   scroll: { padding: spacing.md, paddingTop: 0 },

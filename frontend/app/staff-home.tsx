@@ -216,6 +216,9 @@ export default function StaffHome() {
             <Text style={styles.hi}>Hi, {staff.name?.split(' ')[0] || 'there'}!</Text>
             <Text style={styles.greetSub}>{staff.role_name || 'Staff'} · {activeSpace.name}</Text>
           </View>
+          <TouchableOpacity onPress={() => router.push('/contracts')} style={styles.iconBtn} testID="staff-contracts-btn" disabled={isPreview}>
+            <Icon name="FileText" size={18} color={isPreview ? colors.textMuted : colors.textMain} />
+          </TouchableOpacity>
           <TouchableOpacity onPress={() => setShowNotifs((v) => !v)} style={styles.iconBtn} testID="staff-notifs-btn" disabled={isPreview}>
             <Icon name="Heart" size={18} color={isPreview ? colors.textMuted : colors.textMain} />
             {!isPreview && notifs.filter((n) => !n.read).length > 0 && (
@@ -586,8 +589,8 @@ export default function StaffHome() {
                         ) : (
                           items.map((it: any) => (
                             <View key={it.item_id} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                              {it.photo_base64 ? (
-                                <Image source={{ uri: it.photo_base64 }} style={{ width: 36, height: 36, borderRadius: radius.sm }} />
+                              {(it.photo_base64 || it.image_url) ? (
+                                <Image source={{ uri: it.photo_base64 || it.image_url }} style={{ width: 36, height: 36, borderRadius: radius.sm }} />
                               ) : (
                                 <View style={[styles.avatar, { backgroundColor: t.icon, width: 36, height: 36 }]}>
                                   <Icon name="Box" size={14} color="#fff" />

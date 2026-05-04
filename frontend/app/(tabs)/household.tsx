@@ -95,6 +95,15 @@ export default function HouseholdHub() {
         {isHousehold && (
           <TouchableOpacity
             style={styles.iconBtn}
+            onPress={() => router.push('/contracts')}
+            testID="open-contracts"
+          >
+            <Icon name="FileText" color={colors.textMain} />
+          </TouchableOpacity>
+        )}
+        {isHousehold && (
+          <TouchableOpacity
+            style={styles.iconBtn}
             onPress={() => router.push('/household-report')}
             testID="household-report"
           >

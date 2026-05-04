@@ -2058,3 +2058,279 @@ agent_communication:
       themselves are implemented correctly. Per protocol, frontend testing
       was NOT performed.
 
+
+
+## 2026-06-XX — Phase 7: Contract Templates + e-Sign
+
+backend:
+  - task: "Contract templates list (GET /api/contract-templates)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Returns 4 built-in templates (NDA, Employment, Confidentiality, Blank)
+          each with kind, title, icon, summary, default_variables, body containing
+          {{placeholder}} tokens. Auth-required.
+      - working: true
+        agent: "testing"
+        comment: |
+          GET /api/contract-templates verified via /app/backend_test_phase7_contracts.py.
+          - 200 auth response returns exactly 4 templates with kinds
+            ["blank", "confidentiality", "employment", "nda"].
+          - Every template has keys kind, title, icon, summary, default_variables
+            (dict), body (string). NDA body contains {{household_name}},
+            {{staff_name}}, {{start_date}}, {{city}} placeholders — render test
+            (see below) confirmed these are replaced from contract.variables.
+          - No auth → 403 (expected).
+
+  - task: "Contracts CRUD (POST/GET/PATCH/DELETE /api/contracts)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          POST creates a contract for a space (owner only). Optional
+          assigned_staff_id resolves staff name. Auto-creates a `contract_assigned`
+          notification for the staff user if linked. GET lists; for staff users
+          only contracts assigned to them. PATCH owner-only and only when no
+          signatures yet. DELETE owner-only. Status starts as `pending`.
+      - working: true
+        agent: "testing"
+        comment: |
+          Verified end-to-end via /app/backend_test_phase7_contracts.py against
+          the preview URL — all assertions green.
+          POST /api/contracts:
+            ✅ Happy path (owner, template_kind="nda", assigned_staff_id,
+               require_drawn_signature_staff=true) returns Contract with
+               contract_id, status="pending", assigned_staff_name="Sari Putri",
+               owner_signature=null, staff_signature=null.
+            ✅ Empty body → 400 "body cannot be empty".
+            ✅ assigned_staff_id not in space → 404 "Staff not found".
+            ✅ Non-owner member (staff user) → 403 with message mentioning
+               "Only the space owner can create contracts".
+            ✅ Non-member (outsider) → 403 "Not a member of this space".
+            ✅ After POST with assigned_staff_id linked to a user_id via
+               /staff/join, staff user's GET /api/notifications returns exactly
+               one `contract_assigned` notification with data.contract_id set.
+          GET /api/contracts:
+            ✅ Owner sees all contracts in the space.
+            ✅ Staff user sees only contracts where assigned_staff_id ==
+               their staff_id (verified by reassigning a second contract to a
+               different staff and confirming staff user's list does not
+               include it).
+            ✅ staff_id query filter correctly excludes contracts for other
+               staff; status=pending filter returns only pending.
+            ✅ Non-member → 403.
+          GET /api/contracts/{id}:
+            ✅ Owner + assigned staff both get 200.
+            ✅ Another staff (linked to a different staff_id in the same space)
+               → 403 "Not authorized to view this contract".
+            ✅ Non-member → 403.
+          PATCH /api/contracts/{id}:
+            ✅ Non-owner member → 403.
+            ✅ Owner PATCH assigned_staff_id with a different staff in the
+               space updates assigned_staff_name correctly; revert also works.
+            ✅ PATCH after any signature present → 400 "Cannot edit a contract
+               once any party has signed".
+          DELETE /api/contracts/{id}:
+            ✅ Outsider / non-owner member → 403.
+            ✅ Owner → 200 {ok:true}; subsequent GET → 404 (cleaned up).
+
+  - task: "Contract sign flow (POST /api/contracts/{id}/sign)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Records ContractSignature {role, user_id, name, typed_name,
+          drawing_base64, signed_at, ip, user_agent} in either owner_signature
+          or staff_signature based on caller. IP read via x-forwarded-for /
+          x-real-ip / request.client.host fallback. Validates required-drawn flag
+          per role, refuses empty signature. When all required signatures are
+          present, status flips to `signed` and a record is auto-archived in
+          /api/documents (folder=contracts). Notifies the other party while
+          waiting.
+      - working: true
+        agent: "testing"
+        comment: |
+          All sign flow scenarios PASS:
+            ✅ POST /sign with neither typed_name nor drawing_base64 → 400
+               "Type your name or draw your signature to sign."
+            ✅ Owner role detected via space.owner_id == user.user_id: owner
+               sign with {typed_name:"Test User"} → 200, owner_signature
+               populated with role="owner", user_id=owner, typed_name,
+               signed_at present, user_agent captured.
+            ✅ Owner signed (staff still pending) → status remains "pending"
+               AND staff user gets a `contract_owner_signed` notification with
+               data.contract_id.
+            ✅ Staff user (whose staff record is the assignee) sign without
+               drawing_base64 (require_drawn_signature_staff=true) → 400
+               "A hand-drawn signature is required for this contract."
+            ✅ Staff sign with drawing_base64="data:image/svg+xml;base64,PHN2Zy8+"
+               → 200; staff_signature populated, role="staff", user_id=staff
+               user id, drawing_base64 stored.
+            ✅ Both required signatures present → contract.status flipped to
+               "signed".
+            ✅ When status hits "signed", a record is auto-archived in
+               /api/documents with folder="contracts" and
+               related_to == {kind:"contract", id:contract_id}. Verified via
+               GET /documents?space_id=... by the owner.
+            ✅ Signing a voided contract → 400 "Contract has been voided".
+
+  - task: "Contract void + render endpoints"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          POST /contracts/{id}/void → owner-only, sets status=void.
+          GET /contracts/{id}/render → returns rendered_body with {{vars}}
+          substituted from contract.variables. Both enforce membership;
+          staff can only render contracts assigned to them.
+      - working: true
+        agent: "testing"
+        comment: |
+          POST /api/contracts/{id}/void:
+            ✅ Non-owner (staff) → 403 "Only the owner can void contracts".
+            ✅ Owner → 200, status="void"; subsequent /sign call → 400
+               "Contract has been voided".
+          GET /api/contracts/{id}/render:
+            ✅ Returns {title, rendered_body, status, variables} (all four keys).
+            ✅ rendered_body has every {{key}} placeholder replaced with the
+               matching value from contract.variables. Verified with NDA
+               template and variables {household_name:"Rumah Bali",
+               staff_name:"Sari Putri", start_date:"2026-05-02",
+               city:"Denpasar"} — none of the raw tokens remain and the values
+               appear in the body.
+            ✅ Staff assigned to the contract can GET /render.
+            ✅ Non-member → 403.
+          NOTE on placeholder syntax: the review request described tokens as
+          `{placeholder}` (single braces) but the actual server templates and
+          render function use `{{placeholder}}` (double braces), which is the
+          established convention (_render_contract_body at server.py:3999
+          replaces `{{key}}`). This is consistent and working correctly — no
+          bug here; just flagging the doc discrepancy for the main agent.
+
+frontend:
+  - task: "Contracts list screen (/contracts)"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/contracts.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Shows agreements with status pill, owner/staff signature badges,
+          staff filter chips for owners, and a + button to create new.
+          Linked from Household tab header (FileText icon) and from staff-home
+          header (FileText icon).
+
+  - task: "Contract creator screen (/contract-new)"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/contract-new.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Two-step flow: 1) Pick template (4 cards), 2) Fill variables (with
+          smart defaults from active space + selected staff), edit body, set
+          per-role signature requirements (require + drawn-required toggles),
+          live preview. Submits to /api/contracts then routes to /contract-view.
+
+  - task: "Contract viewer + e-Sign (/contract-view)"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/contract-view.tsx, /app/frontend/src/SignaturePad.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Renders body with {{vars}} substituted server-side. SignaturePad
+          built in-house with react-native-svg + PanResponder, exports SVG
+          dataURL. Sign modal accepts typed_name + optional/required drawing.
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Phase 7 backend (Contract Templates + e-Sign) testing complete via
+      /app/backend_test_phase7_contracts.py against the preview URL
+      (https://family-wallet-21.preview.emergentagent.com/api).
+      **59/59 assertions PASS — all four Phase 7 backend tasks are production-ready.**
+
+      ✅ GET /api/contract-templates — 4 kinds present (blank, confidentiality,
+         employment, nda), full shape (kind/title/icon/summary/default_variables/
+         body) verified, auth required.
+      ✅ POST /api/contracts — owner-only (non-owner member 403, non-member 403
+         "Not a member"), empty body 400, bad assigned_staff_id 404, happy path
+         returns status="pending" + assigned_staff_name resolved, null
+         signatures, and creates a `contract_assigned` notification for the
+         linked staff user.
+      ✅ GET /api/contracts list — owner sees all; staff only sees own assigned
+         contracts; staff_id and status filters work; non-member 403.
+      ✅ GET /api/contracts/{id} — owner OK, assigned staff OK, staff who is
+         not the assignee 403, non-member 403.
+      ✅ PATCH /api/contracts/{id} — owner-only (non-owner 403), PATCH
+         assigned_staff_id refreshes assigned_staff_name, PATCH after any
+         signature → 400 "Cannot edit a contract once any party has signed".
+      ✅ POST /api/contracts/{id}/sign — empty body 400, require_drawn_signature
+         enforced per role (400 with message), owner role auto-detected via
+         space.owner_id, staff role auto-detected via staff_members.user_id
+         (assignee check enforced). Signature records include role, user_id,
+         name, typed_name, drawing_base64, signed_at, ip, user_agent (capped).
+         Single-side sign keeps status=pending AND notifies the other party
+         (contract_owner_signed / contract_staff_signed). When both required
+         signatures are present, status flips to "signed" AND a document is
+         auto-archived at /api/documents with folder="contracts" and
+         related_to == {kind:"contract", id:contract_id}. Signing a voided
+         contract → 400.
+      ✅ POST /api/contracts/{id}/void — owner-only (non-owner 403), sets
+         status="void"; subsequent /sign correctly returns 400.
+      ✅ DELETE /api/contracts/{id} — owner-only (outsider 403, non-owner
+         member 403), owner deletes successfully.
+      ✅ GET /api/contracts/{id}/render — returns {title, rendered_body,
+         status, variables}; every {{key}} placeholder in the NDA body is
+         replaced from contract.variables (verified none remain). Staff
+         assignee can render; non-member 403.
+
+      Doc-vs-code nit (not a bug): the review request mentions placeholder
+      syntax `{key}` (single braces). The actual templates and the
+      `_render_contract_body` function (server.py:3999) use `{{key}}` (double
+      braces), and this is consistent and working. No code change needed —
+      just flagging so you know the test suite targets `{{key}}`.
+
+      No frontend testing performed (per protocol). All Phase 7 backend tasks
+      updated in test_result.md to working:true, needs_retesting:false.
+
+          Records and shows IP + user-agent + timestamp on each signature
+          card. Owner can void/delete from header.
