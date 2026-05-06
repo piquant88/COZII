@@ -52,7 +52,7 @@ async def _resolve_user_from_token(token: str) -> Optional[Dict[str, Any]]:
     if not token:
         return None
     try:
-        sess = await db.sessions.find_one({"session_token": token, "expires_at": {"$gt": now_utc()}}, {"_id": 0})
+        sess = await db.user_sessions.find_one({"session_token": token, "expires_at": {"$gt": now_utc()}}, {"_id": 0})
         if not sess:
             return None
         u = await db.users.find_one({"user_id": sess["user_id"]}, {"_id": 0, "password_hash": 0})

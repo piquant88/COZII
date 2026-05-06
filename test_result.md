@@ -2422,12 +2422,37 @@ agent_communication:
 backend:
   - task: "Socket.IO server mount + auth + auto-join rooms (connect / disconnect / hello)"
     implemented: true
-    working: false
+    working: true
     file: "/app/backend/server.py"
-    stuck_count: 1
+    stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          Retested 2026-05-06 after main agent fixed the collection name bug at
+          /app/backend/server.py:55 (now reads from `db.user_sessions`). All
+          connection lifecycle + join_room scenarios PASS via
+          /app/backend_test.py (python-socketio AsyncClient against
+          http://localhost:8001):
+            ✅ connect with valid token succeeds; `hello` event received with
+               user_id == current user and spaces[] including the owned space_id.
+            ✅ connect with no token → refused (ConnectionError).
+            ✅ connect with bad/invalid token → refused (ConnectionError).
+            ✅ connect with wrong path (/socket.io instead of /api/socket.io) →
+               refused (ConnectionError).
+            ✅ join_room with valid space_id → ack {ok:true, joined:<space_id>}.
+            ✅ join_room with invalid/unknown space_id → ack {ok:false}.
+            ✅ join_room with empty {} payload → ack {ok:false}.
+            ✅ Reconnect with same valid token works (fresh AsyncClient instance).
+            ✅ Reconnect with invalid token refused.
+            ✅ Concurrent rooms — owner with two spaces gets hello.spaces
+               including both, and receives space.event from the second space
+               while the first one is also active.
+          The single-line fix has fully unblocked this surface. Retest done
+          against a live backend (supervisor-managed) with 3 fresh users
+          (A=Alex, B=Riley-staff, C=Quinn-outsider).
       - working: false
         agent: "testing"
         comment: |
@@ -2484,12 +2509,74 @@ backend:
 
   - task: "emit_space_event + emit_user_event helpers wired into contract + staff endpoints"
     implemented: true
-    working: "NA"
+    working: false
     file: "/app/backend/server.py"
-    stuck_count: 0
+    stuck_count: 1
     priority: "high"
     needs_retesting: true
     status_history:
+      - working: false
+        agent: "testing"
+        comment: |
+          Retested 2026-05-06 after the connect-auth fix. 20 of 21 event
+          scenarios PASS; 1 FAIL remains (owner does NOT receive the
+          `contract_staff_signed` notification when the staff signs last).
+
+          ✅ Contract CRUD emissions:
+            - POST /contracts  → both A (owner) and B (assigned staff) receive
+              space.event {kind:"contract", action:"created"}.
+            - B also receives user.event {kind:"notification", action:"created"}
+              with payload.kind=="contract_assigned" (and REST
+              GET /api/notifications confirms persistence).
+            - PATCH /contracts/{id} → A receives space.event contract.updated.
+            - POST /contracts/{id}/void → A receives space.event contract.voided.
+            - DELETE /contracts/{id}  → A receives space.event contract.deleted.
+            - POST /household/staff/join → owner A receives
+              space.event {kind:"staff", action:"joined"}.
+
+          ✅ Owner signs first (contract not yet fully signed):
+            - A receives space.event contract.signed {by:"owner", status:"pending_staff"}.
+            - B receives space.event contract.signed {by:"owner"}.
+            - B receives user.event notification contract_owner_signed.
+
+          ✅ Staff signs last (contract becomes fully signed):
+            - A receives space.event contract.signed {by:"staff", status:"signed"}.
+            - B receives space.event contract.signed {by:"staff"}.
+
+          ❌ FAIL — A does NOT receive user.event notification
+             `contract_staff_signed` in this flow. Root cause in
+             /app/backend/server.py sign_contract (~lines 4383-4406):
+             the notification branch is guarded by
+             `if update.get("status") != "signed":` — but when the staff signs
+             LAST the update flips status to "signed", so the
+             `notify_user(..., kind="contract_staff_signed", ...)` call never
+             runs. The REST notifications collection also never records a
+             `contract_staff_signed` for the owner in this case.
+
+             Fix: move the "notify the other side" block out of the
+             `if update.get("status") != "signed":` branch so the owner is
+             always notified when the staff signs (and, symmetrically, the
+             staff is always notified when the owner signs), regardless of
+             whether the signing completes the contract. Equivalent to:
+
+               # always notify the other side on any sign event
+               if role == "owner" and d.get("assigned_staff_id"):
+                   ...notify staff with kind="contract_owner_signed"
+               if role == "staff":
+                   ...notify owner with kind="contract_staff_signed"
+
+             (The only thing that must remain inside the "fully signed"
+             branch is the Documents Vault archive insert.)
+
+          ✅ Cross-space isolation: outsider C (member of a different space)
+             received no space.event and no user.event from any of A/B's
+             contract activity.
+
+          ✅ Persistence: REST GET /api/notifications?space_id=... on B
+             includes the `contract_assigned` record after the contract is
+             created. (The `contract_staff_signed` record would be persisted
+             too once the fix above is applied.)
+
       - working: "NA"
         agent: "testing"
         comment: |
@@ -2514,14 +2601,51 @@ metadata:
 
 test_plan:
   current_focus:
-    - "Socket.IO server mount + auth + auto-join rooms (connect / disconnect / hello)"
     - "emit_space_event + emit_user_event helpers wired into contract + staff endpoints"
-  stuck_tasks:
-    - "Socket.IO server mount + auth + auto-join rooms (connect / disconnect / hello)"
+  stuck_tasks: []
   test_all: false
   test_priority: "high_first"
 
 agent_communication:
+  - agent: "testing"
+    message: |
+      Phase 8 retest (2026-05-06) after the 1-line fix at server.py:55
+      (`db.sessions` → `db.user_sessions`). Result via /app/backend_test.py
+      (python-socketio AsyncClient, supervisor-managed backend on
+      http://localhost:8001): 32 PASS / 1 FAIL.
+
+      Test script note: the test payload field was renamed from `body_md`
+      to `body` (the actual field name on CreateContractRequest). This is
+      a test-file-only correction and does not affect the backend.
+
+      ✅ Socket.IO connect/auth + hello + join_room + cross-space isolation
+         + reconnect + concurrent rooms — all PASS.
+      ✅ Contract create/update/void/delete and staff.join — all emit the
+         expected space.event to the right rooms; outsider does NOT receive.
+      ✅ contract_assigned user.event to assigned staff on POST /contracts,
+         and corresponding REST GET /api/notifications shows the record.
+      ✅ contract_owner_signed user.event to staff when owner signs first.
+
+      ❌ ONE BUG — owner does NOT receive `contract_staff_signed` user.event
+         when the staff is the LAST signer (i.e. both required sigs become
+         present). File: /app/backend/server.py, function sign_contract,
+         lines ~4383-4406. The notify block is gated by
+         `if update.get("status") != "signed":`, so when staff signs last
+         and the status flips to "signed", the
+         `notify_user(kind="contract_staff_signed", ...)` call never
+         fires. Same asymmetry affects the owner→staff direction if the
+         contract only requires the owner's sig.
+         Fix: move the "notify the other party" branches OUT of the
+         `status != "signed"` guard; keep only the Documents Vault archive
+         insert inside the "fully signed" branch.
+
+      Marked the 'Socket.IO server mount + auth + auto-join rooms' task
+      as working=true (all connect/lifecycle/join_room cases green).
+      Kept the 'emit_space_event + emit_user_event helpers' task as
+      working=false / needs_retesting=true with the single signing-
+      notification gap documented above. No other Phase 8 regressions
+      surfaced.
+
   - agent: "testing"
     message: |
       Phase 8 (Socket.IO real-time sync) backend testing attempted via
