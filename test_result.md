@@ -2509,12 +2509,45 @@ backend:
 
   - task: "emit_space_event + emit_user_event helpers wired into contract + staff endpoints"
     implemented: true
-    working: false
+    working: true
     file: "/app/backend/server.py"
-    stuck_count: 1
+    stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          Retested 2026-05-06 after the sign_contract notification-asymmetry
+          fix (notify_user branches now run regardless of final status; only
+          the Documents Vault archive stays gated on "fully signed"). Full
+          /app/backend_test.py run against supervisor-managed backend on
+          http://localhost:8001: 33/33 PASS. The previously-missing case is
+          now covered:
+
+            ✅ Owner signs first (status pending_staff):
+               - A receives space.event contract.signed by=owner
+               - B receives space.event contract.signed by=owner
+               - B receives user.event notification contract_owner_signed
+            ✅ Staff signs LAST (status flips to "signed"):
+               - A receives space.event contract.signed by=staff status=signed
+               - B receives space.event contract.signed by=staff
+               - A receives user.event notification contract_staff_signed  ← FIXED
+            ✅ Documents Vault archive still inserted on fully-signed flow
+               (no regression — REST notification persistence continues to
+               work and the signed-copy doc is written).
+
+          All other Phase 8 coverage unchanged and green:
+            ✅ connect + hello + join_room (valid / invalid / empty / bad token /
+               wrong path)
+            ✅ POST/PATCH/DELETE/void contract space.event emissions
+            ✅ contract_assigned notification on POST /contracts
+            ✅ staff.join event on POST /household/staff/join
+            ✅ Cross-space isolation (outsider C receives no events)
+            ✅ Reconnect with valid / invalid token
+            ✅ Concurrent rooms (two spaces same owner)
+
+          No further work required.
       - working: false
         agent: "testing"
         comment: |
@@ -2600,13 +2633,36 @@ metadata:
   run_ui: false
 
 test_plan:
-  current_focus:
-    - "emit_space_event + emit_user_event helpers wired into contract + staff endpoints"
+  current_focus: []
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
 
 agent_communication:
+  - agent: "testing"
+    message: |
+      Phase 8 Socket.IO final retest (2026-05-06) after the notification-
+      asymmetry fix in /app/backend/server.py sign_contract. Full
+      /app/backend_test.py run against supervisor-managed backend at
+      http://localhost:8001: 33/33 PASS.
+
+      Specifically verified:
+        ✅ Owner signs first → staff receives `contract_owner_signed`
+           notification (was already working).
+        ✅ Staff signs LAST (status flips to "signed") → OWNER now receives
+           `contract_staff_signed` user.event notification. This was the
+           missing case and is now fixed.
+        ✅ Documents Vault archive still inserted on fully-signed flow
+           (no regression).
+        ✅ All other Phase 8 coverage unchanged: connect/auth, hello,
+           join_room, contract CRUD space.event emissions, contract_assigned
+           notification, staff.joined, cross-space isolation, reconnect,
+           concurrent rooms — all green.
+
+      Marked 'emit_space_event + emit_user_event helpers wired into contract
+      + staff endpoints' task as working=true, needs_retesting=false,
+      stuck_count=0. No further backend work required for Phase 8.
+
   - agent: "testing"
     message: |
       Phase 8 retest (2026-05-06) after the 1-line fix at server.py:55

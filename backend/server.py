@@ -4380,31 +4380,31 @@ async def sign_contract(contract_id: str, body: SignContractRequest, request: Re
 
     await db.contracts.update_one({"contract_id": contract_id}, {"$set": update})
 
-    # Notify the other party if they still need to sign
-    if update.get("status") != "signed":
-        # If owner just signed, notify staff
-        if role == "owner" and d.get("assigned_staff_id"):
-            sm = await db.staff_members.find_one({"staff_id": d["assigned_staff_id"]}, {"_id": 0})
-            if sm and sm.get("user_id"):
-                await notify_user(
-                    user_id=sm["user_id"],
-                    space_id=d["space_id"],
-                    kind="contract_owner_signed",
-                    title=f"{user.name} signed: {d.get('title')}",
-                    body="Your turn — open the contract to review and sign.",
-                    data={"contract_id": contract_id},
-                )
-        # If staff just signed, notify owner
-        if role == "staff":
+    # Always notify the other party that they signed (the gate was wrong before
+    # — owner should still be notified when staff is the LAST signer, so the
+    # owner sees "fully signed" arrive in their notifications).
+    if role == "owner" and d.get("assigned_staff_id"):
+        sm = await db.staff_members.find_one({"staff_id": d["assigned_staff_id"]}, {"_id": 0})
+        if sm and sm.get("user_id"):
             await notify_user(
-                user_id=space.get("owner_id"),
+                user_id=sm["user_id"],
                 space_id=d["space_id"],
-                kind="contract_staff_signed",
+                kind="contract_owner_signed",
                 title=f"{user.name} signed: {d.get('title')}",
-                body="The staff member has signed the agreement.",
+                body="Your turn — open the contract to review and sign." if update.get("status") != "signed" else "Both parties have now signed.",
                 data={"contract_id": contract_id},
             )
-    else:
+    if role == "staff":
+        await notify_user(
+            user_id=space.get("owner_id"),
+            space_id=d["space_id"],
+            kind="contract_staff_signed",
+            title=f"{user.name} signed: {d.get('title')}",
+            body="The staff member has signed the agreement.",
+            data={"contract_id": contract_id},
+        )
+
+    if update.get("status") == "signed":
         # Fully signed — store a copy in Documents Vault as a record
         try:
             await db.documents.insert_one({
