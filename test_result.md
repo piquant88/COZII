@@ -2752,12 +2752,27 @@ agent_communication:
 backend:
   - task: "Per-category staff_can_edit field on Category + staff edit_inventory perm gating (assert_can_edit_category_items)"
     implemented: true
-    working: false
+    working: true
     file: "/app/backend/server.py"
     stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          RETEST 2026-05-06 — /app/backend_test_phase9.py — 65/65 PASS.
+          Order-of-checks fix verified in assert_can_edit_category_items
+          (server.py:475-492): staff record lookup now happens BEFORE the
+          category staff_can_edit gate, and the gate only applies when the
+          caller is a staff member. Regular non-staff non-owner space
+          members short-circuit through and can POST items into either
+          category (catA staff_can_edit=true and catB staff_can_edit=false)
+          → both 200. Previously failing scenario "C2 member POST item
+          catB -> 200" now passes. All other Phase 9 areas (A category
+          CRUD + staff_can_edit, B staff perm gating with
+          edit_inventory true→false, D socket-emit non-regression on 11
+          endpoints, E Phase 7/8 contracts smoke) remain green.
       - working: false
         agent: "testing"
         comment: |
@@ -2882,13 +2897,25 @@ metadata:
   run_ui: false
 
 test_plan:
-  current_focus:
-    - "Per-category staff_can_edit field on Category + staff edit_inventory perm gating (assert_can_edit_category_items)"
+  current_focus: []
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
 
 agent_communication:
+  - agent: "testing"
+    message: |
+      RETEST Phase 9 (2026-05-06): /app/backend_test_phase9.py — 65/65 PASS.
+      The order-of-checks fix in assert_can_edit_category_items
+      (server.py:475-492) is verified end-to-end. Staff record lookup happens
+      BEFORE the category staff_can_edit gate, and the gate only applies to
+      staff users. Regular non-staff non-owner space members can now POST
+      items into categories regardless of staff_can_edit (previously failing
+      "C2 member POST item catB -> 200" now passes). All other Phase 9
+      surface (A category CRUD/permissions, B staff perm gating, D
+      socket-emit non-regression, E Phase 7/8 contracts smoke) remain green.
+      Task marked working=true, needs_retesting=false. No further backend
+      work required for Phase 9.
   - agent: "testing"
     message: |
       Phase 9 backend testing complete (2026-05-06) via /app/backend_test_phase9.py

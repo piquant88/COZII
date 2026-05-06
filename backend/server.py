@@ -473,19 +473,20 @@ async def get_staff_record(space_id: str, user_id: str) -> Optional[dict]:
 
 
 async def assert_can_edit_category_items(space_id: str, category_id: str, user_id: str):
-    """Owner: always allowed. Staff: must have edit_inventory permission AND the
-    category must have staff_can_edit=True. Raises 403 otherwise."""
+    """Owner: always allowed. Regular non-staff space members: also allowed
+    (existing behaviour). Staff: must have `edit_inventory` permission AND the
+    category must have `staff_can_edit=True`. Raises 403 otherwise."""
     if await is_space_owner(space_id, user_id):
+        return
+    staff = await get_staff_record(space_id, user_id)
+    if not staff:
+        # Not staff and not owner — regular family member, no gating.
         return
     cat = await db.categories.find_one({"category_id": category_id, "space_id": space_id}, {"_id": 0})
     if not cat:
         raise HTTPException(404, "Category not found")
     if not cat.get("staff_can_edit"):
         raise HTTPException(403, "Staff cannot edit items in this category. Ask the owner to enable it.")
-    staff = await get_staff_record(space_id, user_id)
-    if not staff:
-        # Not staff and not owner — regular space members are allowed (existing behaviour).
-        return
     perms = {**DEFAULT_STAFF_PERMS, **(staff.get("permissions") or {})}
     if not perms.get("edit_inventory"):
         raise HTTPException(403, "You don't have permission to edit inventory.")
