@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
 import { api, tokenStorage, activeSpaceStorage } from './api';
+import { realtime } from './realtime';
 import type { User, FamilySpace } from './types';
 
 export type SpaceRole = {
@@ -96,6 +97,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     loadMe();
   }, [loadMe]);
+
+  // Realtime: connect on login, join active space room, disconnect on logout
+  useEffect(() => {
+    if (user) {
+      realtime.connect();
+    } else {
+      realtime.disconnect();
+    }
+  }, [user]);
+
+  useEffect(() => {
+    if (user && activeSpace) {
+      // Slight delay to allow socket to be connected
+      const t = setTimeout(() => realtime.joinSpace(activeSpace.space_id), 600);
+      return () => clearTimeout(t);
+    }
+  }, [user, activeSpace]);
 
   const login = async (email: string, password: string) => {
     const res = await api.post<{ token: string; user: User }>('/auth/login', { email, password });

@@ -2416,3 +2416,153 @@ agent_communication:
          contract_assigned for a contract that was voided before their join.
 
       No bugs found. No frontend testing performed (per protocol).
+
+## 2026-05-06 — Phase 8: Socket.IO real-time sync
+
+backend:
+  - task: "Socket.IO server mount + auth + auto-join rooms (connect / disconnect / hello)"
+    implemented: true
+    working: false
+    file: "/app/backend/server.py"
+    stuck_count: 1
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: false
+        agent: "testing"
+        comment: |
+          CRITICAL BLOCKER — Socket.IO connect handler rejects EVERY valid session
+          token, so no real-time feature can be exercised.
+
+          Root cause (server.py:55, inside `_resolve_user_from_token`):
+            sess = await db.sessions.find_one(
+                {"session_token": token, "expires_at": {"$gt": now_utc()}}, {"_id": 0})
+          The REST auth code uses `db.user_sessions` (server.py:418, 479, 499, 542,
+          577). The sockets path queries `db.sessions`, which does not exist in
+          `test_database` — so `sess is None`, `_resolve_user_from_token` returns
+          None, and the connect handler raises `ConnectionRefusedError("Unauthorized")`
+          for every token.
+
+          Verified:
+            - mongosh: only `user_sessions` exists; `sessions` does not.
+            - Backend log: "socket <sid> rejected (no/invalid token)" for every
+              valid-token connect attempt.
+            - python-socketio AsyncClient: `socketio.exceptions.ConnectionError:
+              One or more namespaces failed to connect: /` on every call.
+
+          Fix (1 line in server.py:55):
+              sess = await db.user_sessions.find_one(...)
+
+          Impact: the entire Phase 8 real-time surface is non-functional — hello,
+          join_room, all space.event / user.event emissions, cross-space isolation,
+          reconnection, concurrent rooms are all blocked by this one bug. None of
+          them can be positively verified until the collection name is corrected.
+
+          Test results (/app/backend_test.py, 3 PASS / 7 FAIL):
+            FAIL  connect with valid token (ConnectionError)
+            PASS* connect with no token refused
+            PASS* connect with bad token refused
+            PASS* connect with wrong path fails
+            FAIL  join_room suite (could not connect)
+            FAIL  contract_events suite (could not connect)
+            FAIL  contract_update suite (could not connect)
+            FAIL  staff_join suite (could not connect)
+            FAIL  reconnect: initial connect (could not connect)
+            FAIL  concurrent_rooms suite (could not connect)
+
+          * The 3 "PASS" cases only pass because the server is rejecting ALL
+            tokens (including the bad ones we expect it to reject). Once the
+            collection fix is applied, these cases still need to be re-verified
+            so we know valid vs invalid tokens are actually being distinguished.
+
+          Additional implementation detail worth double-checking after the fix:
+          the `hello` event is emitted with `to=sid` immediately after
+          `enter_room`. In python-socketio 5.16 the default AsyncClient buffers
+          events sent before `connect()` returns on the server side. We observed
+          the backend log correctly ordering: connect → enter_room → emit hello,
+          so this should be fine, but it's worth a retest.
+
+  - task: "emit_space_event + emit_user_event helpers wired into contract + staff endpoints"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "testing"
+        comment: |
+          Cannot be tested until the connect auth bug above is fixed, because
+          every broadcast depends on clients being in the relevant room, and
+          no client can connect. The code wiring itself looks correct:
+            - create_contract → emit_space_event(..., "contract", "created", ...)
+            - update_contract → emit_space_event(..., "contract", "updated", ...)
+            - sign_contract   → emit_space_event(..., "contract", "signed", {by,status})
+            - void_contract   → emit_space_event(..., "contract", "voided", ...)
+            - delete_contract → emit_space_event(..., "contract", "deleted", ...)
+            - staff_join      → emit_space_event(..., "staff", "joined", {staff_id,user_id})
+            - notify_user     → emit_user_event(..., "notification", "created", ...)
+          Will retest once `_resolve_user_from_token` is pointed at the correct
+          collection.
+
+metadata:
+  created_by: "main_agent"
+  version: "1.9"
+  test_sequence: 14
+  run_ui: false
+
+test_plan:
+  current_focus:
+    - "Socket.IO server mount + auth + auto-join rooms (connect / disconnect / hello)"
+    - "emit_space_event + emit_user_event helpers wired into contract + staff endpoints"
+  stuck_tasks:
+    - "Socket.IO server mount + auth + auto-join rooms (connect / disconnect / hello)"
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Phase 8 (Socket.IO real-time sync) backend testing attempted via
+      /app/backend_test.py (python-socketio AsyncClient). Result: 3 PASS / 7
+      FAIL, blocked by ONE single-line bug in the connect handler.
+
+      ❌ CRITICAL — /app/backend/server.py line 55:
+          sess = await db.sessions.find_one(...)
+         should be:
+          sess = await db.user_sessions.find_one(...)
+         Every other auth path in the file uses `db.user_sessions`
+         (lines 418, 479, 499, 542, 577). With this typo, the socket.io
+         connect handler rejects all valid tokens as "Unauthorized".
+
+         Verified: only `user_sessions` collection exists in
+         `test_database`. Backend log: "socket <sid> rejected (no/invalid
+         token)" for valid-token connects. python-socketio AsyncClient:
+         `ConnectionError: One or more namespaces failed to connect: /`.
+
+      ✅ What the negative paths show (accidental PASS):
+         - connect with no token → refused (expected)
+         - connect with bad token → refused (expected)
+         - connect with wrong path (/socket.io instead of /api/socket.io)
+           → refused (expected)
+         These 3 pass trivially because the server is rejecting *all*
+         tokens. They must be re-verified once the fix is applied so we
+         can distinguish "rejected because invalid" from "rejected because
+         code queries the wrong collection".
+
+      📝 Cannot be verified yet (all blocked on the same bug):
+         - hello event payload {user_id, spaces:[...]}
+         - join_room valid / invalid / empty payload acks
+         - space.event emissions on contract created/updated/signed/voided/deleted
+         - user.event emissions on notify_user (contract_assigned,
+           contract_owner_signed, contract_staff_signed)
+         - cross-space isolation (outsider C must not receive A/B events)
+         - reconnection with same vs invalid token
+         - concurrent rooms (user with two spaces)
+         - staff.joined emission on /household/staff/join
+
+      Main agent: please apply the 1-line fix above and request a retest;
+      the full test suite at /app/backend_test.py will validate everything
+      end-to-end without additional code changes.
+

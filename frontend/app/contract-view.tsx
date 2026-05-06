@@ -10,6 +10,7 @@ import { api } from '../src/api';
 import { colors, radius, spacing, shadows, tints } from '../src/theme';
 import { Icon } from '../src/Icon';
 import { SignaturePad } from '../src/SignaturePad';
+import { realtime } from '../src/realtime';
 
 type Sig = {
   role: 'owner' | 'staff';
@@ -55,6 +56,8 @@ export default function ContractViewScreen() {
   const [drawing, setDrawing] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [assignedStaff, setAssignedStaff] = useState<any>(null);
+  const [allStaff, setAllStaff] = useState<any[]>([]);
+  const [reassignOpen, setReassignOpen] = useState(false);
 
   const load = useCallback(async () => {
     if (!params.id) return;
@@ -64,11 +67,16 @@ export default function ContractViewScreen() {
       setContract(c);
       const r = await api.get<{ rendered_body: string }>(`/contracts/${params.id}/render`);
       setRenderedBody(r.rendered_body || c.body);
-      // If owner, look up the assigned staff (to show invite code if not joined)
-      if (c.assigned_staff_id && activeSpace) {
+      // Fetch staff list (used for assignment + invite-code callout)
+      if (activeSpace) {
         try {
           const staffList = await api.get<any[]>(`/household/staff?space_id=${activeSpace.space_id}`);
-          setAssignedStaff((staffList || []).find((s) => s.staff_id === c.assigned_staff_id) || null);
+          setAllStaff(staffList || []);
+          if (c.assigned_staff_id) {
+            setAssignedStaff((staffList || []).find((s) => s.staff_id === c.assigned_staff_id) || null);
+          } else {
+            setAssignedStaff(null);
+          }
         } catch {}
       }
     } catch (e: any) {
@@ -76,6 +84,31 @@ export default function ContractViewScreen() {
     } finally { setLoading(false); }
   }, [params.id, activeSpace]);
   useEffect(() => { load(); }, [load]);
+
+  // Realtime: refresh this contract on relevant events
+  useEffect(() => {
+    if (!params.id) return;
+    const off = realtime.onSpaceEvent((e) => {
+      if (e.kind === 'contract' && e.payload?.contract_id === params.id) {
+        load();
+      }
+    });
+    return off;
+  }, [params.id, load]);
+
+  const reassign = async (staffId: string) => {
+    if (!contract) return;
+    try {
+      const updated = await api.patch<Contract>(`/contracts/${contract.contract_id}`, { assigned_staff_id: staffId });
+      setContract(updated);
+      const sm = allStaff.find((s) => s.staff_id === staffId) || null;
+      setAssignedStaff(sm);
+      setReassignOpen(false);
+      Alert.alert('Assigned', `Contract assigned to ${sm?.name || 'staff'}. ${sm?.user_id ? 'They have been notified.' : 'Share their invite code to let them sign.'}`);
+    } catch (e: any) {
+      Alert.alert('Could not reassign', e?.message || 'Try again.');
+    }
+  };
 
   const isOwner = useMemo(() => spaceRole?.role !== 'staff', [spaceRole]);
 
@@ -212,6 +245,19 @@ export default function ContractViewScreen() {
           ) : null}
         </View>
 
+        {/* Owner has not assigned a staff yet — block the flow with an obvious CTA */}
+        {isOwner && !contract.assigned_staff_id && contract.status !== 'void' && (
+          <TouchableOpacity style={[styles.inviteBox, { borderColor: tints.pink.icon, backgroundColor: tints.pink.bg }]} onPress={() => setReassignOpen(true)} testID="contract-assign-cta">
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.inviteTitle, { color: tints.pink.icon }]}>No staff assigned</Text>
+              <Text style={styles.inviteSub}>
+                This agreement isn't linked to a staff member, so they cannot see it. Tap to assign now.
+              </Text>
+            </View>
+            <Icon name="ChevronRight" size={18} color={tints.pink.icon} />
+          </TouchableOpacity>
+        )}
+
         {/* Invite-code callout: owner viewing, staff not yet joined */}
         {isOwner && assignedStaff && !assignedStaff.user_id && contract.status !== 'void' && (
           <View style={[styles.inviteBox]}>
@@ -236,6 +282,10 @@ export default function ContractViewScreen() {
                 >
                   <Icon name="Copy" size={14} color={colors.textMain} />
                   <Text style={styles.copyTxt}>Copy code</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => setReassignOpen(true)} style={[styles.copyBtn, { marginLeft: 6 }]}>
+                  <Icon name="Edit3" size={14} color={colors.textMain} />
+                  <Text style={styles.copyTxt}>Reassign</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -268,6 +318,47 @@ export default function ContractViewScreen() {
 
         <View style={{ height: 60 }} />
       </ScrollView>
+
+      {/* Reassign Modal */}
+      <Modal visible={reassignOpen} animationType="slide" transparent onRequestClose={() => setReassignOpen(false)}>
+        <View style={styles.modalBg}>
+          <SafeAreaView style={styles.modalSheet} edges={['bottom']}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Assign to staff</Text>
+              <TouchableOpacity onPress={() => setReassignOpen(false)} style={styles.iconBtn}>
+                <Icon name="X" size={18} color={colors.textMain} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView contentContainerStyle={{ padding: spacing.md, gap: 8 }}>
+              {allStaff.length === 0 ? (
+                <Text style={styles.helpTxt}>No staff in this space yet. Add a staff member from the Household tab first.</Text>
+              ) : (
+                allStaff.filter((s) => s.active !== false).map((s) => (
+                  <TouchableOpacity
+                    key={s.staff_id}
+                    style={[styles.row, contract.assigned_staff_id === s.staff_id && { borderColor: colors.primary, borderWidth: 1 }]}
+                    onPress={() => reassign(s.staff_id)}
+                    testID={`reassign-${s.staff_id}`}
+                  >
+                    <View style={[styles.kindIcon || { width: 40, height: 40, borderRadius: 12 }, { backgroundColor: tints.blue.icon, alignItems: 'center', justifyContent: 'center' }]}>
+                      <Text style={{ color: '#fff', fontWeight: '800' }}>{(s.name || '?')[0]?.toUpperCase()}</Text>
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.rowName}>{s.name}</Text>
+                      <Text style={styles.rowSub}>
+                        {s.role_name || 'Staff'} · {s.user_id ? '✓ Joined' : `Invite code: ${s.invite_code || '—'}`}
+                      </Text>
+                    </View>
+                    {contract.assigned_staff_id === s.staff_id && (
+                      <Icon name="Check" size={18} color={colors.primary} />
+                    )}
+                  </TouchableOpacity>
+                ))
+              )}
+            </ScrollView>
+          </SafeAreaView>
+        </View>
+      </Modal>
 
       {/* Sign Modal */}
       <Modal visible={signOpen} animationType="slide" transparent onRequestClose={() => setSignOpen(false)}>
@@ -395,6 +486,10 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: colors.border,
   },
   copyTxt: { fontSize: 11, fontWeight: '800', color: colors.textMain },
+  row: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: colors.surface, padding: spacing.md, borderRadius: radius.md, marginBottom: 6, ...shadows.card },
+  rowName: { fontSize: 14, fontWeight: '800', color: colors.textMain },
+  rowSub: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  kindIcon: { width: 40, height: 40, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   bodyCard: {
     backgroundColor: '#FFFEFB',
     borderWidth: 1, borderColor: colors.border,

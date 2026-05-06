@@ -1,593 +1,601 @@
 """
-Backend tests for Cozii Household Phase 2:
-  - /api/household/tasks (CRUD + completion toggle + due-on-date logic)
-  - /api/household/attendance (upsert + filter)
-  - /api/household/shopping (CRUD + status transitions + enrichment)
+Backend test suite for Cozii — Phase 8: Socket.IO real-time sync.
 
-Run:
-    python /app/backend_test.py
+Focus: the new socket.io integration mounted at /api/socket.io, emit helpers,
+and event wiring on contract CRUD + staff join + notifications.
+
+Usage: /root/.venv/bin/python backend_test.py
 """
-from __future__ import annotations
+import asyncio
 import os
-import sys
 import time
-import json
 import uuid
+import traceback
+from typing import Any, Dict, List, Optional, Tuple
+
 import requests
-from datetime import datetime, timezone, timedelta, date
+import socketio
 
-BASE = "https://family-wallet-21.preview.emergentagent.com/api"
-
-PRIMARY_EMAIL = "test@cozii.app"
-PRIMARY_PASSWORD = "test1234"
+BASE = os.environ.get("BACKEND_BASE", "http://localhost:8001")
+API = f"{BASE}/api"
 
 
-def _u(suffix: str) -> str:
-    return f"{BASE}/{suffix.lstrip('/')}"
+# -------------- HTTP helpers -------------- #
+
+def _uniq_email(prefix: str) -> str:
+    return f"{prefix}_{int(time.time())}_{uuid.uuid4().hex[:6]}@cozii.app"
 
 
-def _hdr(token: str) -> dict:
-    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-
-
-# ============================================================
-# Test bookkeeping
-# ============================================================
-RESULTS: list[tuple[bool, str, str]] = []
-
-
-def record(ok: bool, name: str, detail: str = ""):
-    RESULTS.append((ok, name, detail))
-    flag = "PASS" if ok else "FAIL"
-    print(f"  [{flag}] {name}" + (f" -- {detail}" if detail and not ok else ""))
-
-
-def section(title: str):
-    print(f"\n=== {title} ===")
-
-
-# ============================================================
-# Auth + space prep
-# ============================================================
-def login_or_register(email: str, password: str, name: str) -> str:
-    r = requests.post(_u("auth/login"), json={"email": email, "password": password}, timeout=30)
-    if r.status_code == 200:
-        return r.json()["token"]
-    r = requests.post(_u("auth/register"), json={"email": email, "password": password, "name": name}, timeout=30)
-    if r.status_code in (200, 201):
-        return r.json()["token"]
-    raise SystemExit(f"login/register failed for {email}: {r.status_code} {r.text}")
-
-
-def get_or_create_household_space(token: str) -> dict:
-    """Find/create a household space owned by this user."""
-    r = requests.get(_u("spaces"), headers=_hdr(token), timeout=30)
-    r.raise_for_status()
-    spaces = r.json()
-    me = requests.get(_u("auth/me"), headers=_hdr(token), timeout=30).json()
-    my_uid = me["user_id"]
-    for s in spaces:
-        if s.get("owner_id") == my_uid and s.get("space_type") == "household":
-            return s
-    # Create a household one
-    r = requests.post(_u("spaces"), headers=_hdr(token),
-                      json={"name": f"Cozii Household Phase2 {uuid.uuid4().hex[:6]}",
-                            "space_type": "household", "currency": "IDR"}, timeout=30)
+def http_register(email: str, password: str, name: str) -> Dict[str, Any]:
+    r = requests.post(
+        f"{API}/auth/register",
+        json={"email": email, "password": password, "name": name},
+        timeout=10,
+    )
     r.raise_for_status()
     return r.json()
 
 
-def ensure_staff_and_category(token: str, space_id: str) -> tuple[str, str]:
-    """Return (staff_id, category_id). Create them if missing."""
-    # Roles auto-seed
-    r = requests.get(_u("household/roles"), headers=_hdr(token), params={"space_id": space_id}, timeout=30)
+def H(token: str) -> Dict[str, str]:
+    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+
+def create_space(token: str, space_type: str = "household") -> Dict[str, Any]:
+    r = requests.post(
+        f"{API}/spaces",
+        headers=H(token),
+        json={"name": f"Test Space {uuid.uuid4().hex[:6]}", "space_type": space_type, "currency": "USD"},
+        timeout=10,
+    )
     r.raise_for_status()
-    roles = r.json()
-    maid_role = next((x for x in roles if x.get("name") == "Maid"), None) or roles[0]
+    return r.json()
 
-    # Staff
-    r = requests.get(_u("household/staff"), headers=_hdr(token), params={"space_id": space_id}, timeout=30)
+
+def get_roles(token: str, space_id: str) -> List[Dict[str, Any]]:
+    r = requests.get(f"{API}/household/roles", headers=H(token), params={"space_id": space_id}, timeout=10)
     r.raise_for_status()
-    staff_list = r.json()
-    if staff_list:
-        staff_id = staff_list[0]["staff_id"]
-    else:
-        r = requests.post(_u("household/staff"), headers=_hdr(token), json={
-            "space_id": space_id, "name": "Sari Wijaya", "role_id": maid_role["role_id"],
-            "salary": 2500000, "pay_cycle": "monthly", "off_day": "Sunday",
-        }, timeout=30)
-        r.raise_for_status()
-        staff_id = r.json()["staff_id"]
+    return r.json()
 
-    # Category (any)
-    r = requests.get(_u("categories"), headers=_hdr(token), params={"space_id": space_id}, timeout=30)
+
+def create_staff(token: str, space_id: str, name: str, role_id: str) -> Dict[str, Any]:
+    r = requests.post(
+        f"{API}/household/staff",
+        headers=H(token),
+        json={
+            "space_id": space_id,
+            "name": name,
+            "role_id": role_id,
+            "salary": 1000,
+            "pay_cycle": "monthly",
+            "off_day": "sun",
+        },
+        timeout=10,
+    )
     r.raise_for_status()
-    cats = r.json()
-    if cats:
-        cat_id = cats[0]["category_id"]
-    else:
-        r = requests.post(_u("categories"), headers=_hdr(token),
-                          json={"space_id": space_id, "name": "Pantry", "icon": "Refrigerator", "tint": "mint"},
-                          timeout=30)
-        r.raise_for_status()
-        cat_id = r.json()["category_id"]
-    return staff_id, cat_id
+    return r.json()
 
 
-# ============================================================
-# 1. Tasks
-# ============================================================
-def test_tasks(token: str, space_id: str, outsider_token: str):
-    section("Tasks (/api/household/tasks)")
-    today = datetime.now(timezone.utc).date()
-    today_str = today.isoformat()
-    today_wd = today.weekday()  # Mon=0
-
-    created_ids: list[str] = []
-
-    # POST daily
-    r = requests.post(_u("household/tasks"), headers=_hdr(token), json={
-        "space_id": space_id, "title": "Dust living room", "recurrence": "daily",
-    }, timeout=30)
-    if r.status_code == 200:
-        body = r.json()
-        ok = (body.get("recurrence") == "daily"
-              and body.get("active") is True
-              and body.get("requires_photo") is False)
-        record(ok, "POST daily task returns recurrence=daily, active=true, requires_photo=false",
-               f"got {body}")
-        daily_id = body.get("task_id")
-        if daily_id: created_ids.append(daily_id)
-    else:
-        record(False, "POST daily task", f"{r.status_code} {r.text}")
-        daily_id = None
-
-    # POST weekly with weekdays Mon/Wed/Fri
-    weekly_wds = [0, 2, 4]
-    r = requests.post(_u("household/tasks"), headers=_hdr(token), json={
-        "space_id": space_id, "title": "Mop floors", "recurrence": "weekly",
-        "weekdays": weekly_wds,
-    }, timeout=30)
-    if r.status_code == 200:
-        body = r.json()
-        ok = (body.get("recurrence") == "weekly"
-              and sorted(body.get("weekdays") or []) == sorted(weekly_wds))
-        record(ok, "POST weekly task returns weekdays list", f"got weekdays={body.get('weekdays')}")
-        weekly_id = body.get("task_id")
-        if weekly_id: created_ids.append(weekly_id)
-    else:
-        record(False, "POST weekly task", f"{r.status_code} {r.text}")
-        weekly_id = None
-
-    # POST monthly with monthly_day
-    monthly_day = 15
-    r = requests.post(_u("household/tasks"), headers=_hdr(token), json={
-        "space_id": space_id, "title": "Pay water bill", "recurrence": "monthly",
-        "monthly_day": monthly_day,
-    }, timeout=30)
-    if r.status_code == 200:
-        body = r.json()
-        ok = (body.get("recurrence") == "monthly" and body.get("monthly_day") == monthly_day)
-        record(ok, "POST monthly task returns monthly_day=15", f"got {body}")
-        monthly_id = body.get("task_id")
-        if monthly_id: created_ids.append(monthly_id)
-    else:
-        record(False, "POST monthly task", f"{r.status_code} {r.text}")
-        monthly_id = None
-
-    # POST once with once_date
-    once_date_str = "2026-06-15"
-    r = requests.post(_u("household/tasks"), headers=_hdr(token), json={
-        "space_id": space_id, "title": "AC service annual", "recurrence": "once",
-        "once_date": once_date_str,
-    }, timeout=30)
-    if r.status_code == 200:
-        body = r.json()
-        ok = (body.get("recurrence") == "once" and body.get("once_date") == once_date_str)
-        record(ok, "POST once task returns once_date", f"got {body}")
-        once_id = body.get("task_id")
-        if once_id: created_ids.append(once_id)
-    else:
-        record(False, "POST once task", f"{r.status_code} {r.text}")
-        once_id = None
-
-    # GET tasks for TODAY
-    r = requests.get(_u("household/tasks"), headers=_hdr(token),
-                     params={"space_id": space_id, "date": today_str}, timeout=30)
-    if r.status_code == 200:
-        payload = r.json()
-        ok_shape = (payload.get("date") == today_str and isinstance(payload.get("tasks"), list))
-        record(ok_shape, "GET tasks?date=TODAY shape {date, tasks[]}", f"got date={payload.get('date')}")
-        tasks_by_id = {t["task_id"]: t for t in payload.get("tasks", [])}
-
-        # daily: due_today=true
-        if daily_id and daily_id in tasks_by_id:
-            record(tasks_by_id[daily_id].get("due_today") is True,
-                   "Daily task has due_today=true",
-                   f"got {tasks_by_id[daily_id].get('due_today')}")
-
-        # weekly: due_today only if today's weekday in [0,2,4]
-        if weekly_id and weekly_id in tasks_by_id:
-            expected = today_wd in weekly_wds
-            record(tasks_by_id[weekly_id].get("due_today") is expected,
-                   f"Weekly task due_today reflects today.weekday()={today_wd} in {weekly_wds} -> {expected}",
-                   f"got {tasks_by_id[weekly_id].get('due_today')}")
-
-        # monthly: due_today only if today.day == 15
-        if monthly_id and monthly_id in tasks_by_id:
-            expected = today.day == monthly_day
-            record(tasks_by_id[monthly_id].get("due_today") is expected,
-                   f"Monthly task due_today reflects today.day=={monthly_day} -> {expected}",
-                   f"got {tasks_by_id[monthly_id].get('due_today')}")
-
-        # once: due_today only if date matches
-        if once_id and once_id in tasks_by_id:
-            expected = (once_date_str == today_str)
-            record(tasks_by_id[once_id].get("due_today") is expected,
-                   f"Once task due_today reflects exact date match -> {expected}",
-                   f"got {tasks_by_id[once_id].get('due_today')}")
-    else:
-        record(False, "GET tasks?date=TODAY", f"{r.status_code} {r.text}")
-        tasks_by_id = {}
-
-    # PATCH task (title + description)
-    if daily_id:
-        new_title = "Dust + vacuum living room"
-        new_desc = "Mind the rugs"
-        r = requests.patch(_u(f"household/tasks/{daily_id}"), headers=_hdr(token),
-                           json={"title": new_title, "description": new_desc}, timeout=30)
-        if r.status_code == 200:
-            body = r.json()
-            ok = (body.get("title") == new_title and body.get("description") == new_desc)
-            record(ok, "PATCH task updates title + description", f"got title={body.get('title')}")
-        else:
-            record(False, "PATCH task", f"{r.status_code} {r.text}")
-
-    # POST /complete first call -> {completed: true}
-    if daily_id:
-        r = requests.post(_u(f"household/tasks/{daily_id}/complete"), headers=_hdr(token),
-                          json={"date": today_str}, timeout=30)
-        if r.status_code == 200:
-            record(r.json().get("completed") is True,
-                   "POST /complete first call returns {completed: true}",
-                   f"got {r.json()}")
-        else:
-            record(False, "POST /complete first call", f"{r.status_code} {r.text}")
-
-        # Verify GET shows completed_today=true
-        r = requests.get(_u("household/tasks"), headers=_hdr(token),
-                         params={"space_id": space_id, "date": today_str}, timeout=30)
-        if r.status_code == 200:
-            t = next((x for x in r.json().get("tasks", []) if x["task_id"] == daily_id), None)
-            record(bool(t) and t.get("completed_today") is True,
-                   "GET tasks shows completed_today=true after first complete",
-                   f"got completed_today={t and t.get('completed_today')}")
-        else:
-            record(False, "GET tasks after first complete", f"{r.status_code} {r.text}")
-
-        # Second call -> {completed: false} (toggle)
-        r = requests.post(_u(f"household/tasks/{daily_id}/complete"), headers=_hdr(token),
-                          json={"date": today_str}, timeout=30)
-        if r.status_code == 200:
-            record(r.json().get("completed") is False,
-                   "POST /complete second call toggles to {completed: false}",
-                   f"got {r.json()}")
-        else:
-            record(False, "POST /complete second call", f"{r.status_code} {r.text}")
-
-        # Verify GET shows completed_today=false
-        r = requests.get(_u("household/tasks"), headers=_hdr(token),
-                         params={"space_id": space_id, "date": today_str}, timeout=30)
-        if r.status_code == 200:
-            t = next((x for x in r.json().get("tasks", []) if x["task_id"] == daily_id), None)
-            record(bool(t) and t.get("completed_today") is False,
-                   "GET tasks shows completed_today=false after toggle off",
-                   f"got completed_today={t and t.get('completed_today')}")
-
-    # DELETE task
-    if monthly_id:
-        r = requests.delete(_u(f"household/tasks/{monthly_id}"), headers=_hdr(token), timeout=30)
-        record(r.status_code == 200, "DELETE task -> 200", f"{r.status_code} {r.text[:120]}")
-        # GET should not include it
-        r = requests.get(_u("household/tasks"), headers=_hdr(token),
-                         params={"space_id": space_id, "date": today_str}, timeout=30)
-        if r.status_code == 200:
-            ids = [t["task_id"] for t in r.json().get("tasks", [])]
-            record(monthly_id not in ids, "Deleted task disappears from GET",
-                   f"still in list: {monthly_id in ids}")
-
-    # Non-member 403
-    r = requests.get(_u("household/tasks"), headers=_hdr(outsider_token),
-                     params={"space_id": space_id, "date": today_str}, timeout=30)
-    record(r.status_code == 403, "Non-member GET tasks -> 403", f"got {r.status_code}")
-
-    r = requests.post(_u("household/tasks"), headers=_hdr(outsider_token),
-                      json={"space_id": space_id, "title": "x", "recurrence": "daily"}, timeout=30)
-    record(r.status_code == 403, "Non-member POST tasks -> 403", f"got {r.status_code}")
-
-    # Cleanup remaining tasks
-    for tid in created_ids:
-        if tid == monthly_id:
-            continue
-        try: requests.delete(_u(f"household/tasks/{tid}"), headers=_hdr(token), timeout=15)
-        except Exception: pass
+def staff_join_by_code(token: str, invite_code: str) -> Dict[str, Any]:
+    r = requests.post(
+        f"{API}/household/staff/join",
+        headers=H(token),
+        json={"invite_code": invite_code},
+        timeout=10,
+    )
+    r.raise_for_status()
+    return r.json()
 
 
-# ============================================================
-# 2. Attendance
-# ============================================================
-def test_attendance(token: str, space_id: str, staff_id: str, outsider_token: str):
-    section("Attendance (/api/household/attendance)")
-    target_date = "2026-06-01"
+# -------------- Socket.IO test client -------------- #
 
-    # POST present
-    r = requests.post(_u("household/attendance"), headers=_hdr(token), json={
-        "space_id": space_id, "staff_id": staff_id, "date": target_date, "status": "present",
-    }, timeout=30)
-    if r.status_code == 200:
-        body = r.json()
-        ok = (body.get("status") == "present" and body.get("staff_id") == staff_id
-              and body.get("date") == target_date and body.get("attendance_id"))
-        record(ok, "POST attendance present returns AttendanceLog", f"got {body}")
-        first_aid = body.get("attendance_id")
-    else:
-        record(False, "POST attendance present", f"{r.status_code} {r.text}")
-        first_aid = None
+class SioTestClient:
+    def __init__(self, name: str):
+        self.name = name
+        self.sio = socketio.AsyncClient(logger=False, engineio_logger=False, reconnection=False)
+        self.hello: Optional[Dict[str, Any]] = None
+        self.space_events: List[Dict[str, Any]] = []
+        self.user_events: List[Dict[str, Any]] = []
+        self._hello_evt = asyncio.Event()
 
-    # Upsert: same staff+date with status=sick should keep id, change status
-    r = requests.post(_u("household/attendance"), headers=_hdr(token), json={
-        "space_id": space_id, "staff_id": staff_id, "date": target_date, "status": "sick",
-    }, timeout=30)
-    if r.status_code == 200:
-        body = r.json()
-        same_id = body.get("attendance_id") == first_aid if first_aid else True
-        record(same_id and body.get("status") == "sick",
-               "Upsert: same staff+date+sick keeps attendance_id, status='sick'",
-               f"got id={body.get('attendance_id')} (was {first_aid}) status={body.get('status')}")
-    else:
-        record(False, "POST attendance upsert sick", f"{r.status_code} {r.text}")
+        @self.sio.on("hello")
+        async def _h(data):
+            self.hello = data
+            self._hello_evt.set()
 
-    # Invalid status -> 400
-    r = requests.post(_u("household/attendance"), headers=_hdr(token), json={
-        "space_id": space_id, "staff_id": staff_id, "date": target_date, "status": "partying",
-    }, timeout=30)
-    record(r.status_code == 400, "POST invalid status 'partying' -> 400", f"got {r.status_code}")
+        @self.sio.on("space.event")
+        async def _s(data):
+            self.space_events.append(data)
 
-    # GET range filter
-    r = requests.get(_u("household/attendance"), headers=_hdr(token), params={
-        "space_id": space_id, "date_from": target_date, "date_to": target_date,
-    }, timeout=30)
-    if r.status_code == 200:
-        docs = r.json()
-        found = any(d.get("staff_id") == staff_id and d.get("date") == target_date for d in docs)
-        record(found, "GET attendance with date range returns the record", f"len={len(docs)}")
-    else:
-        record(False, "GET attendance range", f"{r.status_code} {r.text}")
+        @self.sio.on("user.event")
+        async def _u(data):
+            self.user_events.append(data)
 
-    # GET with staff_id filter -> only that staff's records
-    # Seed a 2nd staff record with different staff_id (if possible) to confirm filter narrows
-    r = requests.get(_u("household/staff"), headers=_hdr(token), params={"space_id": space_id}, timeout=30)
-    other_staff_id = None
-    if r.status_code == 200:
-        for s in r.json():
-            if s["staff_id"] != staff_id:
-                other_staff_id = s["staff_id"]
-                break
-    if other_staff_id is None:
-        # Create second staff
-        r = requests.get(_u("household/roles"), headers=_hdr(token), params={"space_id": space_id}, timeout=15)
-        roles = r.json() if r.status_code == 200 else []
-        rid = (next((x for x in roles if x.get("name") == "Driver"), None) or roles[0])["role_id"]
-        r = requests.post(_u("household/staff"), headers=_hdr(token), json={
-            "space_id": space_id, "name": "Budi Santoso", "role_id": rid,
-            "salary": 3000000, "pay_cycle": "monthly", "off_day": "Saturday",
-        }, timeout=15)
-        if r.status_code == 200:
-            other_staff_id = r.json()["staff_id"]
-
-    if other_staff_id:
-        requests.post(_u("household/attendance"), headers=_hdr(token), json={
-            "space_id": space_id, "staff_id": other_staff_id, "date": target_date, "status": "present",
-        }, timeout=15)
-        r = requests.get(_u("household/attendance"), headers=_hdr(token), params={
-            "space_id": space_id, "staff_id": staff_id,
-        }, timeout=30)
-        if r.status_code == 200:
-            docs = r.json()
-            only_one_staff = all(d.get("staff_id") == staff_id for d in docs) and len(docs) >= 1
-            record(only_one_staff, "GET attendance with staff_id filter returns only that staff",
-                   f"len={len(docs)} unique_staff={ {d.get('staff_id') for d in docs} }")
-        else:
-            record(False, "GET attendance staff_id filter", f"{r.status_code} {r.text}")
-
-    # Non-member 403
-    r = requests.get(_u("household/attendance"), headers=_hdr(outsider_token),
-                     params={"space_id": space_id}, timeout=30)
-    record(r.status_code == 403, "Non-member GET attendance -> 403", f"got {r.status_code}")
-    r = requests.post(_u("household/attendance"), headers=_hdr(outsider_token), json={
-        "space_id": space_id, "staff_id": staff_id, "date": target_date, "status": "present",
-    }, timeout=30)
-    record(r.status_code == 403, "Non-member POST attendance -> 403", f"got {r.status_code}")
-
-
-# ============================================================
-# 3. Shopping requests
-# ============================================================
-def test_shopping(token: str, space_id: str, category_id: str, outsider_token: str):
-    section("Shopping requests (/api/household/shopping)")
-    created_ids: list[str] = []
-
-    # Get cat name
-    r = requests.get(_u("categories"), headers=_hdr(token), params={"space_id": space_id}, timeout=15)
-    cat_map = {c["category_id"]: c["name"] for c in (r.json() if r.status_code == 200 else [])}
-    cat_name = cat_map.get(category_id)
-
-    # POST high urgency Rice
-    r = requests.post(_u("household/shopping"), headers=_hdr(token), json={
-        "space_id": space_id, "item_name": "Rice", "quantity": "5kg",
-        "urgency": "high", "category_id": category_id,
-    }, timeout=30)
-    if r.status_code == 200:
-        body = r.json()
-        ok = (body.get("status") == "pending" and body.get("urgency") == "high"
-              and body.get("item_name") == "Rice")
-        record(ok, "POST shopping {Rice, high} -> status=pending urgency=high", f"got {body}")
-        rice_id = body.get("request_id")
-        if rice_id: created_ids.append(rice_id)
-    else:
-        record(False, "POST shopping Rice", f"{r.status_code} {r.text}")
-        rice_id = None
-
-    # POST urgency 'xyz' normalised to 'normal'
-    r = requests.post(_u("household/shopping"), headers=_hdr(token), json={
-        "space_id": space_id, "item_name": "Cooking oil", "quantity": "2L",
-        "urgency": "xyz",
-    }, timeout=30)
-    if r.status_code == 200:
-        body = r.json()
-        record(body.get("urgency") == "normal", "POST urgency='xyz' normalised to 'normal'",
-               f"got urgency={body.get('urgency')}")
-        oil_id = body.get("request_id")
-        if oil_id: created_ids.append(oil_id)
-    else:
-        record(False, "POST shopping xyz urgency", f"{r.status_code} {r.text}")
-        oil_id = None
-
-    # GET sorted desc + enrichment
-    r = requests.get(_u("household/shopping"), headers=_hdr(token), params={"space_id": space_id}, timeout=30)
-    if r.status_code == 200:
-        docs = r.json()
-        # sort desc by created_at: newest first
-        ts = []
-        for d in docs:
-            ca = d.get("created_at")
-            if isinstance(ca, str):
-                try:
-                    ts.append(datetime.fromisoformat(ca.replace("Z", "+00:00")))
-                except Exception:
-                    ts.append(None)
-            else:
-                ts.append(None)
-        sorted_desc = all(
-            (ts[i] is None or ts[i+1] is None or ts[i] >= ts[i+1])
-            for i in range(len(ts) - 1)
+    async def connect(self, token: Optional[str], path: str = "/api/socket.io", timeout: float = 5.0):
+        auth = {"token": token} if token else None
+        await self.sio.connect(
+            BASE, socketio_path=path, auth=auth,
+            transports=["polling", "websocket"], wait_timeout=timeout,
         )
-        record(sorted_desc, "GET shopping sorted by created_at desc",
-               f"timestamps={[t.isoformat() if t else None for t in ts[:5]]}")
 
-        # Enrichment: each entry has requested_by_name and category_name (where applicable)
-        if rice_id:
-            rice = next((d for d in docs if d.get("request_id") == rice_id), None)
-            if rice:
-                has_name = bool(rice.get("requested_by_name"))
-                cat_ok = (rice.get("category_name") == cat_name) if cat_name else True
-                record(has_name and cat_ok,
-                       "GET shopping entry enriched with requested_by_name + category_name",
-                       f"requested_by_name={rice.get('requested_by_name')} category_name={rice.get('category_name')} (expected {cat_name})")
-    else:
-        record(False, "GET shopping list", f"{r.status_code} {r.text}")
+    async def wait_hello(self, timeout: float = 5.0):
+        await asyncio.wait_for(self._hello_evt.wait(), timeout=timeout)
+        return self.hello
 
-    # GET with status=pending filter
-    r = requests.get(_u("household/shopping"), headers=_hdr(token),
-                     params={"space_id": space_id, "status": "pending"}, timeout=30)
-    if r.status_code == 200:
-        docs = r.json()
-        all_pending = all(d.get("status") == "pending" for d in docs)
-        record(all_pending and len(docs) >= 1, "GET ?status=pending filters",
-               f"len={len(docs)} statuses={[d.get('status') for d in docs[:5]]}")
-    else:
-        record(False, "GET shopping ?status=pending", f"{r.status_code} {r.text}")
+    async def emit_join(self, payload):
+        return await self.sio.call("join_room", payload, timeout=5)
 
-    me = requests.get(_u("auth/me"), headers=_hdr(token), timeout=15).json()
-    my_uid = me["user_id"]
+    async def disconnect(self):
+        try:
+            await self.sio.disconnect()
+        except Exception:
+            pass
 
-    # PATCH approve
-    if rice_id:
-        r = requests.patch(_u(f"household/shopping/{rice_id}"), headers=_hdr(token),
-                           json={"status": "approved"}, timeout=30)
-        if r.status_code == 200:
-            body = r.json()
-            ok = (body.get("status") == "approved" and body.get("approved_by") == my_uid)
-            record(ok, "PATCH shopping status=approved -> approved_by=current user",
-                   f"got status={body.get('status')} approved_by={body.get('approved_by')}")
+    async def wait_for(self, pred, timeout: float = 3.0, source: str = "space"):
+        end = time.time() + timeout
+        src = self.space_events if source == "space" else self.user_events
+        while time.time() < end:
+            for e in src:
+                if pred(e):
+                    return e
+            await asyncio.sleep(0.1)
+        return None
+
+
+# -------------- Test runner -------------- #
+
+class Runner:
+    def __init__(self):
+        self.results: List[Tuple[str, bool, str]] = []
+
+    def ok(self, name: str, msg: str = ""):
+        self.results.append((name, True, msg))
+        print(f"  PASS  {name}  {msg}".rstrip())
+
+    def fail(self, name: str, msg: str):
+        self.results.append((name, False, msg))
+        print(f"  FAIL  {name}  {msg}")
+
+    def summary(self):
+        p = sum(1 for _, ok, _ in self.results if ok)
+        f = len(self.results) - p
+        print("\n=== Summary ===")
+        print(f"  PASS: {p}  FAIL: {f}  TOTAL: {len(self.results)}")
+        if f:
+            print("\nFAILED:")
+            for n, ok, m in self.results:
+                if not ok:
+                    print(f"  - {n}: {m}")
+        return p, f
+
+
+R = Runner()
+
+
+# -------------- Test cases -------------- #
+
+async def setup_world() -> Dict[str, Any]:
+    a = http_register(_uniq_email("alex"), "test1234", "Alex Morgan")
+    b = http_register(_uniq_email("riley"), "test1234", "Riley Chen")
+    c = http_register(_uniq_email("quinn"), "test1234", "Quinn Park")
+
+    space_a = create_space(a["token"])
+    space_c = create_space(c["token"])
+
+    roles = get_roles(a["token"], space_a["space_id"])
+    maid = next((r for r in roles if (r.get("name") or "").lower() == "maid"), roles[0])
+    staff = create_staff(a["token"], space_a["space_id"], "Riley Chen", maid["role_id"])
+    inv = staff.get("invite_code")
+    if not inv:
+        raise RuntimeError("create_staff did not return invite_code")
+    staff_join_by_code(b["token"], inv)
+
+    return {
+        "A": a, "B": b, "C": c,
+        "space_a": space_a, "space_c": space_c,
+        "staff_id": staff["staff_id"],
+    }
+
+
+async def test_connection_lifecycle(ctx):
+    # valid connect
+    client = SioTestClient("A-valid")
+    try:
+        await client.connect(ctx["A"]["token"])
+        R.ok("connect with valid token")
+        try:
+            await client.wait_hello(timeout=5)
+            sp = client.hello or {}
+            if sp.get("user_id") == ctx["A"]["user"]["user_id"] and ctx["space_a"]["space_id"] in (sp.get("spaces") or []):
+                R.ok("hello event has user_id + spaces")
+            else:
+                R.fail("hello event payload", f"got={sp}")
+        except asyncio.TimeoutError:
+            R.fail("hello event received", "no hello within 5s")
+    except Exception as e:
+        R.fail("connect with valid token", f"{type(e).__name__}: {e}")
+    finally:
+        await client.disconnect()
+
+    # no token
+    c2 = SioTestClient("no-token")
+    try:
+        await c2.connect(None)
+        R.fail("connect with no token refused", "connection succeeded")
+        await c2.disconnect()
+    except Exception as e:
+        R.ok("connect with no token refused", f"{type(e).__name__}")
+
+    # bad token
+    c3 = SioTestClient("bad-token")
+    try:
+        await c3.connect("this-is-not-a-valid-token-xyz")
+        R.fail("connect with bad token refused", "connection succeeded")
+        await c3.disconnect()
+    except Exception as e:
+        R.ok("connect with bad token refused", f"{type(e).__name__}")
+
+    # wrong path
+    c4 = SioTestClient("wrong-path")
+    try:
+        await c4.connect(ctx["A"]["token"], path="/socket.io", timeout=3)
+        R.fail("connect with wrong path fails", "succeeded unexpectedly")
+        await c4.disconnect()
+    except Exception as e:
+        R.ok("connect with wrong path fails", f"{type(e).__name__}")
+
+
+async def test_join_room(ctx):
+    client = SioTestClient("A-join")
+    try:
+        await client.connect(ctx["A"]["token"])
+        await client.wait_hello(5)
+
+        ack = await client.emit_join({"space_id": ctx["space_a"]["space_id"]})
+        if isinstance(ack, dict) and ack.get("ok") is True and ack.get("joined") == ctx["space_a"]["space_id"]:
+            R.ok("join_room valid space")
         else:
-            record(False, "PATCH approved", f"{r.status_code} {r.text}")
+            R.fail("join_room valid space", f"ack={ack}")
 
-    # PATCH purchased -> fulfilled_at set
-    if rice_id:
-        r = requests.patch(_u(f"household/shopping/{rice_id}"), headers=_hdr(token),
-                           json={"status": "purchased"}, timeout=30)
-        if r.status_code == 200:
-            body = r.json()
-            ok = (body.get("status") == "purchased" and body.get("fulfilled_at"))
-            record(ok, "PATCH shopping status=purchased -> fulfilled_at set",
-                   f"got status={body.get('status')} fulfilled_at={body.get('fulfilled_at')}")
+        ack2 = await client.emit_join({"space_id": "space_invalid_xyz"})
+        if isinstance(ack2, dict) and ack2.get("ok") is False:
+            R.ok("join_room invalid space rejected")
         else:
-            record(False, "PATCH purchased", f"{r.status_code} {r.text}")
+            R.fail("join_room invalid space rejected", f"ack={ack2}")
 
-    # DELETE
-    if oil_id:
-        r = requests.delete(_u(f"household/shopping/{oil_id}"), headers=_hdr(token), timeout=30)
-        record(r.status_code == 200, "DELETE shopping -> 200", f"{r.status_code} {r.text[:120]}")
+        ack3 = await client.emit_join({})
+        if isinstance(ack3, dict) and ack3.get("ok") is False:
+            R.ok("join_room empty payload rejected")
+        else:
+            R.fail("join_room empty payload rejected", f"ack={ack3}")
+    except Exception as e:
+        R.fail("join_room suite", f"{type(e).__name__}: {e}")
+        traceback.print_exc()
+    finally:
+        await client.disconnect()
+
+
+async def _connect_all(ctx) -> Tuple[SioTestClient, SioTestClient, SioTestClient]:
+    a = SioTestClient("A"); b = SioTestClient("B"); c = SioTestClient("C")
+    await a.connect(ctx["A"]["token"])
+    await b.connect(ctx["B"]["token"])
+    await c.connect(ctx["C"]["token"])
+    await a.wait_hello(5); await b.wait_hello(5); await c.wait_hello(5)
+    return a, b, c
+
+
+async def test_contract_events_and_isolation(ctx):
+    a, b, c = None, None, None
+    try:
+        a, b, c = await _connect_all(ctx)
+        for cli in (a, b, c):
+            cli.space_events.clear(); cli.user_events.clear()
+
+        # POST /api/contracts
+        r = requests.post(
+            f"{API}/contracts",
+            headers=H(ctx["A"]["token"]),
+            json={
+                "space_id": ctx["space_a"]["space_id"],
+                "title": "Full-time Employment Agreement",
+                "assigned_staff_id": ctx["staff_id"],
+                "body_md": "Work Tuesday-Sunday.",
+                "require_drawn_signature_owner": False,
+                "require_drawn_signature_staff": False,
+            },
+            timeout=10,
+        )
+        if r.status_code != 200:
+            R.fail("POST /api/contracts", f"status={r.status_code} body={r.text[:300]}")
+            return
+        contract_id = r.json().get("contract_id")
+        R.ok("POST /api/contracts", f"contract_id={contract_id}")
+
+        ev_a = await a.wait_for(lambda e: e.get("kind") == "contract" and e.get("action") == "created", 3)
+        R.ok("A receives space.event contract.created") if ev_a else R.fail("A receives space.event contract.created", f"events={a.space_events}")
+        ev_b = await b.wait_for(lambda e: e.get("kind") == "contract" and e.get("action") == "created", 3)
+        R.ok("B receives space.event contract.created") if ev_b else R.fail("B receives space.event contract.created", f"events={b.space_events}")
+
+        un_b = await b.wait_for(
+            lambda e: e.get("kind") == "notification" and (e.get("payload") or {}).get("kind") == "contract_assigned",
+            3, source="user",
+        )
+        R.ok("B receives user.event notification contract_assigned") if un_b else R.fail("B receives user.event notification contract_assigned", f"events={b.user_events}")
+
+        # Cross-space isolation: C receives nothing
+        if not c.space_events and not c.user_events:
+            R.ok("C (different space) receives no events")
+        else:
+            R.fail("C (different space) receives no events", f"space={c.space_events} user={c.user_events}")
+
+        # REST notification exists
+        rn = requests.get(f"{API}/notifications", headers=H(ctx["B"]["token"]),
+                          params={"space_id": ctx["space_a"]["space_id"]}, timeout=10)
+        if rn.status_code == 200 and any(n.get("kind") == "contract_assigned" for n in rn.json()):
+            R.ok("notify_user inserted contract_assigned notification (REST GET /notifications)")
+        else:
+            R.fail("notify_user inserted contract_assigned notification", f"status={rn.status_code} body={rn.text[:300]}")
+
+        # ---- sign by owner ----
+        for cli in (a, b, c):
+            cli.space_events.clear(); cli.user_events.clear()
+
+        r = requests.post(f"{API}/contracts/{contract_id}/sign",
+                          headers=H(ctx["A"]["token"]), json={"typed_name": "Alex Morgan"}, timeout=10)
+        if r.status_code != 200:
+            R.fail("POST /contracts/{id}/sign (owner)", f"status={r.status_code} body={r.text[:300]}")
+            return
+        R.ok("POST /contracts/{id}/sign (owner)")
+
+        eva = await a.wait_for(lambda e: e.get("kind") == "contract" and e.get("action") == "signed", 3)
+        if eva and (eva.get("payload") or {}).get("by") == "owner":
+            R.ok("A receives space.event contract.signed by=owner")
+        else:
+            R.fail("A receives space.event contract.signed by=owner", f"eva={eva}")
+        evb = await b.wait_for(lambda e: e.get("kind") == "contract" and e.get("action") == "signed", 3)
+        if evb and (evb.get("payload") or {}).get("by") == "owner":
+            R.ok("B receives space.event contract.signed by=owner")
+        else:
+            R.fail("B receives space.event contract.signed by=owner", f"evb={evb}")
+        unb = await b.wait_for(
+            lambda e: e.get("kind") == "notification" and (e.get("payload") or {}).get("kind") == "contract_owner_signed",
+            3, source="user",
+        )
+        R.ok("B receives user.event notification contract_owner_signed") if unb else R.fail("B receives user.event notification contract_owner_signed", f"user_events={b.user_events}")
+
+        # ---- sign by staff ----
+        for cli in (a, b):
+            cli.space_events.clear(); cli.user_events.clear()
+
+        r = requests.post(f"{API}/contracts/{contract_id}/sign",
+                          headers=H(ctx["B"]["token"]), json={"typed_name": "Riley Chen"}, timeout=10)
+        if r.status_code != 200:
+            R.fail("POST /contracts/{id}/sign (staff)", f"status={r.status_code} body={r.text[:300]}")
+            return
+        R.ok("POST /contracts/{id}/sign (staff)")
+
+        eva2 = await a.wait_for(
+            lambda e: e.get("kind") == "contract" and e.get("action") == "signed" and (e.get("payload") or {}).get("by") == "staff",
+            3,
+        )
+        if eva2 and (eva2.get("payload") or {}).get("status") == "signed":
+            R.ok("A receives space.event contract.signed by=staff status=signed")
+        else:
+            R.fail("A receives space.event contract.signed by=staff status=signed", f"eva2={eva2}")
+        evb2 = await b.wait_for(
+            lambda e: e.get("kind") == "contract" and e.get("action") == "signed" and (e.get("payload") or {}).get("by") == "staff",
+            3,
+        )
+        R.ok("B receives space.event contract.signed by=staff") if evb2 else R.fail("B receives space.event contract.signed by=staff", f"evb2={evb2}")
+        una = await a.wait_for(
+            lambda e: e.get("kind") == "notification" and (e.get("payload") or {}).get("kind") == "contract_staff_signed",
+            3, source="user",
+        )
+        R.ok("A receives user.event notification contract_staff_signed") if una else R.fail("A receives user.event notification contract_staff_signed", f"user_events={a.user_events}")
+
+        # ---- void ----
+        a.space_events.clear(); b.space_events.clear()
+        r = requests.post(f"{API}/contracts/{contract_id}/void", headers=H(ctx["A"]["token"]), json={}, timeout=10)
         if r.status_code == 200:
-            r2 = requests.get(_u("household/shopping"), headers=_hdr(token),
-                              params={"space_id": space_id}, timeout=15)
-            if r2.status_code == 200:
-                ids = {d.get("request_id") for d in r2.json()}
-                record(oil_id not in ids, "Deleted shopping disappears from GET",
-                       f"still present: {oil_id in ids}")
+            R.ok("POST /contracts/{id}/void")
+            evv = await a.wait_for(lambda e: e.get("kind") == "contract" and e.get("action") == "voided", 3)
+            R.ok("A receives space.event contract.voided") if evv else R.fail("A receives space.event contract.voided", f"events={a.space_events}")
+        else:
+            R.fail("POST /contracts/{id}/void", f"status={r.status_code}")
 
-    # Non-member 403
-    r = requests.get(_u("household/shopping"), headers=_hdr(outsider_token),
-                     params={"space_id": space_id}, timeout=30)
-    record(r.status_code == 403, "Non-member GET shopping -> 403", f"got {r.status_code}")
-    r = requests.post(_u("household/shopping"), headers=_hdr(outsider_token), json={
-        "space_id": space_id, "item_name": "x",
-    }, timeout=30)
-    record(r.status_code == 403, "Non-member POST shopping -> 403", f"got {r.status_code}")
+        # ---- delete ----
+        a.space_events.clear()
+        r = requests.delete(f"{API}/contracts/{contract_id}", headers=H(ctx["A"]["token"]), timeout=10)
+        if r.status_code == 200:
+            R.ok("DELETE /contracts/{id}")
+            evd = await a.wait_for(lambda e: e.get("kind") == "contract" and e.get("action") == "deleted", 3)
+            R.ok("A receives space.event contract.deleted") if evd else R.fail("A receives space.event contract.deleted", f"events={a.space_events}")
+        else:
+            R.fail("DELETE /contracts/{id}", f"status={r.status_code}")
 
-    # Cleanup
-    for rid in created_ids:
-        try: requests.delete(_u(f"household/shopping/{rid}"), headers=_hdr(token), timeout=10)
-        except Exception: pass
+    except Exception as e:
+        R.fail("contract_events suite", f"{type(e).__name__}: {e}")
+        traceback.print_exc()
+    finally:
+        for cli in (a, b, c):
+            if cli:
+                await cli.disconnect()
 
 
-# ============================================================
-# Main
-# ============================================================
-def main():
-    section("Auth")
-    token = login_or_register(PRIMARY_EMAIL, PRIMARY_PASSWORD, "Test User")
-    print(f"  primary token len={len(token)}")
+async def test_contract_update(ctx):
+    a = SioTestClient("A-patch")
+    try:
+        await a.connect(ctx["A"]["token"])
+        await a.wait_hello(5)
 
-    # Outsider account that is NOT a member of the household space
-    outsider_email = f"outsider+{int(time.time())}@cozii.app"
-    outsider_token = login_or_register(outsider_email, "outsider1234!", "Outsider Tester")
-    print(f"  outsider={outsider_email}")
+        r = requests.post(
+            f"{API}/contracts",
+            headers=H(ctx["A"]["token"]),
+            json={
+                "space_id": ctx["space_a"]["space_id"],
+                "title": "Employment Contract v2",
+                "assigned_staff_id": ctx["staff_id"],
+                "body_md": "Original body",
+                "require_drawn_signature_owner": False,
+                "require_drawn_signature_staff": False,
+            },
+            timeout=10,
+        )
+        if r.status_code != 200:
+            R.fail("PATCH setup: POST /contracts", f"status={r.status_code}")
+            return
+        cid = r.json()["contract_id"]
+        a.space_events.clear()
 
-    section("Space + staff + category prep")
-    space = get_or_create_household_space(token)
-    space_id = space["space_id"]
-    print(f"  space_id={space_id} type={space.get('space_type')} currency={space.get('currency')}")
-    staff_id, category_id = ensure_staff_and_category(token, space_id)
-    print(f"  staff_id={staff_id} category_id={category_id}")
+        r = requests.patch(f"{API}/contracts/{cid}", headers=H(ctx["A"]["token"]),
+                           json={"title": "Employment Contract (renamed)"}, timeout=10)
+        if r.status_code == 200:
+            R.ok("PATCH /contracts/{id}")
+            evu = await a.wait_for(lambda e: e.get("kind") == "contract" and e.get("action") == "updated", 3)
+            R.ok("A receives space.event contract.updated") if evu else R.fail("A receives space.event contract.updated", f"events={a.space_events}")
+        else:
+            R.fail("PATCH /contracts/{id}", f"status={r.status_code}")
+    except Exception as e:
+        R.fail("contract_update suite", f"{type(e).__name__}: {e}")
+    finally:
+        await a.disconnect()
 
-    test_tasks(token, space_id, outsider_token)
-    test_attendance(token, space_id, staff_id, outsider_token)
-    test_shopping(token, space_id, category_id, outsider_token)
 
-    # Summary
-    section("SUMMARY")
-    passed = sum(1 for ok, *_ in RESULTS if ok)
-    failed = len(RESULTS) - passed
-    print(f"  {passed}/{len(RESULTS)} passed, {failed} failed")
-    if failed:
-        print("\n  Failures:")
-        for ok, name, detail in RESULTS:
-            if not ok:
-                print(f"   - {name}: {detail}")
-    return 0 if failed == 0 else 1
+async def test_staff_join_event(ctx):
+    a = SioTestClient("A-staff-join")
+    try:
+        await a.connect(ctx["A"]["token"])
+        await a.wait_hello(5)
+
+        roles = get_roles(ctx["A"]["token"], ctx["space_a"]["space_id"])
+        cook = next((r for r in roles if (r.get("name") or "").lower() == "cook"), roles[0])
+        staff = create_staff(ctx["A"]["token"], ctx["space_a"]["space_id"], "Jordan Kim", cook["role_id"])
+
+        newu = http_register(_uniq_email("jordan"), "test1234", "Jordan Kim")
+
+        a.space_events.clear()
+        staff_join_by_code(newu["token"], staff["invite_code"])
+
+        ev = await a.wait_for(lambda e: e.get("kind") == "staff" and e.get("action") == "joined", 3)
+        R.ok("A receives space.event staff.joined") if ev else R.fail("A receives space.event staff.joined", f"events={a.space_events}")
+    except Exception as e:
+        R.fail("staff_join suite", f"{type(e).__name__}: {e}")
+    finally:
+        await a.disconnect()
+
+
+async def test_reconnect(ctx):
+    a = SioTestClient("A-reconnect")
+    try:
+        try:
+            await a.connect(ctx["A"]["token"])
+            await a.wait_hello(5)
+            await a.disconnect()
+        except Exception as e:
+            R.fail("reconnect: initial connect", f"{type(e).__name__}: {e}")
+            return
+
+        a2 = SioTestClient("A-reconnect-2")
+        try:
+            await a2.connect(ctx["A"]["token"])
+            await a2.wait_hello(5)
+            R.ok("reconnect with valid token works")
+        finally:
+            await a2.disconnect()
+
+        a3 = SioTestClient("A-reconnect-bad")
+        try:
+            await a3.connect("definitely-not-a-valid-token")
+            R.fail("reconnect with invalid token refused", "connection succeeded")
+            await a3.disconnect()
+        except Exception as e:
+            R.ok("reconnect with invalid token refused", f"{type(e).__name__}")
+    finally:
+        await a.disconnect()
+
+
+async def test_concurrent_rooms(ctx):
+    space_a2 = create_space(ctx["A"]["token"], space_type="roommates")
+
+    a = SioTestClient("A-multi")
+    try:
+        await a.connect(ctx["A"]["token"])
+        h = await a.wait_hello(5)
+        if space_a2["space_id"] in (h.get("spaces") or []) and ctx["space_a"]["space_id"] in (h.get("spaces") or []):
+            R.ok("hello.spaces includes both owned spaces")
+        else:
+            R.fail("hello.spaces includes both owned spaces", f"hello={h}")
+
+        roles2 = get_roles(ctx["A"]["token"], space_a2["space_id"])
+        r2 = next(iter(roles2), None)
+        if not r2:
+            R.fail("concurrent rooms setup: roles", "empty")
+            return
+        st2 = create_staff(ctx["A"]["token"], space_a2["space_id"], "Casey Lee", r2["role_id"])
+
+        a.space_events.clear()
+        r = requests.post(
+            f"{API}/contracts",
+            headers=H(ctx["A"]["token"]),
+            json={
+                "space_id": space_a2["space_id"],
+                "title": "Second space contract",
+                "assigned_staff_id": st2["staff_id"],
+                "body_md": "x",
+                "require_drawn_signature_owner": False,
+                "require_drawn_signature_staff": False,
+            },
+            timeout=10,
+        )
+        if r.status_code != 200:
+            R.fail("concurrent rooms: POST contract in space_a2", f"status={r.status_code}")
+            return
+        ev = await a.wait_for(
+            lambda e: e.get("kind") == "contract" and e.get("action") == "created" and e.get("space_id") == space_a2["space_id"],
+            3,
+        )
+        R.ok("A receives events from second space room concurrently") if ev else R.fail("A receives events from second space room concurrently", f"events={a.space_events}")
+    except Exception as e:
+        R.fail("concurrent_rooms suite", f"{type(e).__name__}: {e}")
+    finally:
+        await a.disconnect()
+
+
+async def main():
+    print("=== Phase 8: Socket.IO real-time sync tests ===")
+    print(f"BASE={BASE}")
+
+    try:
+        ctx = await setup_world()
+        print(f"setup OK: owner={ctx['A']['user']['user_id']} staff={ctx['B']['user']['user_id']} outsider={ctx['C']['user']['user_id']} space={ctx['space_a']['space_id']}")
+    except Exception as e:
+        print(f"FATAL: setup failed: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return
+
+    print("\n-- 1. Connection lifecycle --")
+    await test_connection_lifecycle(ctx)
+
+    print("\n-- 3. join_room --")
+    await test_join_room(ctx)
+
+    print("\n-- 4/5/6. Contract events + cross-space isolation --")
+    await test_contract_events_and_isolation(ctx)
+
+    print("\n-- Contract update event --")
+    await test_contract_update(ctx)
+
+    print("\n-- Staff join event --")
+    await test_staff_join_event(ctx)
+
+    print("\n-- 7. Reconnect --")
+    await test_reconnect(ctx)
+
+    print("\n-- 8. Concurrent rooms --")
+    await test_concurrent_rooms(ctx)
+
+    p, f = R.summary()
+    os._exit(0 if f == 0 else 1)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    asyncio.run(main())

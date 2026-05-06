@@ -112,6 +112,7 @@ export default function ContractNewScreen() {
     if (!picked) { Alert.alert('Pick a template'); return; }
     if (!title.trim()) { Alert.alert('Title required'); return; }
     if (!body.trim()) { Alert.alert('Body cannot be empty'); return; }
+    if (!staffId) { Alert.alert('Pick a staff member', 'An agreement needs to be assigned to a specific staff member so they can see and sign it.'); return; }
     setSaving(true);
     try {
       const created = await api.post('/contracts', {
@@ -183,17 +184,24 @@ export default function ContractNewScreen() {
           <TextInput style={styles.input} value={title} onChangeText={setTitle} placeholder="Contract title" placeholderTextColor={colors.textMuted} />
 
           {/* Assign staff */}
-          <Text style={styles.label}>Assign to staff (optional)</Text>
-          <View style={styles.chipRow}>
-            <TouchableOpacity style={[styles.chip, !staffId && styles.chipActive]} onPress={() => setStaffId(null)}>
-              <Text style={[styles.chipTxt, !staffId && { color: '#fff' }]}>None / generic</Text>
-            </TouchableOpacity>
-            {staffList.map((s) => (
-              <TouchableOpacity key={s.staff_id} style={[styles.chip, staffId === s.staff_id && styles.chipActive]} onPress={() => setStaffId(s.staff_id)} testID={`assign-${s.staff_id}`}>
-                <Text style={[styles.chipTxt, staffId === s.staff_id && { color: '#fff' }]}>{s.name}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
+          <Text style={styles.label}>Assign to staff</Text>
+          {staffList.length === 0 ? (
+            <View style={[styles.input, { padding: spacing.md }]}>
+              <Text style={{ color: colors.textMuted, fontSize: 12, lineHeight: 18 }}>
+                You need at least one staff member to create an agreement. Add a staff member from the Household tab first, then come back here.
+              </Text>
+            </View>
+          ) : (
+            <View style={styles.chipRow}>
+              {staffList.filter((s) => s.active !== false).map((s) => (
+                <TouchableOpacity key={s.staff_id} style={[styles.chip, staffId === s.staff_id && styles.chipActive]} onPress={() => setStaffId(s.staff_id)} testID={`assign-${s.staff_id}`}>
+                  <Text style={[styles.chipTxt, staffId === s.staff_id && { color: '#fff' }]}>
+                    {s.name}{!s.user_id ? '  (not joined)' : ''}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          )}
 
           {/* Variables */}
           {Object.keys(vars).length > 0 && (

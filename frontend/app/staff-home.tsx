@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl,
   ActivityIndicator, TextInput, Alert, Image,
@@ -7,6 +7,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter, useLocalSearchParams } from 'expo-router';
 import { useAuth } from '../src/AuthContext';
 import { api } from '../src/api';
+import { realtime } from '../src/realtime';
 import { colors, radius, spacing, shadows, tints } from '../src/theme';
 import { Icon } from '../src/Icon';
 import { formatMoney } from '../src/currency';
@@ -55,10 +56,14 @@ export default function StaffHome() {
     if (!activeSpace) return;
     try {
       if (isPreview) {
-        const d = await api.get<any>(`/household/staff/${previewStaffId}/view`);
+        const [d, cs] = await Promise.all([
+          api.get<any>(`/household/staff/${previewStaffId}/view`),
+          api.get<any[]>(`/contracts?space_id=${activeSpace.space_id}&staff_id=${previewStaffId}`).catch(() => []),
+        ]);
         setData(d);
         setNotifs([]);
-        setPendingContracts([]);
+        const mine = (cs || []).filter((c: any) => c.status !== 'void' && !c.staff_signature && c.require_staff_signature !== false);
+        setPendingContracts(mine);
       } else {
         const [d, n, cs] = await Promise.all([
           api.get<any>(`/household/staff/me?space_id=${activeSpace.space_id}`),
@@ -80,6 +85,24 @@ export default function StaffHome() {
   }, [activeSpace, router, isPreview, previewStaffId]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  // Realtime: refresh when relevant events arrive for this space
+  useEffect(() => {
+    const offSpace = realtime.onSpaceEvent((e) => {
+      if (!activeSpace || e.space_id !== activeSpace.space_id) return;
+      // Refresh on contract / task / shopping / staff changes
+      if (['contract', 'task', 'shopping', 'staff', 'attendance', 'payment'].includes(e.kind)) {
+        load();
+      }
+    });
+    const offUser = realtime.onUserEvent((e) => {
+      // A new notification (or any user event) — refresh state
+      if (e.kind === 'notification') {
+        load();
+      }
+    });
+    return () => { offSpace(); offUser(); };
+  }, [activeSpace, load]);
   const onRefresh = async () => { setRefreshing(true); await load(); setRefreshing(false); };
 
   // Lazy fetch when staff opens handbook/inventory/finance tabs (only if permission granted)

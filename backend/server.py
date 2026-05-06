@@ -13,6 +13,7 @@ import httpx
 import asyncio
 import json
 import re
+import socketio
 from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr, model_validator
 from typing import List, Optional, Dict, Any, Tuple
@@ -31,6 +32,153 @@ api_router = APIRouter(prefix="/api")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# =========================
+# Socket.IO server setup
+# =========================
+sio = socketio.AsyncServer(
+    async_mode='asgi',
+    cors_allowed_origins='*',
+    ping_interval=25,
+    ping_timeout=60,
+)
+
+# In-memory bookkeeping: sid -> {"user_id":..., "spaces": [...]}
+_sio_sessions: Dict[str, Dict[str, Any]] = {}
+
+
+async def _resolve_user_from_token(token: str) -> Optional[Dict[str, Any]]:
+    """Look up an active session by token, return its user document. Lightweight, no FastAPI request."""
+    if not token:
+        return None
+    try:
+        sess = await db.sessions.find_one({"session_token": token, "expires_at": {"$gt": now_utc()}}, {"_id": 0})
+        if not sess:
+            return None
+        u = await db.users.find_one({"user_id": sess["user_id"]}, {"_id": 0, "password_hash": 0})
+        return u
+    except Exception as e:
+        logger.warning(f"socket auth failed: {e}")
+        return None
+
+
+async def _user_space_ids(user_id: str) -> List[str]:
+    """Return the list of space_ids this user belongs to (member or owner)."""
+    try:
+        cur = db.family_spaces.find({"$or": [{"owner_id": user_id}, {"member_ids": user_id}]}, {"_id": 0, "space_id": 1})
+        return [d["space_id"] async for d in cur]
+    except Exception as e:
+        logger.warning(f"could not list user spaces: {e}")
+        return []
+
+
+@sio.event
+async def connect(sid: str, environ: Dict[str, Any], auth: Optional[Dict[str, Any]] = None):
+    token = None
+    if auth and isinstance(auth, dict):
+        token = auth.get("token") or auth.get("Authorization")
+    if not token:
+        # also accept ?token=... query string
+        qs = environ.get("QUERY_STRING") or ""
+        for kv in qs.split("&"):
+            if kv.startswith("token="):
+                token = kv.split("=", 1)[1]
+                break
+    user = await _resolve_user_from_token(token or "")
+    if not user:
+        logger.info(f"socket {sid} rejected (no/invalid token)")
+        raise socketio.exceptions.ConnectionRefusedError("Unauthorized")
+    space_ids = await _user_space_ids(user["user_id"])
+    for sid_room in space_ids:
+        await sio.enter_room(sid, f"space:{sid_room}")
+    # Also a personal room so we can target the user directly
+    await sio.enter_room(sid, f"user:{user['user_id']}")
+    _sio_sessions[sid] = {"user_id": user["user_id"], "spaces": space_ids}
+    logger.info(f"socket connect {sid} user={user['user_id']} spaces={space_ids}")
+    # Send a hello so the client can confirm rooms
+    await sio.emit("hello", {"user_id": user["user_id"], "spaces": space_ids}, to=sid)
+
+
+@sio.event
+async def disconnect(sid: str):
+    sess = _sio_sessions.pop(sid, None)
+    logger.info(f"socket disconnect {sid} (had={sess is not None})")
+
+
+@sio.event
+async def join_room(sid: str, data: Dict[str, Any]):
+    """Allow the client to (re)join a space room (e.g. after switching spaces)."""
+    if not isinstance(data, dict):
+        return {"ok": False, "error": "bad payload"}
+    space_id = data.get("space_id") or data.get("room_id")
+    if not space_id:
+        return {"ok": False, "error": "missing space_id"}
+    sess = _sio_sessions.get(sid)
+    if not sess:
+        return {"ok": False, "error": "unauthorized"}
+    # Validate membership
+    if space_id not in sess["spaces"]:
+        # Re-fetch in case a new space was just joined
+        latest = await _user_space_ids(sess["user_id"])
+        sess["spaces"] = latest
+        if space_id not in latest:
+            return {"ok": False, "error": "not a member of this space"}
+    await sio.enter_room(sid, f"space:{space_id}")
+    return {"ok": True, "joined": space_id}
+
+
+async def emit_space_event(space_id: str, kind: str, action: str, payload: Optional[Dict[str, Any]] = None):
+    """Broadcast a small change-notification to every member of the space.
+    Frontend uses this to re-fetch the relevant resource."""
+    try:
+        await sio.emit(
+            "space.event",
+            {"space_id": space_id, "kind": kind, "action": action, "payload": payload or {}, "ts": now_utc().isoformat()},
+            room=f"space:{space_id}",
+        )
+    except Exception as e:
+        logger.warning(f"emit_space_event failed: {e}")
+
+
+async def emit_user_event(user_id: str, kind: str, action: str, payload: Optional[Dict[str, Any]] = None):
+    """Broadcast a change to a specific user (across all of their devices)."""
+    try:
+        await sio.emit(
+            "user.event",
+            {"user_id": user_id, "kind": kind, "action": action, "payload": payload or {}, "ts": now_utc().isoformat()},
+            room=f"user:{user_id}",
+        )
+    except Exception as e:
+        logger.warning(f"emit_user_event failed: {e}")
+
+
+async def notify_user(user_id: str, space_id: str, kind: str, title: str, body: str = "", data: Optional[Dict[str, Any]] = None) -> str:
+    """Centralised helper: insert a notification AND broadcast it via socket.io.
+    Returns the new notification_id."""
+    nid = gen_id("ntf") if 'gen_id' in globals() else f"ntf_{uuid.uuid4().hex[:16]}"
+    doc = {
+        "notification_id": nid,
+        "user_id": user_id,
+        "space_id": space_id,
+        "kind": kind,
+        "title": title,
+        "body": body,
+        "data": data or {},
+        "read": False,
+        "created_at": now_utc(),
+    }
+    try:
+        await db.notifications.insert_one(doc)
+    except Exception as e:
+        logger.warning(f"notify_user insert failed: {e}")
+    # Fire-and-forget realtime event
+    try:
+        await emit_user_event(user_id, "notification", "created", {"notification_id": nid, "kind": kind, "title": title, "data": data or {}, "space_id": space_id})
+    except Exception as e:
+        logger.warning(f"notify_user emit failed: {e}")
+    return nid
+
+
 
 SESSION_DURATION_DAYS = 7
 EMERGENT_AUTH_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
@@ -2207,19 +2355,18 @@ async def join_staff(body: JoinStaffRequest, user: User = Depends(get_current_us
             })
             if exists:
                 continue
-            await db.notifications.insert_one({
-                "notification_id": gen_id("ntf"),
-                "user_id": user.user_id,
-                "space_id": s["space_id"],
-                "kind": "contract_assigned",
-                "title": f"Please review & sign: {c.get('title')}",
-                "body": f"An agreement ({c.get('template_kind')}) is waiting for your signature.",
-                "data": {"contract_id": c["contract_id"]},
-                "read": False,
-                "created_at": now_utc(),
-            })
+            await notify_user(
+                user_id=user.user_id,
+                space_id=s["space_id"],
+                kind="contract_assigned",
+                title=f"Please review & sign: {c.get('title')}",
+                body=f"An agreement ({c.get('template_kind')}) is waiting for your signature.",
+                data={"contract_id": c["contract_id"]},
+            )
     except Exception as e:
         logger.warning(f"Could not backfill contract notifications on staff join: {e}")
+    # Realtime: tell the space "a new member just joined" so the owner refreshes the staff list
+    await emit_space_event(s["space_id"], "staff", "joined", {"staff_id": s["staff_id"], "user_id": user.user_id})
     return {"ok": True, "space_id": s["space_id"], "staff_id": s["staff_id"]}
 
 
@@ -4105,17 +4252,16 @@ async def create_contract(body: CreateContractRequest, user: User = Depends(get_
     if body.assigned_staff_id:
         sm = await db.staff_members.find_one({"staff_id": body.assigned_staff_id}, {"_id": 0})
         if sm and sm.get("user_id"):
-            await db.notifications.insert_one({
-                "notification_id": gen_id("ntf"),
-                "user_id": sm["user_id"],
-                "space_id": body.space_id,
-                "kind": "contract_assigned",
-                "title": f"Please review & sign: {title}",
-                "body": f"{user.name} has assigned a {doc['template_kind']} agreement for you to sign.",
-                "data": {"contract_id": doc["contract_id"]},
-                "read": False,
-                "created_at": now_utc(),
-            })
+            await notify_user(
+                user_id=sm["user_id"],
+                space_id=body.space_id,
+                kind="contract_assigned",
+                title=f"Please review & sign: {title}",
+                body=f"{user.name} has assigned a {doc['template_kind']} agreement for you to sign.",
+                data={"contract_id": doc["contract_id"]},
+            )
+    # Realtime: tell every space member a contract was created (refresh the list)
+    await emit_space_event(body.space_id, "contract", "created", {"contract_id": doc["contract_id"], "assigned_staff_id": body.assigned_staff_id})
     return Contract(**doc)
 
 
@@ -4141,18 +4287,50 @@ async def update_contract(contract_id: str, body: UpdateContractRequest, user: U
     space = await assert_space_member(d["space_id"], user.user_id)
     if space.get("owner_id") != user.user_id:
         raise HTTPException(403, "Only the owner can edit contracts")
-    if d.get("owner_signature") or d.get("staff_signature"):
-        raise HTTPException(400, "Cannot edit a contract once any party has signed. Void it first.")
-    updates = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
+    updates_in = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
+    has_owner_sig = bool(d.get("owner_signature"))
+    has_staff_sig = bool(d.get("staff_signature"))
+    # Once any party has signed, the legal text must not change. But reassigning
+    # the staff or toggling whether staff signature is required is still allowed
+    # (as long as the staff hasn't signed yet) so the owner can rescue a
+    # mis-assigned contract without losing their own signature.
+    if (has_owner_sig or has_staff_sig):
+        text_fields = {"title", "body", "variables", "require_drawn_signature_owner", "require_drawn_signature_staff", "require_owner_signature"}
+        bad = text_fields & set(updates_in.keys())
+        if bad:
+            raise HTTPException(400, f"Cannot edit {sorted(bad)} once a contract is signed. Void it and create a new one.")
+        if has_staff_sig and ("assigned_staff_id" in updates_in or "require_staff_signature" in updates_in):
+            raise HTTPException(400, "Cannot reassign a contract once the staff has signed. Void it first.")
+    updates = updates_in
     if "assigned_staff_id" in updates and updates["assigned_staff_id"]:
         sm = await db.staff_members.find_one({"staff_id": updates["assigned_staff_id"], "space_id": d["space_id"]}, {"_id": 0})
         if not sm:
             raise HTTPException(404, "Staff not found")
         updates["assigned_staff_name"] = sm.get("name")
+        # Notify the newly-assigned staff (if their user_id is linked)
+        if sm.get("user_id"):
+            try:
+                exists = await db.notifications.find_one({
+                    "user_id": sm["user_id"],
+                    "kind": "contract_assigned",
+                    "data.contract_id": contract_id,
+                })
+                if not exists:
+                    await notify_user(
+                        user_id=sm["user_id"],
+                        space_id=d["space_id"],
+                        kind="contract_assigned",
+                        title=f"Please review & sign: {updates.get('title') or d.get('title')}",
+                        body=f"{user.name} has assigned an agreement for you to sign.",
+                        data={"contract_id": contract_id},
+                    )
+            except Exception as e:
+                logger.warning(f"Could not notify reassigned staff: {e}")
     if updates:
         updates["updated_at"] = now_utc()
         await db.contracts.update_one({"contract_id": contract_id}, {"$set": updates})
     out = await db.contracts.find_one({"contract_id": contract_id}, {"_id": 0})
+    await emit_space_event(d["space_id"], "contract", "updated", {"contract_id": contract_id})
     return Contract(**out)
 
 
@@ -4208,30 +4386,24 @@ async def sign_contract(contract_id: str, body: SignContractRequest, request: Re
         if role == "owner" and d.get("assigned_staff_id"):
             sm = await db.staff_members.find_one({"staff_id": d["assigned_staff_id"]}, {"_id": 0})
             if sm and sm.get("user_id"):
-                await db.notifications.insert_one({
-                    "notification_id": gen_id("ntf"),
-                    "user_id": sm["user_id"],
-                    "space_id": d["space_id"],
-                    "kind": "contract_owner_signed",
-                    "title": f"{user.name} signed: {d.get('title')}",
-                    "body": "Your turn — open the contract to review and sign.",
-                    "data": {"contract_id": contract_id},
-                    "read": False,
-                    "created_at": now_utc(),
-                })
+                await notify_user(
+                    user_id=sm["user_id"],
+                    space_id=d["space_id"],
+                    kind="contract_owner_signed",
+                    title=f"{user.name} signed: {d.get('title')}",
+                    body="Your turn — open the contract to review and sign.",
+                    data={"contract_id": contract_id},
+                )
         # If staff just signed, notify owner
         if role == "staff":
-            await db.notifications.insert_one({
-                "notification_id": gen_id("ntf"),
-                "user_id": space.get("owner_id"),
-                "space_id": d["space_id"],
-                "kind": "contract_staff_signed",
-                "title": f"{user.name} signed: {d.get('title')}",
-                "body": "The staff member has signed the agreement.",
-                "data": {"contract_id": contract_id},
-                "read": False,
-                "created_at": now_utc(),
-            })
+            await notify_user(
+                user_id=space.get("owner_id"),
+                space_id=d["space_id"],
+                kind="contract_staff_signed",
+                title=f"{user.name} signed: {d.get('title')}",
+                body="The staff member has signed the agreement.",
+                data={"contract_id": contract_id},
+            )
     else:
         # Fully signed — store a copy in Documents Vault as a record
         try:
@@ -4254,6 +4426,7 @@ async def sign_contract(contract_id: str, body: SignContractRequest, request: Re
             logger.warning(f"Could not archive contract to documents: {e}")
 
     out = await db.contracts.find_one({"contract_id": contract_id}, {"_id": 0})
+    await emit_space_event(d["space_id"], "contract", "signed", {"contract_id": contract_id, "by": role, "status": out.get("status")})
     return Contract(**out)
 
 
@@ -4267,6 +4440,7 @@ async def void_contract(contract_id: str, user: User = Depends(get_current_user)
         raise HTTPException(403, "Only the owner can void contracts")
     await db.contracts.update_one({"contract_id": contract_id}, {"$set": {"status": "void", "updated_at": now_utc()}})
     out = await db.contracts.find_one({"contract_id": contract_id}, {"_id": 0})
+    await emit_space_event(d["space_id"], "contract", "voided", {"contract_id": contract_id})
     return Contract(**out)
 
 
@@ -4279,6 +4453,7 @@ async def delete_contract(contract_id: str, user: User = Depends(get_current_use
     if space.get("owner_id") != user.user_id:
         raise HTTPException(403, "Only the owner can delete contracts")
     await db.contracts.delete_one({"contract_id": contract_id})
+    await emit_space_event(d["space_id"], "contract", "deleted", {"contract_id": contract_id})
     return {"ok": True}
 
 
@@ -4311,3 +4486,13 @@ app.add_middleware(
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+
+
+# =========================
+# Wrap FastAPI with Socket.IO ASGI app
+# Supervisor still runs `uvicorn server:app` — `app` is now the wrapped ASGI app.
+# All FastAPI routes still go through `fastapi_app` underneath.
+# =========================
+fastapi_app = app
+app = socketio.ASGIApp(sio, other_asgi_app=fastapi_app, socketio_path='/api/socket.io')
+

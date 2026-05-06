@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl,
   ActivityIndicator,
@@ -7,6 +7,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useAuth } from '../src/AuthContext';
 import { api } from '../src/api';
+import { realtime } from '../src/realtime';
 import { colors, radius, spacing, shadows, tints } from '../src/theme';
 import { Icon } from '../src/Icon';
 
@@ -51,6 +52,16 @@ export default function ContractsScreen() {
   }, [activeSpace, staffFilter, isOwner]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
+  // Realtime: refresh contract list on contract events for this space
+  useEffect(() => {
+    if (!activeSpace) return;
+    const off = realtime.onSpaceEvent((e) => {
+      if (e.space_id === activeSpace.space_id && e.kind === 'contract') {
+        load();
+      }
+    });
+    return off;
+  }, [activeSpace, load]);
   const onRefresh = async () => { setRefreshing(true); await load(); setRefreshing(false); };
 
   return (
