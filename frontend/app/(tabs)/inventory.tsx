@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, TextInput, Image,
 } from 'react-native';
@@ -8,6 +8,7 @@ import { useAuth } from '../../src/AuthContext';
 import { colors, radius, spacing, shadows, tints } from '../../src/theme';
 import { Icon } from '../../src/Icon';
 import { api } from '../../src/api';
+import { realtime } from '../../src/realtime';
 import type { Category, Item } from '../../src/types';
 
 export default function Inventory() {
@@ -32,9 +33,19 @@ export default function Inventory() {
 
   useFocusEffect(useCallback(() => {
     load();
-    const id = setInterval(load, 10000);
+    const id = setInterval(load, 30000); // realtime handles fast updates
     return () => clearInterval(id);
   }, [load]));
+
+  // Realtime: refresh on item / category events
+  useEffect(() => {
+    if (!activeSpace) return;
+    const off = realtime.onSpaceEvent((e) => {
+      if (e.space_id !== activeSpace.space_id) return;
+      if (e.kind === 'item' || e.kind === 'category') load();
+    });
+    return off;
+  }, [activeSpace, load]);
 
   const onRefresh = async () => {
     setRefreshing(true);

@@ -311,6 +311,7 @@ class Category(TZAware):
     tint: str  # color tint key
     fields: List[CategoryField]
     shared_with: List[str] = []  # user_ids that split costs in this category; empty = not shared
+    staff_can_edit: bool = False  # owner toggles which categories staff can add/edit/delete items in
     created_by: str
     created_at: datetime
 
@@ -322,6 +323,7 @@ class CreateCategoryRequest(BaseModel):
     tint: str = "mint"
     fields: List[CategoryField] = []
     shared_with: List[str] = []
+    staff_can_edit: bool = False
 
 
 class UpdateCategoryRequest(BaseModel):
@@ -330,6 +332,7 @@ class UpdateCategoryRequest(BaseModel):
     tint: Optional[str] = None
     fields: Optional[List[CategoryField]] = None
     shared_with: Optional[List[str]] = None
+    staff_can_edit: Optional[bool] = None
 
 
 class Item(TZAware):
@@ -442,6 +445,13 @@ async def record_activity(space_id: str, user: User, action: str, entity: str, e
         "timestamp": now_utc(),
     }
     await db.activities.insert_one(doc)
+    # Realtime: every space member listens for `space.event` and refreshes the
+    # relevant data when something changes. `entity` is the resource kind
+    # (item, category, task, shopping, payment, attendance, ...).
+    try:
+        await emit_space_event(space_id, entity, action, {"entity_id": entity_id, "entity_name": entity_name, "by": user.user_id})
+    except Exception as e:
+        logger.warning(f"record_activity emit failed: {e}")
 
 
 async def assert_space_member(space_id: str, user_id: str) -> dict:
@@ -451,6 +461,34 @@ async def assert_space_member(space_id: str, user_id: str) -> dict:
     if user_id not in space["member_ids"]:
         raise HTTPException(status_code=403, detail="Not a member of this space")
     return space
+
+
+async def is_space_owner(space_id: str, user_id: str) -> bool:
+    sp = await db.family_spaces.find_one({"space_id": space_id, "owner_id": user_id}, {"_id": 0, "owner_id": 1})
+    return sp is not None
+
+
+async def get_staff_record(space_id: str, user_id: str) -> Optional[dict]:
+    return await db.staff_members.find_one({"space_id": space_id, "user_id": user_id}, {"_id": 0})
+
+
+async def assert_can_edit_category_items(space_id: str, category_id: str, user_id: str):
+    """Owner: always allowed. Staff: must have edit_inventory permission AND the
+    category must have staff_can_edit=True. Raises 403 otherwise."""
+    if await is_space_owner(space_id, user_id):
+        return
+    cat = await db.categories.find_one({"category_id": category_id, "space_id": space_id}, {"_id": 0})
+    if not cat:
+        raise HTTPException(404, "Category not found")
+    if not cat.get("staff_can_edit"):
+        raise HTTPException(403, "Staff cannot edit items in this category. Ask the owner to enable it.")
+    staff = await get_staff_record(space_id, user_id)
+    if not staff:
+        # Not staff and not owner — regular space members are allowed (existing behaviour).
+        return
+    perms = {**DEFAULT_STAFF_PERMS, **(staff.get("permissions") or {})}
+    if not perms.get("edit_inventory"):
+        raise HTTPException(403, "You don't have permission to edit inventory.")
 
 
 # =========================
@@ -694,7 +732,10 @@ async def update_space(space_id: str, body: UpdateSpaceRequest, user: User = Dep
 # =========================
 @api_router.post("/categories", response_model=Category)
 async def create_category(body: CreateCategoryRequest, user: User = Depends(get_current_user)):
-    await assert_space_member(body.space_id, user.user_id)
+    space = await assert_space_member(body.space_id, user.user_id)
+    # Only the owner can create categories. Staff editing is fine-grained per-category.
+    if space.get("owner_id") != user.user_id:
+        raise HTTPException(403, "Only the household owner can create categories.")
     doc = {
         "category_id": gen_id("cat"),
         "space_id": body.space_id,
@@ -703,6 +744,7 @@ async def create_category(body: CreateCategoryRequest, user: User = Depends(get_
         "tint": body.tint,
         "fields": [f.dict() for f in body.fields],
         "shared_with": body.shared_with,
+        "staff_can_edit": bool(body.staff_can_edit),
         "created_by": user.user_id,
         "created_at": now_utc(),
     }
@@ -743,7 +785,10 @@ async def update_category(category_id: str, body: UpdateCategoryRequest, user: U
     cat = await db.categories.find_one({"category_id": category_id}, {"_id": 0})
     if not cat:
         raise HTTPException(status_code=404, detail="Category not found")
-    await assert_space_member(cat["space_id"], user.user_id)
+    space = await assert_space_member(cat["space_id"], user.user_id)
+    # Only owner can change category metadata (incl. the staff_can_edit toggle).
+    if space.get("owner_id") != user.user_id:
+        raise HTTPException(403, "Only the household owner can edit categories.")
     updates: Dict[str, Any] = {}
     if body.name is not None:
         updates["name"] = body.name.strip()
@@ -755,9 +800,12 @@ async def update_category(category_id: str, body: UpdateCategoryRequest, user: U
         updates["fields"] = [f.dict() for f in body.fields]
     if body.shared_with is not None:
         updates["shared_with"] = body.shared_with
+    if body.staff_can_edit is not None:
+        updates["staff_can_edit"] = bool(body.staff_can_edit)
     if updates:
         await db.categories.update_one({"category_id": category_id}, {"$set": updates})
     out = await db.categories.find_one({"category_id": category_id}, {"_id": 0})
+    await record_activity(cat["space_id"], user, "updated", "category", category_id, out.get("name") or "")
     return Category(**out)
 
 
@@ -766,9 +814,12 @@ async def delete_category(category_id: str, user: User = Depends(get_current_use
     cat = await db.categories.find_one({"category_id": category_id}, {"_id": 0})
     if not cat:
         raise HTTPException(status_code=404, detail="Category not found")
-    await assert_space_member(cat["space_id"], user.user_id)
+    space = await assert_space_member(cat["space_id"], user.user_id)
+    if space.get("owner_id") != user.user_id:
+        raise HTTPException(403, "Only the household owner can delete categories.")
     await db.categories.delete_one({"category_id": category_id})
     await db.items.delete_many({"category_id": category_id})
+    await record_activity(cat["space_id"], user, "deleted", "category", category_id, cat.get("name") or "")
     return {"success": True}
 
 
@@ -781,6 +832,7 @@ async def create_item(body: CreateItemRequest, user: User = Depends(get_current_
     cat = await db.categories.find_one({"category_id": body.category_id}, {"_id": 0})
     if not cat or cat["space_id"] != body.space_id:
         raise HTTPException(status_code=400, detail="Invalid category")
+    await assert_can_edit_category_items(body.space_id, body.category_id, user.user_id)
     doc = {
         "item_id": gen_id("item"),
         "space_id": body.space_id,
@@ -841,6 +893,12 @@ async def update_item(item_id: str, body: UpdateItemRequest, user: User = Depend
     if not doc:
         raise HTTPException(status_code=404, detail="Item not found")
     await assert_space_member(doc["space_id"], user.user_id)
+    # Permission check: staff can edit only categories where staff_can_edit=true
+    target_cat_id = body.category_id if getattr(body, 'category_id', None) else doc.get("category_id")
+    await assert_can_edit_category_items(doc["space_id"], target_cat_id, user.user_id)
+    if target_cat_id != doc.get("category_id"):
+        # Also check the source category (where the item currently lives)
+        await assert_can_edit_category_items(doc["space_id"], doc["category_id"], user.user_id)
 
     updates: Dict[str, Any] = {"updated_at": now_utc()}
     payload = body.dict(exclude_unset=True)
@@ -864,6 +922,7 @@ async def delete_item(item_id: str, user: User = Depends(get_current_user)):
     if not doc:
         raise HTTPException(status_code=404, detail="Item not found")
     await assert_space_member(doc["space_id"], user.user_id)
+    await assert_can_edit_category_items(doc["space_id"], doc["category_id"], user.user_id)
     await db.items.delete_one({"item_id": item_id})
     await record_activity(doc["space_id"], user, "deleted", "item", item_id, doc["name"])
     return {"success": True}
@@ -1116,6 +1175,8 @@ async def bulk_create_items(body: BulkCreateItemsRequest, user: User = Depends(g
     valid_cat_ids = {c["category_id"] for c in cat_docs}
     if body.category_id not in valid_cat_ids:
         raise HTTPException(status_code=400, detail="Invalid default category")
+    # Permission check: bulk-add only goes into the requested category
+    await assert_can_edit_category_items(body.space_id, body.category_id, user.user_id)
 
     # Best-effort fetch product images in parallel for each item
     image_urls: List[Optional[str]] = [None] * len(body.items)
@@ -2260,6 +2321,7 @@ DEFAULT_STAFF_PERMS = {
     "view_finance": False,
     "view_inventory": False,
     "view_inventory_prices": True,  # only matters when view_inventory is also True
+    "edit_inventory": False,  # global gate; per-category control via categories.staff_can_edit
 }
 
 

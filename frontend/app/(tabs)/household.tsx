@@ -8,6 +8,7 @@ import { useFocusEffect, useRouter } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import { useAuth } from '../../src/AuthContext';
 import { api } from '../../src/api';
+import { realtime } from '../../src/realtime';
 import { colors, radius, spacing, shadows, tints } from '../../src/theme';
 import { Icon } from '../../src/Icon';
 import { formatMoney, getCurrency } from '../../src/currency';
@@ -74,6 +75,16 @@ export default function HouseholdHub() {
   }, [activeSpace, taskDate, attendanceDate]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  // Realtime: refresh on staff/task/shopping/attendance/payment/family/role events
+  useEffect(() => {
+    if (!activeSpace) return;
+    const off = realtime.onSpaceEvent((e) => {
+      if (e.space_id !== activeSpace.space_id) return;
+      if (['staff', 'task', 'shopping', 'attendance', 'payment', 'family', 'household_role', 'handbook'].includes(e.kind)) load();
+    });
+    return off;
+  }, [activeSpace, load]);
   const onRefresh = async () => { setRefreshing(true); await load(); setRefreshing(false); };
 
   if (!activeSpace) {
@@ -928,7 +939,7 @@ function StaffPermissionsEditor({ staff, onChanged }: { staff: StaffMember; onCh
   const [perms, setPerms] = useState<Record<string, boolean>>({
     view_tasks: true, log_attendance: true, request_shopping: true, view_handbook: true,
     view_wage_amount: true, view_other_staff: false, view_family: false,
-    view_finance: false, view_inventory: false,
+    view_finance: false, view_inventory: false, view_inventory_prices: true, edit_inventory: false,
     ...initialPerms,
   });
   const [saving, setSaving] = useState(false);
@@ -960,8 +971,9 @@ function StaffPermissionsEditor({ staff, onChanged }: { staff: StaffMember; onCh
     {
       title: 'Extra access (into the main family app)',
       items: [
-        { key: 'view_inventory', label: 'View inventory tab', hint: 'They can see household inventory (read-only for now)' },
+        { key: 'view_inventory', label: 'View inventory tab', hint: 'They can see household inventory (read-only by default)' },
         { key: 'view_inventory_prices', label: '↳ Show prices in inventory', hint: 'Hide for staff who shouldn\'t know item costs' },
+        { key: 'edit_inventory', label: '↳ Allow editing inventory', hint: 'Turn this on, then choose which categories they can edit by opening each category and toggling "Staff can edit"' },
         { key: 'view_finance', label: 'View finance tab', hint: 'They can see monthly spending' },
         { key: 'view_family', label: 'See family directory' },
         { key: 'view_other_staff', label: 'See other staff list' },

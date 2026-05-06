@@ -2746,3 +2746,205 @@ agent_communication:
       the full test suite at /app/backend_test.py will validate everything
       end-to-end without additional code changes.
 
+
+## 2026-05-06 — Phase 9: Per-category staff edit + global socket emit
+
+backend:
+  - task: "Per-category staff_can_edit field on Category + staff edit_inventory perm gating (assert_can_edit_category_items)"
+    implemented: true
+    working: false
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: false
+        agent: "testing"
+        comment: |
+          Phase 9 backend testing 2026-05-06 via /app/backend_test_phase9.py against
+          the public preview URL — 64/65 PASS, 1 FAIL.
+
+          ✅ A) Category CRUD + staff_can_edit field — all green:
+             - Owner POST /api/categories with staff_can_edit:true → response.staff_can_edit==true.
+             - Owner POST without staff_can_edit → defaults to false.
+             - Owner PATCH staff_can_edit:true then :false → both 200, GET reflects updated value.
+             - Non-owner space member POST /api/categories → 403, detail mentions "owner".
+             - Non-owner space member PATCH /api/categories/{id} → 403.
+             - Non-owner space member DELETE /api/categories/{id} → 403.
+
+          ✅ B) Item CRUD permission gating for STAFF — all green:
+             - Setup: owner created household IDR space, two categories
+               (catA staff_can_edit=true, catB staff_can_edit=false), staff user
+               joined via invite_code, owner PATCHed perms to edit_inventory:true.
+             - With edit_inventory=true:
+                 POST /api/items into catA → 200 ✅
+                 POST /api/items into catB → 403 (detail: "Staff cannot edit
+                   items in this category. Ask the owner to enable it.") ✅
+                 PATCH /api/items/{id} on item in catA → 200 ✅
+                 PATCH /api/items/{id} on owner-created item in catB → 403 ✅
+                 DELETE /api/items/{id} on item in catA → 200 ✅
+                 DELETE /api/items/{id} on item in catB → 403 ✅
+                 POST /api/items/bulk into catA → 200 ✅
+                 POST /api/items/bulk into catB → 403 ✅
+             - After PATCHing staff perms to edit_inventory:false:
+                 POST/PATCH/DELETE on items in catA all → 403, detail mentions
+                 "permission" or "inventory" ✅
+             - Owner: POST/PATCH/DELETE in either category → always 200 ✅
+
+          ❌ C) CRITICAL — non-staff non-owner space members are now BLOCKED
+             from creating items in categories where staff_can_edit=False.
+             The review request explicitly states this should remain 200
+             (no regression for regular family members).
+
+             Repro: registered member M (not staff), joined space via the space
+             invite_code. POST /api/items {space_id, category_id=cat_B (staff_can_edit
+             false), name:"Member item in B"} → 403 with detail
+             "Staff cannot edit items in this category. Ask the owner to enable it."
+             Expected: 200.
+
+             ROOT CAUSE — assert_can_edit_category_items
+             (/app/backend/server.py:475-491) checks the category's
+             staff_can_edit flag BEFORE looking up the staff record:
+
+                 if await is_space_owner(...): return
+                 cat = await db.categories.find_one(...)
+                 if not cat.get("staff_can_edit"):
+                     raise HTTPException(403, "Staff cannot edit items in this category. ...")
+                 staff = await get_staff_record(...)
+                 if not staff:
+                     return   # <-- never reached when staff_can_edit is False
+
+             A regular space member who is NOT the owner and NOT a staff member
+             therefore hits the 403 at line 484 before the "Not staff and not
+             owner — regular space members are allowed" short-circuit at line 487.
+             This contradicts the documented intent in the helper itself
+             ("regular space members are allowed (existing behaviour)") and the
+             Phase 9 review request.
+
+             FIX (reorder the checks so the gate only applies to staff): look
+             up the staff record first; only enforce the staff_can_edit gate
+             when the caller IS a staff member. Suggested rewrite:
+
+                 if await is_space_owner(space_id, user_id):
+                     return
+                 staff = await get_staff_record(space_id, user_id)
+                 if not staff:
+                     # Regular space member (not owner, not staff) —
+                     # existing behaviour was no gating; preserve that.
+                     return
+                 cat = await db.categories.find_one(
+                     {"category_id": category_id, "space_id": space_id},
+                     {"_id": 0},
+                 )
+                 if not cat:
+                     raise HTTPException(404, "Category not found")
+                 if not cat.get("staff_can_edit"):
+                     raise HTTPException(403, "Staff cannot edit items in this category. Ask the owner to enable it.")
+                 perms = {**DEFAULT_STAFF_PERMS, **(staff.get("permissions") or {})}
+                 if not perms.get("edit_inventory"):
+                     raise HTTPException(403, "You don't have permission to edit inventory.")
+
+             All other Phase 9 surface (A + B + D + E) is correct; this is the
+             only behavioural deviation from the spec.
+
+  - task: "Socket.IO emit hook in record_activity (global space.event broadcast on every entity action) — non-regression"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          ✅ All endpoints that call record_activity still respond with their
+             expected codes — no 500 from emit failure. Verified
+             POST /api/items, PATCH /api/items/{id}, DELETE /api/items/{id},
+             POST /api/categories, PATCH /api/categories/{id},
+             DELETE /api/categories/{id}, POST /api/household/tasks,
+             PATCH /api/household/tasks/{id}, POST /api/household/shopping,
+             POST /api/household/attendance, POST /api/household/payroll
+             all return 200 (Phase 9 D suite, 11/11 PASS).
+          ✅ The emit is wrapped in try/except and any failure is silenced
+             (log.warning), confirmed by reading server.py:451-454.
+          ✅ Phase 7/8 contract regression smoke (E suite, 7/7 PASS): owner
+             creates contract, owner signs (status pending), staff signs
+             (status flips to "signed"), owner receives `contract_staff_signed`
+             notification, document is auto-archived in /api/documents
+             (folder=contracts) with related_to.kind=="contract" and
+             related_to.id == contract_id.
+
+metadata:
+  created_by: "main_agent"
+  version: "2.0"
+  test_sequence: 15
+  run_ui: false
+
+test_plan:
+  current_focus:
+    - "Per-category staff_can_edit field on Category + staff edit_inventory perm gating (assert_can_edit_category_items)"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Phase 9 backend testing complete (2026-05-06) via /app/backend_test_phase9.py
+      against the public preview URL — 64/65 PASS, 1 FAIL.
+
+      ✅ Category CRUD with new staff_can_edit field works exactly per spec:
+         - POST/GET/PATCH all expose the field; defaults to false; booleans
+           round-trip correctly.
+         - Only the household owner can create / edit / delete categories.
+           Regular members get 403 with a message mentioning "owner".
+
+      ✅ Staff item-edit permission gating works per spec when the caller IS
+         a staff member:
+         - With permissions.edit_inventory=true AND category.staff_can_edit=true
+           → POST/PATCH/DELETE/bulk on items in that category all 200.
+         - With staff_can_edit=false → 403 "Staff cannot edit items in this
+           category. Ask the owner to enable it."
+         - With edit_inventory=false → 403 "You don't have permission to edit
+           inventory." regardless of category staff_can_edit.
+         - Owner is always allowed.
+
+      ✅ Socket emit non-regression: every endpoint that calls record_activity
+         (POST/PATCH/DELETE /items, /categories, /household/tasks,
+         /household/shopping, /household/attendance, /household/payroll)
+         still returns 200. The emit is wrapped in try/except so any websocket
+         failure is silenced. No 500s.
+
+      ✅ Phase 7/8 contract flow regression smoke is green: create contract,
+         owner signs (status stays pending_staff), staff signs (status flips
+         to "signed"), owner receives contract_staff_signed notification,
+         document auto-archived in the documents vault with related_to.kind
+         == "contract".
+
+      ❌ ONE BUG (HIGH) — Regular non-staff non-owner space members are now
+         BLOCKED from creating items in categories where staff_can_edit=False.
+         The review explicitly stated this case should remain 200 (no
+         regression for ordinary family members), and the helper docstring
+         agrees ("regular space members are allowed (existing behaviour)"),
+         but the implementation order is wrong.
+
+         File: /app/backend/server.py
+         Function: assert_can_edit_category_items (lines 475-491)
+         Repro: register a fresh user M (not staff), join the space via the
+         space invite_code, then POST /api/items into a category with
+         staff_can_edit=False → 403 with detail "Staff cannot edit items in
+         this category. Ask the owner to enable it." Expected: 200.
+
+         The category staff_can_edit gate is evaluated BEFORE the staff
+         record lookup, so non-staff non-owner members never reach the
+         "regular space members are allowed" short-circuit at line 487.
+
+         Suggested fix (reorder the checks — see task status_history for the
+         full snippet): owner short-circuit, then look up the staff record
+         FIRST, return for non-staff non-owner, then enforce
+         category.staff_can_edit and perms.edit_inventory only for staff.
+
+      No frontend testing performed (per protocol). The fix is one ~10-line
+      reorder; once applied, please retest by re-running
+      /app/backend_test_phase9.py — should hit 65/65.

@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, Image, Dimensions,
 } from 'react-native';
@@ -8,6 +8,7 @@ import { useAuth } from '../../src/AuthContext';
 import { colors, radius, spacing, shadows, tints } from '../../src/theme';
 import { Icon } from '../../src/Icon';
 import { api } from '../../src/api';
+import { realtime } from '../../src/realtime';
 import { formatMoney } from '../../src/currency';
 import type { Item, Category } from '../../src/types';
 import { PieChart, PieLegend, BarChart } from '../../src/Charts';
@@ -35,6 +36,16 @@ export default function Finance() {
   }, [activeSpace]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  // Realtime: refresh on item / payment / transaction events
+  useEffect(() => {
+    if (!activeSpace) return;
+    const off = realtime.onSpaceEvent((e) => {
+      if (e.space_id !== activeSpace.space_id) return;
+      if (['item', 'category', 'payment', 'transaction', 'bill', 'shopping', 'settlement'].includes(e.kind)) load();
+    });
+    return off;
+  }, [activeSpace, load]);
 
   const onRefresh = async () => { setRefreshing(true); await load(); setRefreshing(false); };
 

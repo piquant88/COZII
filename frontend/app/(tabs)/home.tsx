@@ -8,6 +8,7 @@ import { useAuth } from '../../src/AuthContext';
 import { colors, radius, spacing, shadows, tints } from '../../src/theme';
 import { Icon } from '../../src/Icon';
 import { api } from '../../src/api';
+import { realtime } from '../../src/realtime';
 import type { Stats, Activity } from '../../src/types';
 import { formatDistanceToNow } from 'date-fns';
 import { formatMoney } from '../../src/currency';
@@ -36,9 +37,18 @@ export default function Home() {
 
   useFocusEffect(useCallback(() => {
     load();
-    const id = setInterval(load, 10000);
+    const id = setInterval(load, 30000); // realtime handles fast updates
     return () => clearInterval(id);
   }, [load]));
+
+  // Realtime: any space.event in this space → refresh stats + activity feed
+  useEffect(() => {
+    if (!activeSpace) return;
+    const off = realtime.onSpaceEvent((e) => {
+      if (e.space_id === activeSpace.space_id) load();
+    });
+    return off;
+  }, [activeSpace, load]);
 
   const onRefresh = async () => {
     setRefreshing(true);

@@ -62,10 +62,12 @@ export function SignaturePad({ height = 220, strokeColor = '#1F1F1F', strokeWidt
   };
   const endStroke = () => {
     if (!currentRef.current) return;
+    const finishedStroke = currentRef.current;
+    currentRef.current = '';
     setStrokes((prev) => {
-      const next = [...prev, currentRef.current];
-      currentRef.current = '';
-      emit(next);
+      const next = [...prev, finishedStroke];
+      // Defer the side-effect to after commit
+      setTimeout(() => emit(next), 0);
       return next;
     });
   };

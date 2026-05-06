@@ -1,6 +1,6 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, Image, Alert, Platform, TextInput,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, Image, Alert, Platform, TextInput, Switch,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter, useFocusEffect } from 'expo-router';
@@ -8,19 +8,23 @@ import { useAuth } from '../../src/AuthContext';
 import { colors, radius, spacing, shadows, tints, STATUS_LABELS } from '../../src/theme';
 import { Icon } from '../../src/Icon';
 import { api } from '../../src/api';
+import { realtime } from '../../src/realtime';
 import type { Item, Category } from '../../src/types';
 import { format } from 'date-fns';
 
 export default function CategoryDetail() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
-  const { activeSpace } = useAuth();
+  const { activeSpace, spaceRole } = useAuth();
   const [category, setCategory] = useState<Category | null>(null);
   const [items, setItems] = useState<Item[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<'all' | 'available' | 'low' | 'finished'>('all');
   const [showAddSheet, setShowAddSheet] = useState(false);
   const [search, setSearch] = useState('');
+  const [savingPerm, setSavingPerm] = useState(false);
+
+  const isOwner = spaceRole?.role !== 'staff';
 
   const load = useCallback(async () => {
     if (!activeSpace || !id) return;
@@ -36,9 +40,30 @@ export default function CategoryDetail() {
 
   useFocusEffect(useCallback(() => {
     load();
-    const iv = setInterval(load, 10000);
+    const iv = setInterval(load, 30000); // longer interval — realtime handles fast updates
     return () => clearInterval(iv);
   }, [load]));
+
+  // Realtime: refresh on item / category events for this space
+  useEffect(() => {
+    if (!activeSpace) return;
+    const off = realtime.onSpaceEvent((e) => {
+      if (e.space_id !== activeSpace.space_id) return;
+      if (e.kind === 'item' || e.kind === 'category') load();
+    });
+    return off;
+  }, [activeSpace, load]);
+
+  const toggleStaffEdit = async (next: boolean) => {
+    if (!category) return;
+    setSavingPerm(true);
+    try {
+      const updated = await api.patch<Category>(`/categories/${category.category_id}`, { staff_can_edit: next });
+      setCategory(updated);
+    } catch (e: any) {
+      Alert.alert('Could not update', e?.message || 'Try again.');
+    } finally { setSavingPerm(false); }
+  };
 
   const onRefresh = async () => { setRefreshing(true); await load(); setRefreshing(false); };
 
@@ -89,17 +114,41 @@ export default function CategoryDetail() {
           <Icon name={category?.icon || 'Box'} color={tint.icon} size={22} />
         </View>
         <Text style={styles.bannerTitle} numberOfLines={1}>{category?.name || 'Category'}</Text>
-        <TouchableOpacity
-          style={styles.iconBtn}
-          onPress={() => router.push(`/category/new?edit=${id}`)}
-          testID="category-edit"
-        >
-          <Icon name="Edit3" color={colors.textMain} size={20} />
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.iconBtn} onPress={confirmDeleteCategory} testID="category-delete">
-          <Icon name="Trash2" color={colors.textMain} size={20} />
-        </TouchableOpacity>
+        {isOwner && (
+          <>
+            <TouchableOpacity
+              style={styles.iconBtn}
+              onPress={() => router.push(`/category/new?edit=${id}`)}
+              testID="category-edit"
+            >
+              <Icon name="Edit3" color={colors.textMain} size={20} />
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.iconBtn} onPress={confirmDeleteCategory} testID="category-delete">
+              <Icon name="Trash2" color={colors.textMain} size={20} />
+            </TouchableOpacity>
+          </>
+        )}
       </View>
+
+      {/* Owner-only: per-category staff edit toggle */}
+      {isOwner && category && (
+        <View style={styles.staffToggle}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.staffToggleTitle}>Staff can edit this category</Text>
+            <Text style={styles.staffToggleSub}>
+              {category.staff_can_edit
+                ? 'Staff with the "edit_inventory" permission can add, change, and remove items here.'
+                : 'Only owners can add, edit, or delete items in this category.'}
+            </Text>
+          </View>
+          <Switch
+            value={!!category.staff_can_edit}
+            onValueChange={toggleStaffEdit}
+            disabled={savingPerm}
+            testID="cat-staff-edit-toggle"
+          />
+        </View>
+      )}
 
       <View style={styles.searchAndFilter}>
         <View style={styles.searchBox}>
@@ -289,6 +338,15 @@ const styles = StyleSheet.create({
   },
   bannerIconWrap: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
   bannerTitle: { flex: 1, fontSize: 22, fontWeight: '900', color: colors.textMain },
+  staffToggle: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    backgroundColor: colors.surface,
+    margin: spacing.md, padding: spacing.md,
+    borderRadius: radius.md,
+    ...shadows.card,
+  },
+  staffToggleTitle: { fontSize: 13, fontWeight: '800', color: colors.textMain },
+  staffToggleSub: { fontSize: 11, color: colors.textMuted, marginTop: 4, lineHeight: 15 },
   filterRow: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
   searchAndFilter: { paddingHorizontal: spacing.md, paddingTop: spacing.md, gap: spacing.sm },
   searchBox: {

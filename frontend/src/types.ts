@@ -148,6 +148,7 @@ export type Category = {
   tint: string;
   fields: CategoryField[];
   shared_with: string[];
+  staff_can_edit?: boolean;
   created_by: string;
   created_at: string;
 };
