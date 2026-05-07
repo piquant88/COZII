@@ -58,6 +58,7 @@ export default function ContractViewScreen() {
   const [assignedStaff, setAssignedStaff] = useState<any>(null);
   const [allStaff, setAllStaff] = useState<any[]>([]);
   const [reassignOpen, setReassignOpen] = useState(false);
+  const [drawingActive, setDrawingActive] = useState(false);
 
   const load = useCallback(async () => {
     if (!params.id) return;
@@ -309,11 +310,52 @@ export default function ContractViewScreen() {
             <Text style={styles.signTxt}>Agree & Sign</Text>
           </TouchableOpacity>
         )}
-        {!myTurnToSign && contract.status === 'pending' && otherSignature == null && mySignature && (
-          <Text style={styles.helpTxt}>Waiting for the other party to sign.</Text>
+
+        {/* Owner signed but contract not fully signed yet */}
+        {!myTurnToSign && contract.status === 'pending' && mySignature && (
+          <View style={[styles.bannerCard, { backgroundColor: tints.sage.bg }]}>
+            <Icon name="CheckCircle2" size={20} color={tints.sage.icon} />
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.bannerTitle, { color: tints.sage.icon }]}>You've signed ✓</Text>
+              <Text style={styles.bannerSub}>
+                {otherSignature
+                  ? 'Both parties have signed.'
+                  : isOwner
+                    ? `Now waiting for ${contract.assigned_staff_name || 'the staff member'} to sign.`
+                    : 'Waiting for the household owner to sign.'}
+              </Text>
+            </View>
+          </View>
         )}
-        {!myTurnToSign && contract.status === 'pending' && !mySignature && !myRole && (
-          <Text style={styles.helpTxt}>You are not a signing party for this contract.</Text>
+
+        {/* Fully signed — show a finalize/done banner with back button */}
+        {contract.status === 'signed' && (
+          <>
+            <View style={[styles.bannerCard, { backgroundColor: tints.sage.bg }]}>
+              <Icon name="CheckCircle2" size={22} color={tints.sage.icon} />
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.bannerTitle, { color: tints.sage.icon }]}>Fully signed & finalized</Text>
+                <Text style={styles.bannerSub}>
+                  A copy has been archived in Documents Vault under "contracts".
+                </Text>
+              </View>
+            </View>
+            <TouchableOpacity style={styles.signBtn} onPress={() => router.back()} testID="contract-done">
+              <Icon name="Check" size={16} color="#fff" />
+              <Text style={styles.signTxt}>Done — back to contracts</Text>
+            </TouchableOpacity>
+          </>
+        )}
+
+        {/* Voided */}
+        {contract.status === 'void' && (
+          <View style={[styles.bannerCard, { backgroundColor: tints.pink.bg }]}>
+            <Icon name="X" size={20} color={tints.pink.icon} />
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.bannerTitle, { color: tints.pink.icon }]}>This contract is void</Text>
+              <Text style={styles.bannerSub}>It can no longer be signed.</Text>
+            </View>
+          </View>
         )}
 
         <View style={{ height: 60 }} />
@@ -371,7 +413,7 @@ export default function ContractViewScreen() {
                   <Icon name="X" size={18} color={colors.textMain} />
                 </TouchableOpacity>
               </View>
-              <ScrollView contentContainerStyle={{ padding: spacing.md, gap: 10 }} keyboardShouldPersistTaps="handled">
+              <ScrollView contentContainerStyle={{ padding: spacing.md, gap: 10 }} keyboardShouldPersistTaps="handled" scrollEnabled={!drawingActive}>
                 <Text style={styles.helpTxt}>
                   By signing below, you confirm you have read and agree to the terms of "{contract.title}".
                   Your signature, IP address, device info and timestamp will be recorded.
@@ -388,7 +430,12 @@ export default function ContractViewScreen() {
                 />
 
                 <Text style={styles.label}>Hand-drawn signature {requireDrawnForMe ? '(required)' : '(optional)'}</Text>
-                <SignaturePad onChange={setDrawing} testID="sigpad" />
+                <SignaturePad
+                  onChange={setDrawing}
+                  onDrawStart={() => setDrawingActive(true)}
+                  onDrawEnd={() => setDrawingActive(false)}
+                  testID="sigpad"
+                />
 
                 <TouchableOpacity
                   style={[styles.signBtn, (submitting || (requireDrawnForMe && !drawing) || (!drawing && !typedName.trim())) && { opacity: 0.5 }]}
@@ -513,6 +560,13 @@ const styles = StyleSheet.create({
     ...shadows.button,
   },
   signTxt: { color: '#fff', fontWeight: '800', fontSize: 14 },
+  bannerCard: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    padding: spacing.md, borderRadius: radius.md,
+    marginTop: spacing.md,
+  },
+  bannerTitle: { fontSize: 14, fontWeight: '900' },
+  bannerSub: { fontSize: 12, color: colors.textMain, marginTop: 2, lineHeight: 17 },
   helpTxt: { fontSize: 12, color: colors.textMuted, marginTop: spacing.sm, textAlign: 'center', lineHeight: 17 },
   modalBg: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
   modalSheet: { backgroundColor: colors.background, borderTopLeftRadius: 24, borderTopRightRadius: 24, maxHeight: '92%' },

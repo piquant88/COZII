@@ -1,601 +1,394 @@
-"""
-Backend test suite for Cozii — Phase 8: Socket.IO real-time sync.
-
-Focus: the new socket.io integration mounted at /api/socket.io, emit helpers,
-and event wiring on contract CRUD + staff join + notifications.
-
-Usage: /root/.venv/bin/python backend_test.py
-"""
-import asyncio
+#!/usr/bin/env python3
+"""Phase 10 backend tests: inventory alerts + shopping list mode + reimbursement fix."""
 import os
+import sys
 import time
-import uuid
-import traceback
-from typing import Any, Dict, List, Optional, Tuple
+import json
+import asyncio
+from datetime import datetime, timedelta, timezone
 
 import requests
-import socketio
 
-BASE = os.environ.get("BACKEND_BASE", "http://localhost:8001")
+BASE = os.environ.get("BACKEND_URL", "https://family-wallet-21.preview.emergentagent.com").rstrip("/")
 API = f"{BASE}/api"
 
+OWNER_EMAIL = "test@cozii.app"
+OWNER_PASSWORD = "test1234"
 
-# -------------- HTTP helpers -------------- #
+passes = 0
+fails = 0
+failures = []
 
-def _uniq_email(prefix: str) -> str:
-    return f"{prefix}_{int(time.time())}_{uuid.uuid4().hex[:6]}@cozii.app"
+
+def _record(ok: bool, name: str, detail: str = ""):
+    global passes, fails
+    if ok:
+        passes += 1
+        print(f"PASS  {name}")
+    else:
+        fails += 1
+        failures.append((name, detail))
+        print(f"FAIL  {name} :: {detail}")
 
 
-def http_register(email: str, password: str, name: str) -> Dict[str, Any]:
-    r = requests.post(
-        f"{API}/auth/register",
-        json={"email": email, "password": password, "name": name},
-        timeout=10,
-    )
-    r.raise_for_status()
+def login(email: str, password: str) -> str:
+    r = requests.post(f"{API}/auth/login", json={"email": email, "password": password})
+    assert r.status_code == 200, f"login failed: {r.status_code} {r.text}"
+    return r.json()["token"]
+
+
+def register(email: str, password: str, name: str) -> str:
+    r = requests.post(f"{API}/auth/register", json={"email": email, "password": password, "name": name})
+    if r.status_code == 200:
+        return r.json()["token"]
+    if r.status_code in (400, 409):
+        return login(email, password)
+    raise AssertionError(f"register failed: {r.status_code} {r.text}")
+
+
+def H(tok):
+    return {"Authorization": f"Bearer {tok}", "Content-Type": "application/json"}
+
+
+def get_household_space_id(tok):
+    r = requests.get(f"{API}/spaces", headers=H(tok))
+    assert r.status_code == 200, r.text
+    spaces = r.json()
+    for s in spaces:
+        if s.get("space_type") == "household" and (s.get("name") or "").lower().startswith("test household"):
+            return s["space_id"]
+    for s in spaces:
+        if s.get("space_type") == "household":
+            return s["space_id"]
+    r = requests.post(f"{API}/spaces", headers=H(tok),
+                      json={"name": "Phase10 Test Household", "space_type": "household", "currency": "USD"})
+    assert r.status_code == 200, r.text
+    return r.json()["space_id"]
+
+
+def create_category(tok, space_id, name="Pantry P10"):
+    r = requests.post(f"{API}/categories", headers=H(tok),
+                      json={"space_id": space_id, "name": name, "icon": "Apple", "tint": "mint"})
+    assert r.status_code == 200, r.text
+    return r.json()["category_id"]
+
+
+def create_item(tok, space_id, category_id, name, status="available", expiry_date=None, price=None):
+    payload = {"space_id": space_id, "category_id": category_id, "name": name, "status": status, "quantity": 1}
+    if expiry_date:
+        payload["expiry_date"] = expiry_date
+    if price is not None:
+        payload["price"] = price
+    r = requests.post(f"{API}/items", headers=H(tok), json=payload)
+    assert r.status_code == 200, f"create_item failed: {r.text}"
     return r.json()
 
 
-def H(token: str) -> Dict[str, str]:
-    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-
-
-def create_space(token: str, space_type: str = "household") -> Dict[str, Any]:
-    r = requests.post(
-        f"{API}/spaces",
-        headers=H(token),
-        json={"name": f"Test Space {uuid.uuid4().hex[:6]}", "space_type": space_type, "currency": "USD"},
-        timeout=10,
-    )
-    r.raise_for_status()
-    return r.json()
-
-
-def get_roles(token: str, space_id: str) -> List[Dict[str, Any]]:
-    r = requests.get(f"{API}/household/roles", headers=H(token), params={"space_id": space_id}, timeout=10)
-    r.raise_for_status()
-    return r.json()
-
-
-def create_staff(token: str, space_id: str, name: str, role_id: str) -> Dict[str, Any]:
-    r = requests.post(
-        f"{API}/household/staff",
-        headers=H(token),
-        json={
-            "space_id": space_id,
-            "name": name,
-            "role_id": role_id,
-            "salary": 1000,
-            "pay_cycle": "monthly",
-            "off_day": "sun",
-        },
-        timeout=10,
-    )
-    r.raise_for_status()
-    return r.json()
-
-
-def staff_join_by_code(token: str, invite_code: str) -> Dict[str, Any]:
-    r = requests.post(
-        f"{API}/household/staff/join",
-        headers=H(token),
-        json={"invite_code": invite_code},
-        timeout=10,
-    )
-    r.raise_for_status()
-    return r.json()
-
-
-# -------------- Socket.IO test client -------------- #
-
-class SioTestClient:
-    def __init__(self, name: str):
-        self.name = name
-        self.sio = socketio.AsyncClient(logger=False, engineio_logger=False, reconnection=False)
-        self.hello: Optional[Dict[str, Any]] = None
-        self.space_events: List[Dict[str, Any]] = []
-        self.user_events: List[Dict[str, Any]] = []
-        self._hello_evt = asyncio.Event()
-
-        @self.sio.on("hello")
-        async def _h(data):
-            self.hello = data
-            self._hello_evt.set()
-
-        @self.sio.on("space.event")
-        async def _s(data):
-            self.space_events.append(data)
-
-        @self.sio.on("user.event")
-        async def _u(data):
-            self.user_events.append(data)
-
-    async def connect(self, token: Optional[str], path: str = "/api/socket.io", timeout: float = 5.0):
-        auth = {"token": token} if token else None
-        await self.sio.connect(
-            BASE, socketio_path=path, auth=auth,
-            transports=["polling", "websocket"], wait_timeout=timeout,
-        )
-
-    async def wait_hello(self, timeout: float = 5.0):
-        await asyncio.wait_for(self._hello_evt.wait(), timeout=timeout)
-        return self.hello
-
-    async def emit_join(self, payload):
-        return await self.sio.call("join_room", payload, timeout=5)
-
-    async def disconnect(self):
-        try:
-            await self.sio.disconnect()
-        except Exception:
-            pass
-
-    async def wait_for(self, pred, timeout: float = 3.0, source: str = "space"):
-        end = time.time() + timeout
-        src = self.space_events if source == "space" else self.user_events
-        while time.time() < end:
-            for e in src:
-                if pred(e):
-                    return e
-            await asyncio.sleep(0.1)
-        return None
-
-
-# -------------- Test runner -------------- #
-
-class Runner:
-    def __init__(self):
-        self.results: List[Tuple[str, bool, str]] = []
-
-    def ok(self, name: str, msg: str = ""):
-        self.results.append((name, True, msg))
-        print(f"  PASS  {name}  {msg}".rstrip())
-
-    def fail(self, name: str, msg: str):
-        self.results.append((name, False, msg))
-        print(f"  FAIL  {name}  {msg}")
-
-    def summary(self):
-        p = sum(1 for _, ok, _ in self.results if ok)
-        f = len(self.results) - p
-        print("\n=== Summary ===")
-        print(f"  PASS: {p}  FAIL: {f}  TOTAL: {len(self.results)}")
-        if f:
-            print("\nFAILED:")
-            for n, ok, m in self.results:
-                if not ok:
-                    print(f"  - {n}: {m}")
-        return p, f
-
-
-R = Runner()
-
-
-# -------------- Test cases -------------- #
-
-async def setup_world() -> Dict[str, Any]:
-    a = http_register(_uniq_email("alex"), "test1234", "Alex Morgan")
-    b = http_register(_uniq_email("riley"), "test1234", "Riley Chen")
-    c = http_register(_uniq_email("quinn"), "test1234", "Quinn Park")
-
-    space_a = create_space(a["token"])
-    space_c = create_space(c["token"])
-
-    roles = get_roles(a["token"], space_a["space_id"])
-    maid = next((r for r in roles if (r.get("name") or "").lower() == "maid"), roles[0])
-    staff = create_staff(a["token"], space_a["space_id"], "Riley Chen", maid["role_id"])
-    inv = staff.get("invite_code")
-    if not inv:
-        raise RuntimeError("create_staff did not return invite_code")
-    staff_join_by_code(b["token"], inv)
-
-    return {
-        "A": a, "B": b, "C": c,
-        "space_a": space_a, "space_c": space_c,
-        "staff_id": staff["staff_id"],
-    }
-
-
-async def test_connection_lifecycle(ctx):
-    # valid connect
-    client = SioTestClient("A-valid")
-    try:
-        await client.connect(ctx["A"]["token"])
-        R.ok("connect with valid token")
-        try:
-            await client.wait_hello(timeout=5)
-            sp = client.hello or {}
-            if sp.get("user_id") == ctx["A"]["user"]["user_id"] and ctx["space_a"]["space_id"] in (sp.get("spaces") or []):
-                R.ok("hello event has user_id + spaces")
-            else:
-                R.fail("hello event payload", f"got={sp}")
-        except asyncio.TimeoutError:
-            R.fail("hello event received", "no hello within 5s")
-    except Exception as e:
-        R.fail("connect with valid token", f"{type(e).__name__}: {e}")
-    finally:
-        await client.disconnect()
-
-    # no token
-    c2 = SioTestClient("no-token")
-    try:
-        await c2.connect(None)
-        R.fail("connect with no token refused", "connection succeeded")
-        await c2.disconnect()
-    except Exception as e:
-        R.ok("connect with no token refused", f"{type(e).__name__}")
-
-    # bad token
-    c3 = SioTestClient("bad-token")
-    try:
-        await c3.connect("this-is-not-a-valid-token-xyz")
-        R.fail("connect with bad token refused", "connection succeeded")
-        await c3.disconnect()
-    except Exception as e:
-        R.ok("connect with bad token refused", f"{type(e).__name__}")
-
-    # wrong path
-    c4 = SioTestClient("wrong-path")
-    try:
-        await c4.connect(ctx["A"]["token"], path="/socket.io", timeout=3)
-        R.fail("connect with wrong path fails", "succeeded unexpectedly")
-        await c4.disconnect()
-    except Exception as e:
-        R.ok("connect with wrong path fails", f"{type(e).__name__}")
-
-
-async def test_join_room(ctx):
-    client = SioTestClient("A-join")
-    try:
-        await client.connect(ctx["A"]["token"])
-        await client.wait_hello(5)
-
-        ack = await client.emit_join({"space_id": ctx["space_a"]["space_id"]})
-        if isinstance(ack, dict) and ack.get("ok") is True and ack.get("joined") == ctx["space_a"]["space_id"]:
-            R.ok("join_room valid space")
-        else:
-            R.fail("join_room valid space", f"ack={ack}")
-
-        ack2 = await client.emit_join({"space_id": "space_invalid_xyz"})
-        if isinstance(ack2, dict) and ack2.get("ok") is False:
-            R.ok("join_room invalid space rejected")
-        else:
-            R.fail("join_room invalid space rejected", f"ack={ack2}")
-
-        ack3 = await client.emit_join({})
-        if isinstance(ack3, dict) and ack3.get("ok") is False:
-            R.ok("join_room empty payload rejected")
-        else:
-            R.fail("join_room empty payload rejected", f"ack={ack3}")
-    except Exception as e:
-        R.fail("join_room suite", f"{type(e).__name__}: {e}")
-        traceback.print_exc()
-    finally:
-        await client.disconnect()
-
-
-async def _connect_all(ctx) -> Tuple[SioTestClient, SioTestClient, SioTestClient]:
-    a = SioTestClient("A"); b = SioTestClient("B"); c = SioTestClient("C")
-    await a.connect(ctx["A"]["token"])
-    await b.connect(ctx["B"]["token"])
-    await c.connect(ctx["C"]["token"])
-    await a.wait_hello(5); await b.wait_hello(5); await c.wait_hello(5)
-    return a, b, c
-
-
-async def test_contract_events_and_isolation(ctx):
-    a, b, c = None, None, None
-    try:
-        a, b, c = await _connect_all(ctx)
-        for cli in (a, b, c):
-            cli.space_events.clear(); cli.user_events.clear()
-
-        # POST /api/contracts
-        r = requests.post(
-            f"{API}/contracts",
-            headers=H(ctx["A"]["token"]),
-            json={
-                "space_id": ctx["space_a"]["space_id"],
-                "title": "Full-time Employment Agreement",
-                "assigned_staff_id": ctx["staff_id"],
-                "body": "Work Tuesday-Sunday.",
-                "require_drawn_signature_owner": False,
-                "require_drawn_signature_staff": False,
-            },
-            timeout=10,
-        )
-        if r.status_code != 200:
-            R.fail("POST /api/contracts", f"status={r.status_code} body={r.text[:300]}")
-            return
-        contract_id = r.json().get("contract_id")
-        R.ok("POST /api/contracts", f"contract_id={contract_id}")
-
-        ev_a = await a.wait_for(lambda e: e.get("kind") == "contract" and e.get("action") == "created", 3)
-        R.ok("A receives space.event contract.created") if ev_a else R.fail("A receives space.event contract.created", f"events={a.space_events}")
-        ev_b = await b.wait_for(lambda e: e.get("kind") == "contract" and e.get("action") == "created", 3)
-        R.ok("B receives space.event contract.created") if ev_b else R.fail("B receives space.event contract.created", f"events={b.space_events}")
-
-        un_b = await b.wait_for(
-            lambda e: e.get("kind") == "notification" and (e.get("payload") or {}).get("kind") == "contract_assigned",
-            3, source="user",
-        )
-        R.ok("B receives user.event notification contract_assigned") if un_b else R.fail("B receives user.event notification contract_assigned", f"events={b.user_events}")
-
-        # Cross-space isolation: C receives nothing
-        if not c.space_events and not c.user_events:
-            R.ok("C (different space) receives no events")
-        else:
-            R.fail("C (different space) receives no events", f"space={c.space_events} user={c.user_events}")
-
-        # REST notification exists
-        rn = requests.get(f"{API}/notifications", headers=H(ctx["B"]["token"]),
-                          params={"space_id": ctx["space_a"]["space_id"]}, timeout=10)
-        if rn.status_code == 200 and any(n.get("kind") == "contract_assigned" for n in rn.json()):
-            R.ok("notify_user inserted contract_assigned notification (REST GET /notifications)")
-        else:
-            R.fail("notify_user inserted contract_assigned notification", f"status={rn.status_code} body={rn.text[:300]}")
-
-        # ---- sign by owner ----
-        for cli in (a, b, c):
-            cli.space_events.clear(); cli.user_events.clear()
-
-        r = requests.post(f"{API}/contracts/{contract_id}/sign",
-                          headers=H(ctx["A"]["token"]), json={"typed_name": "Alex Morgan"}, timeout=10)
-        if r.status_code != 200:
-            R.fail("POST /contracts/{id}/sign (owner)", f"status={r.status_code} body={r.text[:300]}")
-            return
-        R.ok("POST /contracts/{id}/sign (owner)")
-
-        eva = await a.wait_for(lambda e: e.get("kind") == "contract" and e.get("action") == "signed", 3)
-        if eva and (eva.get("payload") or {}).get("by") == "owner":
-            R.ok("A receives space.event contract.signed by=owner")
-        else:
-            R.fail("A receives space.event contract.signed by=owner", f"eva={eva}")
-        evb = await b.wait_for(lambda e: e.get("kind") == "contract" and e.get("action") == "signed", 3)
-        if evb and (evb.get("payload") or {}).get("by") == "owner":
-            R.ok("B receives space.event contract.signed by=owner")
-        else:
-            R.fail("B receives space.event contract.signed by=owner", f"evb={evb}")
-        unb = await b.wait_for(
-            lambda e: e.get("kind") == "notification" and (e.get("payload") or {}).get("kind") == "contract_owner_signed",
-            3, source="user",
-        )
-        R.ok("B receives user.event notification contract_owner_signed") if unb else R.fail("B receives user.event notification contract_owner_signed", f"user_events={b.user_events}")
-
-        # ---- sign by staff ----
-        for cli in (a, b):
-            cli.space_events.clear(); cli.user_events.clear()
-
-        r = requests.post(f"{API}/contracts/{contract_id}/sign",
-                          headers=H(ctx["B"]["token"]), json={"typed_name": "Riley Chen"}, timeout=10)
-        if r.status_code != 200:
-            R.fail("POST /contracts/{id}/sign (staff)", f"status={r.status_code} body={r.text[:300]}")
-            return
-        R.ok("POST /contracts/{id}/sign (staff)")
-
-        eva2 = await a.wait_for(
-            lambda e: e.get("kind") == "contract" and e.get("action") == "signed" and (e.get("payload") or {}).get("by") == "staff",
-            3,
-        )
-        if eva2 and (eva2.get("payload") or {}).get("status") == "signed":
-            R.ok("A receives space.event contract.signed by=staff status=signed")
-        else:
-            R.fail("A receives space.event contract.signed by=staff status=signed", f"eva2={eva2}")
-        evb2 = await b.wait_for(
-            lambda e: e.get("kind") == "contract" and e.get("action") == "signed" and (e.get("payload") or {}).get("by") == "staff",
-            3,
-        )
-        R.ok("B receives space.event contract.signed by=staff") if evb2 else R.fail("B receives space.event contract.signed by=staff", f"evb2={evb2}")
-        una = await a.wait_for(
-            lambda e: e.get("kind") == "notification" and (e.get("payload") or {}).get("kind") == "contract_staff_signed",
-            3, source="user",
-        )
-        R.ok("A receives user.event notification contract_staff_signed") if una else R.fail("A receives user.event notification contract_staff_signed", f"user_events={a.user_events}")
-
-        # ---- void ----
-        a.space_events.clear(); b.space_events.clear()
-        r = requests.post(f"{API}/contracts/{contract_id}/void", headers=H(ctx["A"]["token"]), json={}, timeout=10)
-        if r.status_code == 200:
-            R.ok("POST /contracts/{id}/void")
-            evv = await a.wait_for(lambda e: e.get("kind") == "contract" and e.get("action") == "voided", 3)
-            R.ok("A receives space.event contract.voided") if evv else R.fail("A receives space.event contract.voided", f"events={a.space_events}")
-        else:
-            R.fail("POST /contracts/{id}/void", f"status={r.status_code}")
-
-        # ---- delete ----
-        a.space_events.clear()
-        r = requests.delete(f"{API}/contracts/{contract_id}", headers=H(ctx["A"]["token"]), timeout=10)
-        if r.status_code == 200:
-            R.ok("DELETE /contracts/{id}")
-            evd = await a.wait_for(lambda e: e.get("kind") == "contract" and e.get("action") == "deleted", 3)
-            R.ok("A receives space.event contract.deleted") if evd else R.fail("A receives space.event contract.deleted", f"events={a.space_events}")
-        else:
-            R.fail("DELETE /contracts/{id}", f"status={r.status_code}")
-
-    except Exception as e:
-        R.fail("contract_events suite", f"{type(e).__name__}: {e}")
-        traceback.print_exc()
-    finally:
-        for cli in (a, b, c):
-            if cli:
-                await cli.disconnect()
-
-
-async def test_contract_update(ctx):
-    a = SioTestClient("A-patch")
-    try:
-        await a.connect(ctx["A"]["token"])
-        await a.wait_hello(5)
-
-        r = requests.post(
-            f"{API}/contracts",
-            headers=H(ctx["A"]["token"]),
-            json={
-                "space_id": ctx["space_a"]["space_id"],
-                "title": "Employment Contract v2",
-                "assigned_staff_id": ctx["staff_id"],
-                "body": "Original body",
-                "require_drawn_signature_owner": False,
-                "require_drawn_signature_staff": False,
-            },
-            timeout=10,
-        )
-        if r.status_code != 200:
-            R.fail("PATCH setup: POST /contracts", f"status={r.status_code}")
-            return
-        cid = r.json()["contract_id"]
-        a.space_events.clear()
-
-        r = requests.patch(f"{API}/contracts/{cid}", headers=H(ctx["A"]["token"]),
-                           json={"title": "Employment Contract (renamed)"}, timeout=10)
-        if r.status_code == 200:
-            R.ok("PATCH /contracts/{id}")
-            evu = await a.wait_for(lambda e: e.get("kind") == "contract" and e.get("action") == "updated", 3)
-            R.ok("A receives space.event contract.updated") if evu else R.fail("A receives space.event contract.updated", f"events={a.space_events}")
-        else:
-            R.fail("PATCH /contracts/{id}", f"status={r.status_code}")
-    except Exception as e:
-        R.fail("contract_update suite", f"{type(e).__name__}: {e}")
-    finally:
-        await a.disconnect()
-
-
-async def test_staff_join_event(ctx):
-    a = SioTestClient("A-staff-join")
-    try:
-        await a.connect(ctx["A"]["token"])
-        await a.wait_hello(5)
-
-        roles = get_roles(ctx["A"]["token"], ctx["space_a"]["space_id"])
-        cook = next((r for r in roles if (r.get("name") or "").lower() == "cook"), roles[0])
-        staff = create_staff(ctx["A"]["token"], ctx["space_a"]["space_id"], "Jordan Kim", cook["role_id"])
-
-        newu = http_register(_uniq_email("jordan"), "test1234", "Jordan Kim")
-
-        a.space_events.clear()
-        staff_join_by_code(newu["token"], staff["invite_code"])
-
-        ev = await a.wait_for(lambda e: e.get("kind") == "staff" and e.get("action") == "joined", 3)
-        R.ok("A receives space.event staff.joined") if ev else R.fail("A receives space.event staff.joined", f"events={a.space_events}")
-    except Exception as e:
-        R.fail("staff_join suite", f"{type(e).__name__}: {e}")
-    finally:
-        await a.disconnect()
-
-
-async def test_reconnect(ctx):
-    a = SioTestClient("A-reconnect")
-    try:
-        try:
-            await a.connect(ctx["A"]["token"])
-            await a.wait_hello(5)
-            await a.disconnect()
-        except Exception as e:
-            R.fail("reconnect: initial connect", f"{type(e).__name__}: {e}")
-            return
-
-        a2 = SioTestClient("A-reconnect-2")
-        try:
-            await a2.connect(ctx["A"]["token"])
-            await a2.wait_hello(5)
-            R.ok("reconnect with valid token works")
-        finally:
-            await a2.disconnect()
-
-        a3 = SioTestClient("A-reconnect-bad")
-        try:
-            await a3.connect("definitely-not-a-valid-token")
-            R.fail("reconnect with invalid token refused", "connection succeeded")
-            await a3.disconnect()
-        except Exception as e:
-            R.ok("reconnect with invalid token refused", f"{type(e).__name__}")
-    finally:
-        await a.disconnect()
-
-
-async def test_concurrent_rooms(ctx):
-    space_a2 = create_space(ctx["A"]["token"], space_type="roommates")
-
-    a = SioTestClient("A-multi")
-    try:
-        await a.connect(ctx["A"]["token"])
-        h = await a.wait_hello(5)
-        if space_a2["space_id"] in (h.get("spaces") or []) and ctx["space_a"]["space_id"] in (h.get("spaces") or []):
-            R.ok("hello.spaces includes both owned spaces")
-        else:
-            R.fail("hello.spaces includes both owned spaces", f"hello={h}")
-
-        roles2 = get_roles(ctx["A"]["token"], space_a2["space_id"])
-        r2 = next(iter(roles2), None)
-        if not r2:
-            R.fail("concurrent rooms setup: roles", "empty")
-            return
-        st2 = create_staff(ctx["A"]["token"], space_a2["space_id"], "Casey Lee", r2["role_id"])
-
-        a.space_events.clear()
-        r = requests.post(
-            f"{API}/contracts",
-            headers=H(ctx["A"]["token"]),
-            json={
-                "space_id": space_a2["space_id"],
-                "title": "Second space contract",
-                "assigned_staff_id": st2["staff_id"],
-                "body": "x",
-                "require_drawn_signature_owner": False,
-                "require_drawn_signature_staff": False,
-            },
-            timeout=10,
-        )
-        if r.status_code != 200:
-            R.fail("concurrent rooms: POST contract in space_a2", f"status={r.status_code}")
-            return
-        ev = await a.wait_for(
-            lambda e: e.get("kind") == "contract" and e.get("action") == "created" and e.get("space_id") == space_a2["space_id"],
-            3,
-        )
-        R.ok("A receives events from second space room concurrently") if ev else R.fail("A receives events from second space room concurrently", f"events={a.space_events}")
-    except Exception as e:
-        R.fail("concurrent_rooms suite", f"{type(e).__name__}: {e}")
-    finally:
-        await a.disconnect()
-
-
-async def main():
-    print("=== Phase 8: Socket.IO real-time sync tests ===")
-    print(f"BASE={BASE}")
-
-    try:
-        ctx = await setup_world()
-        print(f"setup OK: owner={ctx['A']['user']['user_id']} staff={ctx['B']['user']['user_id']} outsider={ctx['C']['user']['user_id']} space={ctx['space_a']['space_id']}")
-    except Exception as e:
-        print(f"FATAL: setup failed: {type(e).__name__}: {e}")
-        traceback.print_exc()
+def cleanup_open_shopping(tok, space_id, item_names):
+    r = requests.get(f"{API}/household/shopping", headers=H(tok), params={"space_id": space_id})
+    if r.status_code != 200:
         return
-
-    print("\n-- 1. Connection lifecycle --")
-    await test_connection_lifecycle(ctx)
-
-    print("\n-- 3. join_room --")
-    await test_join_room(ctx)
-
-    print("\n-- 4/5/6. Contract events + cross-space isolation --")
-    await test_contract_events_and_isolation(ctx)
-
-    print("\n-- Contract update event --")
-    await test_contract_update(ctx)
-
-    print("\n-- Staff join event --")
-    await test_staff_join_event(ctx)
-
-    print("\n-- 7. Reconnect --")
-    await test_reconnect(ctx)
-
-    print("\n-- 8. Concurrent rooms --")
-    await test_concurrent_rooms(ctx)
-
-    p, f = R.summary()
-    os._exit(0 if f == 0 else 1)
+    for s in r.json():
+        if s.get("item_name") in item_names and s.get("status") in ("pending", "approved"):
+            requests.delete(f"{API}/household/shopping/{s['request_id']}", headers=H(tok))
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+# ============================================================
+print(f"\n=== Phase 10 backend tests against {API} ===\n")
+
+owner_tok = login(OWNER_EMAIL, OWNER_PASSWORD)
+
+ts = int(time.time())
+outsider_email = f"phase10_outsider_{ts}@cozii.app"
+outsider_tok = register(outsider_email, "Outsider!2026", "Olivia Stone")
+
+space_id = get_household_space_id(owner_tok)
+print(f"Using space_id={space_id}")
+
+
+# A. Reimbursement starts pending
+print("\n--- A. Reimbursement starts pending ---")
+cat_id = create_category(owner_tok, space_id, name=f"Pantry P10 {ts}")
+
+unique_name1 = f"P10 Almond Milk {ts}"
+r = requests.post(f"{API}/household/shopping", headers=H(owner_tok), json={
+    "space_id": space_id, "item_name": unique_name1, "kind": "reimbursement",
+    "actual_price": 12.50, "category_id": cat_id, "urgency": "normal"})
+ok = r.status_code == 200 and r.json().get("status") == "pending" and r.json().get("kind") == "reimbursement"
+_record(ok, "A1: POST kind=reimbursement -> status=pending, kind=reimbursement",
+        f"status={r.status_code} body={r.text[:300]}")
+reimb_id = r.json().get("request_id") if r.status_code == 200 else None
+ok = (r.status_code == 200 and r.json().get("actual_price") == 12.50)
+_record(ok, "A1b: reimbursement preserves actual_price", f"body={r.text[:300]}")
+
+unique_name2 = f"P10 Eggs {ts}"
+r = requests.post(f"{API}/household/shopping", headers=H(owner_tok), json={
+    "space_id": space_id, "item_name": unique_name2, "kind": "request",
+    "estimated_price": 4.0, "urgency": "normal", "category_id": cat_id})
+ok = r.status_code == 200 and r.json().get("status") == "pending" and r.json().get("kind") == "request"
+_record(ok, "A2: POST kind=request -> status=pending, kind=request",
+        f"status={r.status_code} body={r.text[:300]}")
+
+if reimb_id:
+    r = requests.patch(f"{API}/household/shopping/{reimb_id}", headers=H(owner_tok), json={"status": "approved"})
+    ok = r.status_code == 200 and r.json().get("status") == "approved"
+    _record(ok, "A3: PATCH reimbursement status=approved -> approved",
+            f"status={r.status_code} body={r.text[:300]}")
+
+    r = requests.post(f"{API}/household/shopping/{reimb_id}/purchase", headers=H(owner_tok),
+                      json={"actual_price": 12.50})
+    ok = r.status_code == 200 and r.json().get("status") == "purchased"
+    _record(ok, "A4: POST /shopping/{id}/purchase -> status=purchased",
+            f"status={r.status_code} body={r.text[:300]}")
+else:
+    _record(False, "A3: PATCH approve", "no reimb_id")
+    _record(False, "A4: POST purchase", "no reimb_id")
+
+
+# B. Inventory alerts endpoint
+print("\n--- B. Inventory alerts endpoint ---")
+today = datetime.now(timezone.utc).date()
+items_meta = [
+    ("P10_item1_avail", "available", None),
+    ("P10_item2_low", "low", None),
+    ("P10_item3_finished", "finished", None),
+    ("P10_item4_exp3", "available", (today + timedelta(days=3)).isoformat()),
+    ("P10_item5_exp30", "available", (today + timedelta(days=30)).isoformat()),
+    ("P10_item6_expired", "available", (today - timedelta(days=2)).isoformat()),
+]
+created_items = {}
+for label, st, exp in items_meta:
+    name = f"{label} {ts}"
+    it = create_item(owner_tok, space_id, cat_id, name=name, status=st, expiry_date=exp, price=5.0)
+    created_items[label] = it
+
+r = requests.get(f"{API}/inventory/alerts", headers=H(owner_tok),
+                 params={"space_id": space_id, "days_threshold": 7})
+ok = r.status_code == 200
+_record(ok, "B1: GET /inventory/alerts -> 200", f"status={r.status_code}")
+alerts = r.json() if ok else {}
+
+def _has_item(bucket, label):
+    target_id = created_items[label]["item_id"]
+    return any(x.get("item_id") == target_id for x in alerts.get(bucket, []))
+
+ok = _has_item("low_stock", "P10_item2_low") and not _has_item("low_stock", "P10_item3_finished")
+_record(ok, "B2: low_stock contains item2 (low)",
+        json.dumps([x.get("name") for x in alerts.get("low_stock", [])])[:200])
+
+ok = _has_item("finished", "P10_item3_finished")
+_record(ok, "B3: finished contains item3",
+        json.dumps([x.get("name") for x in alerts.get("finished", [])])[:200])
+
+ok = _has_item("expiring", "P10_item4_exp3") and not _has_item("expiring", "P10_item5_exp30")
+_record(ok, "B4: expiring at threshold=7 contains item4 (3d), excludes item5 (30d)",
+        f"expiring={[x.get('name') for x in alerts.get('expiring', [])]}")
+
+ok = _has_item("expired", "P10_item6_expired")
+_record(ok, "B5: expired contains item6",
+        json.dumps([x.get("name") for x in alerts.get("expired", [])])[:200])
+
+totals = alerts.get("totals", {}) or {}
+ok = (totals.get("low") == len(alerts.get("low_stock", []))
+      and totals.get("finished") == len(alerts.get("finished", []))
+      and totals.get("expiring") == len(alerts.get("expiring", []))
+      and totals.get("expired") == len(alerts.get("expired", []))
+      and totals.get("all") == (totals.get("low", 0) + totals.get("finished", 0)
+                                + totals.get("expiring", 0) + totals.get("expired", 0)))
+_record(ok, "B6: totals math matches bucket lengths", json.dumps(totals))
+
+# Each alerted item enriched with category_name
+ok = True
+target_ids = [created_items[k]["item_id"] for k in ("P10_item2_low", "P10_item3_finished",
+                                                    "P10_item4_exp3", "P10_item6_expired")]
+for bucket in ("low_stock", "finished", "expiring", "expired"):
+    for x in alerts.get(bucket, []):
+        if x.get("item_id") in target_ids and not x.get("category_name"):
+            ok = False
+_record(ok, "B7: alerted items enriched with category_name", "")
+
+ok = True
+for bucket in ("low_stock", "finished", "expiring", "expired"):
+    for x in alerts.get(bucket, []):
+        if x.get("item_id") in target_ids:
+            if "category_icon" not in x or "category_tint" not in x:
+                ok = False
+_record(ok, "B7b: alerted items also include category_icon and category_tint", "")
+
+r = requests.get(f"{API}/inventory/alerts", headers=H(owner_tok),
+                 params={"space_id": space_id, "days_threshold": 60})
+ok = r.status_code == 200
+alerts60 = r.json() if ok else {}
+ok = ok and any(x.get("item_id") == created_items["P10_item5_exp30"]["item_id"]
+                for x in alerts60.get("expiring", []))
+_record(ok, "B8: threshold=60 includes item5 (30d expiry) in expiring",
+        f"expiring count={len(alerts60.get('expiring', []))}")
+ok = len(alerts60.get("expiring", [])) >= len(alerts.get("expiring", [])) + 1
+_record(ok, "B8b: expiring count grows when threshold raised 7->60",
+        f"7d={len(alerts.get('expiring', []))}, 60d={len(alerts60.get('expiring', []))}")
+
+
+# C. Convert alerts to shopping
+print("\n--- C. Convert alerts to shopping ---")
+cleanup_names = [created_items[k]["name"] for k in ("P10_item2_low", "P10_item3_finished",
+                                                    "P10_item4_exp3", "P10_item6_expired",
+                                                    "P10_item5_exp30")]
+cleanup_open_shopping(owner_tok, space_id, cleanup_names)
+
+ids = [created_items["P10_item2_low"]["item_id"],
+       created_items["P10_item3_finished"]["item_id"],
+       created_items["P10_item4_exp3"]["item_id"]]
+r = requests.post(f"{API}/inventory/alerts/to-shopping", headers=H(owner_tok),
+                  json={"space_id": space_id, "item_ids": ids})
+ok = r.status_code == 200 and r.json().get("created") == 3 and r.json().get("skipped") == 0
+_record(ok, "C1: to-shopping creates 3, skips 0", f"status={r.status_code} body={r.text[:300]}")
+created_request_ids = r.json().get("request_ids", []) if r.status_code == 200 else []
+ok = isinstance(created_request_ids, list) and len(created_request_ids) == 3
+_record(ok, "C1b: response includes 3 request_ids", str(created_request_ids))
+
+r = requests.get(f"{API}/household/shopping", headers=H(owner_tok), params={"space_id": space_id})
+ok = r.status_code == 200
+shopping = r.json() if ok else []
+matching = [s for s in shopping if s.get("request_id") in created_request_ids]
+ok = ok and len(matching) == 3 and all(s.get("status") == "pending" and s.get("kind") == "request" for s in matching)
+_record(ok, "C2: 3 new pending kind=request shopping requests exist",
+        f"matched={len(matching)} statuses={[s.get('status') for s in matching]}")
+
+item3_name = created_items["P10_item3_finished"]["name"]
+finished_req = next((s for s in matching if s.get("item_name") == item3_name), None)
+ok = finished_req is not None and finished_req.get("urgency") == "high"
+_record(ok, "C3: shopping from finished item -> urgency=high (auto-bumped)",
+        f"req={finished_req}")
+
+item4_name = created_items["P10_item4_exp3"]["name"]
+exp3_req = next((s for s in matching if s.get("item_name") == item4_name), None)
+ok = exp3_req is not None and exp3_req.get("urgency") in ("normal", "low")
+_record(ok, "C3b: shopping from soon-expiring (not expired) item NOT auto-bumped",
+        f"urgency={(exp3_req or {}).get('urgency')}")
+
+item2_name = created_items["P10_item2_low"]["name"]
+low_req = next((s for s in matching if s.get("item_name") == item2_name), None)
+ok = low_req is not None and low_req.get("urgency") in ("normal", "low")
+_record(ok, "C3c: shopping from low-stock item NOT auto-bumped",
+        f"urgency={(low_req or {}).get('urgency')}")
+
+cleanup_open_shopping(owner_tok, space_id, [created_items["P10_item6_expired"]["name"]])
+r = requests.post(f"{API}/inventory/alerts/to-shopping", headers=H(owner_tok),
+                  json={"space_id": space_id,
+                        "item_ids": [created_items["P10_item6_expired"]["item_id"]]})
+ok = r.status_code == 200 and r.json().get("created") == 1 and r.json().get("skipped") == 0
+_record(ok, "C4: to-shopping for expired item creates 1", f"body={r.text[:300]}")
+new_id = r.json().get("request_ids", [None])[0] if r.status_code == 200 else None
+if new_id:
+    r = requests.get(f"{API}/household/shopping", headers=H(owner_tok), params={"space_id": space_id})
+    sh = next((s for s in r.json() if s.get("request_id") == new_id), None)
+    ok = sh is not None and sh.get("urgency") == "high"
+    _record(ok, "C4b: shopping from expired item -> urgency=high",
+            f"urgency={sh.get('urgency') if sh else None}")
+else:
+    _record(False, "C4b", "no request created")
+
+r = requests.post(f"{API}/inventory/alerts/to-shopping", headers=H(owner_tok),
+                  json={"space_id": space_id,
+                        "item_ids": [created_items["P10_item2_low"]["item_id"]]})
+ok = r.status_code == 200 and r.json().get("created") == 0 and r.json().get("skipped") == 1
+_record(ok, "C5: re-converting item with open pending request -> created=0 skipped=1",
+        f"body={r.text[:300]}")
+
+r = requests.post(f"{API}/inventory/alerts/to-shopping", headers=H(owner_tok),
+                  json={"space_id": space_id, "item_ids": []})
+ok = r.status_code == 400
+_record(ok, "C6: empty item_ids -> 400", f"status={r.status_code} body={r.text[:200]}")
+
+r = requests.post(f"{API}/inventory/alerts/to-shopping", headers=H(owner_tok),
+                  json={"space_id": space_id, "item_ids": ["item_doesnotexist1", "item_doesnotexist2"]})
+ok = r.status_code == 200 and r.json().get("created") == 0 and r.json().get("skipped") == 0
+_record(ok, "C7: only non-existent ids -> 200 created=0 skipped=0",
+        f"body={r.text[:200]}")
+
+cleanup_open_shopping(owner_tok, space_id, [created_items["P10_item5_exp30"]["name"]])
+r = requests.post(f"{API}/inventory/alerts/to-shopping", headers=H(owner_tok),
+                  json={"space_id": space_id, "item_ids": [
+                      "item_doesnotexist3",
+                      created_items["P10_item5_exp30"]["item_id"]]})
+ok = r.status_code == 200 and r.json().get("created") == 1
+_record(ok, "C7b: valid + non-existent ids -> only valid processed (created=1)",
+        f"body={r.text[:200]}")
+
+
+# D. Permission/membership
+print("\n--- D. Permission/membership ---")
+r = requests.get(f"{API}/inventory/alerts", headers=H(outsider_tok),
+                 params={"space_id": space_id, "days_threshold": 7})
+ok = r.status_code == 403
+_record(ok, "D1: outsider GET /inventory/alerts -> 403",
+        f"status={r.status_code} body={r.text[:200]}")
+
+r = requests.post(f"{API}/inventory/alerts/to-shopping", headers=H(outsider_tok),
+                  json={"space_id": space_id,
+                        "item_ids": [created_items["P10_item5_exp30"]["item_id"]]})
+ok = r.status_code == 403
+_record(ok, "D2: outsider POST /to-shopping -> 403",
+        f"status={r.status_code} body={r.text[:200]}")
+
+
+# E. Realtime emit
+print("\n--- E. Realtime emit (Socket.IO) ---")
+events_received = []
+
+async def run_socket_test():
+    try:
+        import socketio as sio_lib
+    except Exception as e:
+        return f"socketio client missing: {e}"
+    cli = sio_lib.AsyncClient(reconnection=False, logger=False, engineio_logger=False)
+
+    @cli.on("space.event")
+    async def _on_space(data):
+        events_received.append(data)
+
+    try:
+        await cli.connect(BASE, socketio_path="/api/socket.io",
+                          auth={"token": owner_tok}, transports=["websocket"])
+    except Exception as e:
+        return f"connect failed: {e}"
+
+    await asyncio.sleep(1.0)
+
+    cleanup_open_shopping(owner_tok, space_id, [created_items["P10_item4_exp3"]["name"],
+                                                created_items["P10_item6_expired"]["name"]])
+    rr = requests.post(f"{API}/inventory/alerts/to-shopping", headers=H(owner_tok),
+                       json={"space_id": space_id,
+                             "item_ids": [created_items["P10_item4_exp3"]["item_id"],
+                                          created_items["P10_item6_expired"]["item_id"]]})
+    if rr.status_code != 200 or rr.json().get("created") != 2:
+        await cli.disconnect()
+        return f"to-shopping failed during socket test: {rr.status_code} {rr.text}"
+
+    await asyncio.sleep(2.5)
+    await cli.disconnect()
+    return None
+
+err = asyncio.run(run_socket_test())
+if err:
+    _record(False, "E1: socket received space.event for to-shopping", err)
+else:
+    matching_evts = [e for e in events_received
+                     if e.get("kind") == "shopping"
+                     and e.get("action") == "created"
+                     and (e.get("payload") or {}).get("from_alert") is True
+                     and e.get("space_id") == space_id]
+    ok = len(matching_evts) >= 2
+    _record(ok, "E1: received >=2 space.event shopping/created with from_alert=true",
+            f"count={len(matching_evts)} all_events={len(events_received)}")
+
+
+# ============================================================
+print("\n=== SUMMARY ===")
+print(f"PASS: {passes}")
+print(f"FAIL: {fails}")
+if failures:
+    print("\nFAILURES:")
+    for n, d in failures:
+        print(f"  - {n}\n      {d}")
+sys.exit(0 if fails == 0 else 1)

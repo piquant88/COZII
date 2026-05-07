@@ -621,6 +621,7 @@ export default function StaffHome() {
                 const t = tints[(c.tint as keyof typeof tints) || 'mint'] || tints.mint;
                 const items = invItems.filter((it: any) => it.category_id === c.category_id);
                 const open = openCat === c.category_id;
+                const canEdit = !!c.staff_can_edit && !!perms.edit_inventory && !isPreview;
                 return (
                   <View key={c.category_id} style={[styles.row, { flexDirection: 'column', alignItems: 'stretch', padding: 0 }]}>
                     <TouchableOpacity onPress={() => setOpenCat(open ? null : c.category_id)} activeOpacity={0.8} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, padding: spacing.md }} testID={`inv-cat-${c.category_id}`}>
@@ -629,8 +630,20 @@ export default function StaffHome() {
                       </View>
                       <View style={{ flex: 1 }}>
                         <Text style={styles.rowName}>{c.name}</Text>
-                        <Text style={styles.rowSub}>{items.length} items</Text>
+                        <Text style={styles.rowSub}>
+                          {items.length} items{canEdit ? ' · you can add/edit' : ''}
+                        </Text>
                       </View>
+                      {canEdit && (
+                        <TouchableOpacity
+                          onPress={(e) => { e.stopPropagation && e.stopPropagation(); router.push(`/category/${c.category_id}`); }}
+                          style={[styles.editPill, { backgroundColor: t.icon }]}
+                          testID={`inv-cat-edit-${c.category_id}`}
+                        >
+                          <Icon name="Edit3" size={12} color="#fff" />
+                          <Text style={styles.editPillTxt}>Open</Text>
+                        </TouchableOpacity>
+                      )}
                       <Icon name={open ? 'X' : 'ChevronRight'} size={16} color={colors.textMuted} />
                     </TouchableOpacity>
                     {open && (
@@ -775,6 +788,8 @@ const styles = StyleSheet.create({
   rowName: { fontSize: 14, fontWeight: '700', color: colors.textMain },
   rowSub: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
   rowAmt: { fontSize: 14, fontWeight: '800', color: colors.textMain },
+  editPill: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 4, borderRadius: radius.full },
+  editPillTxt: { color: '#fff', fontSize: 11, fontWeight: '800' },
   sectionTitle: { fontSize: 12, fontWeight: '800', color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 },
   emptyTxt: { fontSize: 13, color: colors.textMuted, fontStyle: 'italic', textAlign: 'center', padding: spacing.md },
   checkBox: { width: 28, height: 28, borderRadius: 8, borderWidth: 2, borderColor: colors.border, alignItems: 'center', justifyContent: 'center' },

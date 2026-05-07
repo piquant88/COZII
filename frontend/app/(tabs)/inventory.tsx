@@ -75,6 +75,17 @@ export default function Inventory() {
         .slice(0, 30)
     : [];
 
+  const lowAlertCount = items.filter((it) => it.status === 'low' || it.status === 'finished').length;
+  // Add expiry-based alerts approximation (within 7 days)
+  const today = new Date(); today.setHours(0,0,0,0);
+  const expiryAlertCount = items.filter((it: any) => {
+    if (!it.expiry_date) return false;
+    const d = new Date(it.expiry_date);
+    const diff = Math.round((d.getTime() - today.getTime()) / 86400000);
+    return diff <= 7; // expiring within a week or already past
+  }).length;
+  const alertCount = lowAlertCount + expiryAlertCount;
+
   const catName = (id: string) => categories.find((c) => c.category_id === id)?.name || 'Uncategorized';
   const catTint = (id: string) => categories.find((c) => c.category_id === id)?.tint || 'mint';
   const catIcon = (id: string) => categories.find((c) => c.category_id === id)?.icon || 'Box';
@@ -88,6 +99,18 @@ export default function Inventory() {
       >
         <View style={styles.headerRow}>
           <Text style={styles.title}>Inventory</Text>
+          <TouchableOpacity
+            style={[styles.iconHeaderBtn, alertCount > 0 && { backgroundColor: tints.peach.bg }]}
+            onPress={() => router.push('/shopping-list')}
+            testID="inventory-shopping-list"
+          >
+            <Icon name="ShoppingBag" color={alertCount > 0 ? tints.peach.icon : colors.textMain} size={18} />
+            {alertCount > 0 && (
+              <View style={styles.alertDot}>
+                <Text style={styles.alertDotTxt}>{alertCount > 99 ? '99+' : alertCount}</Text>
+              </View>
+            )}
+          </TouchableOpacity>
           <TouchableOpacity
             style={styles.addBtn}
             onPress={() => router.push('/category/new')}
@@ -220,6 +243,21 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
     ...shadows.button,
   },
+  iconHeaderBtn: {
+    width: 44, height: 44, borderRadius: 22,
+    backgroundColor: colors.surface,
+    alignItems: 'center', justifyContent: 'center',
+    marginRight: 8,
+    ...shadows.card,
+    position: 'relative',
+  },
+  alertDot: {
+    position: 'absolute', top: -2, right: -2,
+    minWidth: 18, height: 18, borderRadius: 9,
+    backgroundColor: '#E74C3C', alignItems: 'center', justifyContent: 'center',
+    paddingHorizontal: 4,
+  },
+  alertDotTxt: { color: '#fff', fontSize: 10, fontWeight: '900' },
   searchBox: {
     flexDirection: 'row', alignItems: 'center', gap: 10,
     backgroundColor: colors.surface,

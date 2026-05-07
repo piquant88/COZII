@@ -3342,7 +3342,11 @@ async def list_shopping(space_id: str, status: Optional[str] = None, user: User 
 async def create_shopping(body: CreateShoppingRequest, user: User = Depends(get_current_user)):
     space = await assert_space_member(body.space_id, user.user_id)
     is_reimbursement = body.kind == "reimbursement"
-    initial_status = "approved" if is_reimbursement else "pending"  # reimbursements come pre-approved (already spent), waiting for owner to confirm payback
+    # Both regular requests AND reimbursements start as "pending":
+    #   - request: pending = awaiting owner approval to buy
+    #   - reimbursement: pending = awaiting owner pay-back (item already bought by staff)
+    # The `kind` field disambiguates the meaning of "pending" in the UI.
+    initial_status = "pending"
     doc = {
         "request_id": gen_id("shop"),
         "space_id": body.space_id,
@@ -4037,6 +4041,166 @@ async def space_stats(space_id: str, user: User = Depends(get_current_user)):
 @api_router.get("/")
 async def root():
     return {"message": "Cozii API running"}
+
+
+# =========================
+# Inventory Alerts: low stock, finished, expiring, expired
+# Plus 1-tap "Add to shopping list" bulk converter.
+# =========================
+def _parse_iso_date(s: Optional[str]) -> Optional[datetime]:
+    if not s:
+        return None
+    if isinstance(s, datetime):
+        return s if s.tzinfo else s.replace(tzinfo=timezone.utc)
+    try:
+        # Accept yyyy-mm-dd or full ISO
+        if len(s) == 10:
+            return datetime.fromisoformat(s).replace(tzinfo=timezone.utc)
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        try:
+            return datetime.strptime(s[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except Exception:
+            return None
+
+
+@api_router.get("/inventory/alerts")
+async def inventory_alerts(space_id: str, days_threshold: int = 7, user: User = Depends(get_current_user)):
+    """Return inventory items grouped by alert kind:
+       - low_stock (status=='low')
+       - finished (status=='finished')
+       - expired (expiry_date < today)
+       - expiring (today <= expiry_date <= today + days_threshold)
+    """
+    await assert_space_member(space_id, user.user_id)
+    items = await db.items.find({"space_id": space_id}, {"_id": 0}).to_list(5000)
+    cats = await db.categories.find({"space_id": space_id}, {"_id": 0, "category_id": 1, "name": 1, "icon": 1, "tint": 1, "staff_can_edit": 1}).to_list(500)
+    cat_map = {c["category_id"]: c for c in cats}
+
+    today = now_utc().replace(hour=0, minute=0, second=0, microsecond=0)
+    threshold = today + timedelta(days=max(0, days_threshold))
+    low: List[Dict[str, Any]] = []
+    finished: List[Dict[str, Any]] = []
+    expiring: List[Dict[str, Any]] = []
+    expired: List[Dict[str, Any]] = []
+
+    for it in items:
+        cat_meta = cat_map.get(it.get("category_id")) or {}
+        enriched = {
+            **it,
+            "category_name": cat_meta.get("name"),
+            "category_icon": cat_meta.get("icon"),
+            "category_tint": cat_meta.get("tint"),
+        }
+        # Status-based alerts
+        st = (it.get("status") or "available").lower()
+        if st == "low":
+            low.append(enriched)
+        elif st == "finished":
+            finished.append(enriched)
+        # Expiry-based alerts
+        exp = _parse_iso_date(it.get("expiry_date"))
+        if exp:
+            if exp < today:
+                expired.append(enriched)
+            elif exp <= threshold:
+                expiring.append(enriched)
+
+    # Sort each list: most-urgent / oldest expiry first
+    low.sort(key=lambda x: x.get("name", ""))
+    finished.sort(key=lambda x: x.get("name", ""))
+    expiring.sort(key=lambda x: _parse_iso_date(x.get("expiry_date")) or threshold)
+    expired.sort(key=lambda x: _parse_iso_date(x.get("expiry_date")) or today)
+
+    return {
+        "space_id": space_id,
+        "as_of": today.isoformat(),
+        "days_threshold": days_threshold,
+        "totals": {
+            "low": len(low),
+            "finished": len(finished),
+            "expiring": len(expiring),
+            "expired": len(expired),
+            "all": len(low) + len(finished) + len(expiring) + len(expired),
+        },
+        "low_stock": low,
+        "finished": finished,
+        "expiring": expiring,
+        "expired": expired,
+    }
+
+
+class AlertsToShoppingRequest(BaseModel):
+    space_id: str
+    item_ids: List[str] = []
+    urgency: str = "normal"  # low | normal | high
+    note: Optional[str] = None
+
+
+@api_router.post("/inventory/alerts/to-shopping")
+async def alerts_to_shopping(body: AlertsToShoppingRequest, user: User = Depends(get_current_user)):
+    """Convert one or more inventory items into ShoppingRequest entries (status=pending).
+    Skips items that already have an open shopping request (pending or approved) for the same name in this space.
+    """
+    space = await assert_space_member(body.space_id, user.user_id)
+    if not body.item_ids:
+        raise HTTPException(400, "Pick at least one item.")
+    items = await db.items.find({"space_id": body.space_id, "item_id": {"$in": body.item_ids}}, {"_id": 0}).to_list(500)
+    if not items:
+        return {"created": 0, "skipped": 0, "request_ids": []}
+    currency = (space.get("currency") if isinstance(space, dict) else None) or "USD"
+
+    created_ids: List[str] = []
+    skipped = 0
+    for it in items:
+        name = (it.get("name") or "").strip()
+        if not name:
+            continue
+        # Dedupe: skip if already an open shopping request with the same name
+        existing = await db.shopping_requests.find_one({
+            "space_id": body.space_id,
+            "item_name": name,
+            "status": {"$in": ["pending", "approved"]},
+        })
+        if existing:
+            skipped += 1
+            continue
+        urgency = body.urgency if body.urgency in ("low", "normal", "high") else "normal"
+        # Auto-bump urgency for finished/expired
+        st = (it.get("status") or "").lower()
+        exp = _parse_iso_date(it.get("expiry_date"))
+        today = now_utc()
+        if st == "finished" or (exp and exp < today):
+            urgency = "high"
+        doc = {
+            "request_id": gen_id("shop"),
+            "space_id": body.space_id,
+            "item_name": name,
+            "quantity": it.get("quantity"),
+            "note": body.note or f"Auto from {st or 'inventory'} alert",
+            "category_id": it.get("category_id"),
+            "urgency": urgency,
+            "status": "pending",
+            "kind": "request",
+            "estimated_price": it.get("price"),
+            "actual_price": None,
+            "currency": currency,
+            "photo_base64": None,
+            "requested_by": user.user_id,
+            "requested_by_staff_id": None,
+            "approved_by": None,
+            "approved_at": None,
+            "rejected_reason": None,
+            "purchased_by": None,
+            "purchased_at": None,
+            "fulfilled_at": None,
+            "created_at": now_utc(),
+        }
+        await db.shopping_requests.insert_one(doc)
+        created_ids.append(doc["request_id"])
+        await emit_space_event(body.space_id, "shopping", "created", {"request_id": doc["request_id"], "from_alert": True})
+
+    return {"created": len(created_ids), "skipped": skipped, "request_ids": created_ids}
 
 
 # =========================

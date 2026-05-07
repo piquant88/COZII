@@ -3146,3 +3146,159 @@ agent_communication:
       No frontend testing performed (per protocol). The fix is one ~10-line
       reorder; once applied, please retest by re-running
       /app/backend_test_phase9.py — should hit 65/65.
+
+
+## 2026-XX-XX — Phase 10: Inventory alerts + shopping list mode + reimbursement fix
+
+backend:
+  - task: "Reimbursement starts pending (POST /api/household/shopping kind=reimbursement)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          Verified via /app/backend_test.py (5/5 PASS for section A):
+            ✅ POST /api/household/shopping {kind:"reimbursement", actual_price:12.50,
+               item_name, category_id, urgency:"normal"} → 200 with status="pending"
+               and kind="reimbursement" (was "approved" pre-fix).
+            ✅ Same call preserves actual_price=12.50.
+            ✅ POST {kind:"request"} → 200 with status="pending", kind="request".
+            ✅ PATCH /api/household/shopping/{id} {status:"approved"} → 200, status flips
+               to "approved", approved_by=current user.
+            ✅ POST /api/household/shopping/{id}/purchase {actual_price:12.50} → 200,
+               status="purchased", purchased_at + fulfilled_at populated.
+          Reimbursement flow now correctly mirrors request flow (both start pending).
+
+  - task: "GET /api/inventory/alerts (categorized inventory alerts)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          /app/backend_test.py — 10/10 PASS for section B against the preview URL.
+          Setup: in the existing household space (space_8784d76aee6d4c56), created a
+          fresh category and 6 items:
+            item1 status=available no expiry        → no alert
+            item2 status=low                        → low_stock
+            item3 status=finished                   → finished
+            item4 status=available expiry=today+3d  → expiring (at threshold=7)
+            item5 status=available expiry=today+30d → no alert at 7d, expiring at 60d
+            item6 status=available expiry=today-2d  → expired
+
+          Assertions:
+            ✅ GET /api/inventory/alerts?space_id=&days_threshold=7 → 200
+            ✅ low_stock contains item2 only (and not item3)
+            ✅ finished contains item3
+            ✅ expiring at threshold=7 contains item4 (3d) and excludes item5 (30d)
+            ✅ expired contains item6
+            ✅ totals.{low,finished,expiring,expired,all} math matches bucket lengths;
+               'all' == sum of the 4 bucket counts
+            ✅ Each alerted item enriched with category_name (non-null)
+            ✅ Each alerted item also includes category_icon and category_tint keys
+            ✅ days_threshold=60 → item5 (30d) now appears in expiring
+            ✅ Expiring count strictly grows when threshold raised 7→60 (>= +1)
+          NOTE: totals exact-equality with {low:1, finished:1, expiring:1, expired:1,
+          all:4} was not asserted because the household space contains pre-existing
+          items contributing to the same buckets; we instead asserted (a) all 6 of our
+          test items land in the correct bucket and (b) totals match the lengths of
+          the returned buckets (math integrity).
+
+  - task: "POST /api/inventory/alerts/to-shopping (convert alerts to shopping requests)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          /app/backend_test.py — 12/12 PASS for section C.
+            ✅ POST /to-shopping with [item2(low), item3(finished), item4(exp+3)] →
+               {created:3, skipped:0, request_ids:[3 ids]}.
+            ✅ GET /api/household/shopping?space_id=… returns those 3 entries with
+               status="pending" and kind="request".
+            ✅ The request created from item3 (finished) has urgency="high"
+               (auto-bumped).
+            ✅ The request created from item4 (expiring but not yet expired) is NOT
+               auto-bumped (urgency="normal").
+            ✅ The request created from item2 (low_stock) is NOT auto-bumped
+               (urgency="normal").
+            ✅ POST /to-shopping with [item6(expired)] → created=1; the resulting
+               shopping request has urgency="high" (auto-bumped because expiry < today).
+            ✅ POST /to-shopping again with [item2] (already has open pending) →
+               {created:0, skipped:1}.
+            ✅ POST /to-shopping with item_ids=[] → 400 "Pick at least one item.".
+            ✅ POST /to-shopping with only non-existent ids → 200, {created:0, skipped:0}.
+            ✅ POST /to-shopping with [non-existent, item5] → 200, {created:1} (only
+               valid IDs are processed; missing IDs are silently dropped).
+
+  - task: "Phase 10 access control + Socket.IO from_alert emit"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          /app/backend_test.py — 3/3 PASS for sections D + E.
+            ✅ Outsider (3rd user, registered via /api/auth/register, NOT a member of
+               the space) GET /api/inventory/alerts?space_id=… → 403.
+            ✅ Outsider POST /api/inventory/alerts/to-shopping {space_id, item_ids:[…]} →
+               403.
+            ✅ Realtime: connected an authenticated python-socketio AsyncClient as the
+               owner to /api/socket.io with auth.token=<owner token>. POST /to-shopping
+               with 2 valid item_ids produced exactly the expected 2 broadcast frames:
+                 event="space.event"
+                 payload.space_id == this space
+                 payload.kind == "shopping"
+                 payload.action == "created"
+                 payload.payload.from_alert == true
+                 payload.payload.request_id is the newly-created shopping request id
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Phase 10 backend testing complete via /app/backend_test.py — 30/30 PASS.
+
+      ✅ A. Reimbursement bug fix verified — POST /api/household/shopping with
+         kind="reimbursement" now returns status="pending" (not "approved").
+         The PATCH … {status:"approved"} → POST …/purchase chain correctly
+         transitions through pending → approved → purchased.
+
+      ✅ B. GET /api/inventory/alerts works with all 4 buckets (low_stock,
+         finished, expiring, expired). days_threshold correctly bounds the
+         expiring bucket — items 30d out are excluded at 7d and included at
+         60d. Each alerted item is enriched with category_name + category_icon
+         + category_tint. totals math is consistent with bucket lengths.
+
+      ✅ C. POST /api/inventory/alerts/to-shopping creates pending kind="request"
+         shopping entries; auto-bumps urgency to "high" when source item is
+         finished or expired (NOT for low or near-expiry); dedupes by item_name
+         against open (pending|approved) requests; returns 400 on empty
+         item_ids; silently drops non-existent ids.
+
+      ✅ D. Outsiders (non-members of the space) get 403 on both
+         /inventory/alerts and /inventory/alerts/to-shopping.
+
+      ✅ E. Realtime: each /to-shopping creation emits a `space.event`
+         {kind:"shopping", action:"created", payload.from_alert:true} to the
+         space room; verified by an authenticated socketio client receiving
+         exactly 2 such frames after a 2-item POST.
+
+      No bugs surfaced. Phase 10 surface is production-ready. No frontend
+      testing performed (per protocol).

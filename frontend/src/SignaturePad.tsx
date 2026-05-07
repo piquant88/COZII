@@ -11,6 +11,8 @@ type Props = {
   strokeColor?: string;
   strokeWidth?: number;
   onChange?: (svgDataUrl: string | null) => void;
+  onDrawStart?: () => void;
+  onDrawEnd?: () => void;
   testID?: string;
 };
 
@@ -18,7 +20,7 @@ type Props = {
  * Lightweight in-house signature pad using react-native-svg + PanResponder.
  * Produces an SVG data URL the size of the drawing surface.
  */
-export function SignaturePad({ height = 220, strokeColor = '#1F1F1F', strokeWidth = 2.4, onChange, testID }: Props) {
+export function SignaturePad({ height = 220, strokeColor = '#1F1F1F', strokeWidth = 2.4, onChange, onDrawStart, onDrawEnd, testID }: Props) {
   const [strokes, setStrokes] = useState<Stroke[]>([]);
   const currentRef = useRef<string>('');
   const [, forceTick] = useState(0);
@@ -82,14 +84,15 @@ export function SignaturePad({ height = 220, strokeColor = '#1F1F1F', strokeWidt
       onShouldBlockNativeResponder: () => true,
       onPanResponderGrant: (evt: GestureResponderEvent) => {
         const { locationX, locationY } = evt.nativeEvent;
+        try { onDrawStart && onDrawStart(); } catch {}
         startStroke(locationX, locationY);
       },
       onPanResponderMove: (evt: GestureResponderEvent, _g: PanResponderGestureState) => {
         const { locationX, locationY } = evt.nativeEvent;
         continueStroke(locationX, locationY);
       },
-      onPanResponderRelease: () => endStroke(),
-      onPanResponderTerminate: () => endStroke(),
+      onPanResponderRelease: () => { endStroke(); try { onDrawEnd && onDrawEnd(); } catch {} },
+      onPanResponderTerminate: () => { endStroke(); try { onDrawEnd && onDrawEnd(); } catch {} },
     })
   ).current;
 
