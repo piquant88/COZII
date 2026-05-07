@@ -176,6 +176,16 @@ export default function Profile() {
 
         <TouchableOpacity
           style={[styles.card, styles.rowBtn]}
+          onPress={() => router.push('/notifications')}
+          testID="profile-notifications"
+        >
+          <Icon name="Bell" size={20} color={colors.textMain} />
+          <Text style={styles.rowBtnTxt}>Notifications</Text>
+          <Icon name="ChevronRight" size={18} color={colors.textMuted} />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.card, styles.rowBtn]}
           onPress={() => router.push('/documents')}
           testID="profile-documents"
         >

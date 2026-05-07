@@ -44,8 +44,18 @@
           "backgroundColor": "#000"
         }
       ],
-      "expo-web-browser"
+      "expo-web-browser",
+      [
+        "expo-notifications",
+        {
+          "color": "#FF8C73",
+          "defaultChannel": "default"
+        }
+      ]
     ],
+    "notification": {
+      "iosDisplayInForeground": true
+    },
     "experiments": {
       "typedRoutes": true
     }

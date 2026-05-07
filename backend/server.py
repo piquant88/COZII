@@ -152,6 +152,116 @@ async def emit_user_event(user_id: str, kind: str, action: str, payload: Optiona
         logger.warning(f"emit_user_event failed: {e}")
 
 
+# =========================
+# Expo Push Notification helpers
+# =========================
+EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
+
+# Default user notification preferences. Daily digest is the only "scheduled"
+# kind; everything else (assignments, contracts, payroll, ...) is treated as
+# an important alert.
+DEFAULT_NOTIFICATION_PREFS: Dict[str, bool] = {
+    "daily_digest": True,
+    "important_alerts": True,
+}
+
+
+def _classify_notification_kind(kind: str) -> str:
+    """Return either 'daily_digest' or 'important_alerts'."""
+    if (kind or "").lower() == "daily_digest":
+        return "daily_digest"
+    return "important_alerts"
+
+
+async def _get_user_notification_prefs(user_id: str) -> Dict[str, bool]:
+    try:
+        u = await db.users.find_one({"user_id": user_id}, {"_id": 0, "notification_prefs": 1})
+        prefs = (u or {}).get("notification_prefs") or {}
+        return {**DEFAULT_NOTIFICATION_PREFS, **prefs}
+    except Exception:
+        return dict(DEFAULT_NOTIFICATION_PREFS)
+
+
+async def _get_user_push_tokens(user_id: str) -> List[str]:
+    try:
+        cur = db.push_tokens.find({"user_id": user_id, "active": True}, {"_id": 0, "token": 1})
+        return [d["token"] async for d in cur if d.get("token")]
+    except Exception as e:
+        logger.warning(f"_get_user_push_tokens failed: {e}")
+        return []
+
+
+async def send_expo_push(
+    user_id: str,
+    title: str,
+    body: str,
+    data: Optional[Dict[str, Any]] = None,
+    kind: str = "important_alerts",
+) -> bool:
+    """Send a push notification via the Expo Push Service.
+    Respects user preferences. Silently no-ops when there are no tokens or
+    when the relevant preference is disabled. Returns True if at least one
+    request was dispatched.
+    """
+    try:
+        category = _classify_notification_kind(kind)
+        prefs = await _get_user_notification_prefs(user_id)
+        if not prefs.get(category, True):
+            return False
+        tokens = await _get_user_push_tokens(user_id)
+        if not tokens:
+            return False
+        payload_data = {**(data or {}), "kind": kind, "category": category}
+        messages = [
+            {
+                "to": t,
+                "title": title or "Cozii",
+                "body": body or "",
+                "sound": "default",
+                "priority": "high",
+                "channelId": "default",
+                "data": payload_data,
+            }
+            for t in tokens
+        ]
+        async with httpx.AsyncClient(timeout=15) as client:
+            # Expo accepts batches of up to 100; we usually have few tokens per user.
+            for i in range(0, len(messages), 100):
+                batch = messages[i:i + 100]
+                try:
+                    resp = await client.post(
+                        EXPO_PUSH_URL,
+                        json=batch,
+                        headers={
+                            "Content-Type": "application/json",
+                            "Accept": "application/json",
+                            "Accept-Encoding": "gzip, deflate",
+                        },
+                    )
+                    if resp.status_code >= 400:
+                        logger.warning(f"expo push http {resp.status_code}: {resp.text[:200]}")
+                        continue
+                    out = resp.json() or {}
+                    receipts = out.get("data") or []
+                    # Deactivate tokens that are reported as not registered
+                    for tok, rcpt in zip([m["to"] for m in batch], receipts):
+                        if isinstance(rcpt, dict) and rcpt.get("status") == "error":
+                            err = (rcpt.get("details") or {}).get("error") or rcpt.get("message") or ""
+                            if "DeviceNotRegistered" in str(err) or "InvalidCredentials" in str(err):
+                                try:
+                                    await db.push_tokens.update_many(
+                                        {"token": tok}, {"$set": {"active": False, "deactivated_at": now_utc()}}
+                                    )
+                                except Exception:
+                                    pass
+                except Exception as e:
+                    logger.warning(f"expo push send failed: {e}")
+        return True
+    except Exception as e:
+        logger.warning(f"send_expo_push outer failure: {e}")
+        return False
+
+
 async def notify_user(user_id: str, space_id: str, kind: str, title: str, body: str = "", data: Optional[Dict[str, Any]] = None) -> str:
     """Centralised helper: insert a notification AND broadcast it via socket.io.
     Returns the new notification_id."""
@@ -176,6 +286,12 @@ async def notify_user(user_id: str, space_id: str, kind: str, title: str, body: 
         await emit_user_event(user_id, "notification", "created", {"notification_id": nid, "kind": kind, "title": title, "data": data or {}, "space_id": space_id})
     except Exception as e:
         logger.warning(f"notify_user emit failed: {e}")
+    # Fire-and-forget native push (does not block, swallows its own errors)
+    try:
+        push_data = {**(data or {}), "notification_id": nid, "space_id": space_id}
+        asyncio.create_task(send_expo_push(user_id, title, body, push_data, kind))
+    except Exception as e:
+        logger.warning(f"notify_user push schedule failed: {e}")
     return nid
 
 
@@ -4844,6 +4960,87 @@ async def update_digest_prefs(space_id: str, body: DigestPrefRequest, user: User
         "daily_digest_enabled": out.get("daily_digest_enabled", True),
         "daily_digest_utc_hour": out.get("daily_digest_utc_hour", 1),
     }
+
+
+# =========================
+# Push tokens & notification preferences
+# =========================
+class RegisterPushTokenRequest(BaseModel):
+    token: str
+    platform: Optional[str] = None  # "ios" | "android" | "web"
+    device_name: Optional[str] = None
+
+
+class NotificationPrefsRequest(BaseModel):
+    daily_digest: Optional[bool] = None
+    important_alerts: Optional[bool] = None
+
+
+@api_router.post("/users/push-token")
+async def register_push_token(body: RegisterPushTokenRequest, user: User = Depends(get_current_user)):
+    if not body.token or not isinstance(body.token, str):
+        raise HTTPException(400, "Invalid token")
+    now = now_utc()
+    doc = {
+        "token": body.token,
+        "user_id": user.user_id,
+        "platform": (body.platform or "").lower() or None,
+        "device_name": body.device_name or None,
+        "active": True,
+        "updated_at": now,
+    }
+    # Upsert by (token) — a token belongs to exactly one user/device.
+    await db.push_tokens.update_one(
+        {"token": body.token},
+        {"$set": doc, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
+    return {"ok": True}
+
+
+@api_router.delete("/users/push-token")
+async def deregister_push_token(token: str, user: User = Depends(get_current_user)):
+    if not token:
+        raise HTTPException(400, "Missing token")
+    res = await db.push_tokens.update_one(
+        {"token": token, "user_id": user.user_id},
+        {"$set": {"active": False, "deactivated_at": now_utc()}},
+    )
+    return {"ok": True, "matched": res.matched_count}
+
+
+@api_router.get("/users/notification-prefs")
+async def get_notification_prefs(user: User = Depends(get_current_user)):
+    prefs = await _get_user_notification_prefs(user.user_id)
+    return prefs
+
+
+@api_router.put("/users/notification-prefs")
+async def update_notification_prefs(body: NotificationPrefsRequest, user: User = Depends(get_current_user)):
+    current = await _get_user_notification_prefs(user.user_id)
+    next_prefs = dict(current)
+    if body.daily_digest is not None:
+        next_prefs["daily_digest"] = bool(body.daily_digest)
+    if body.important_alerts is not None:
+        next_prefs["important_alerts"] = bool(body.important_alerts)
+    await db.users.update_one(
+        {"user_id": user.user_id},
+        {"$set": {"notification_prefs": next_prefs, "notification_prefs_updated_at": now_utc()}},
+    )
+    return next_prefs
+
+
+@api_router.post("/users/push-test")
+async def push_test(user: User = Depends(get_current_user)):
+    """Manual smoke-test endpoint: sends a notification to the calling user."""
+    sent = await send_expo_push(
+        user_id=user.user_id,
+        title="Cozii test notification",
+        body="If you can read this on your phone, push is working.",
+        data={"screen": "/shopping-list"},
+        kind="important_alerts",
+    )
+    return {"sent": sent}
 
 
 # =========================

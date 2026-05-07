@@ -3506,3 +3506,228 @@ agent_communication:
       Phase 11 task updated to working=true, needs_retesting=false,
       stuck_count reset to 0. test_plan.current_focus cleared. No further
       backend work required for Phase 11.
+
+
+#============== Phase 12 — Native Push Notifications + Preferences ==============
+backend:
+  - task: "Phase 12 — Push Token & Notification Preferences endpoints"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          Phase 12 backend testing complete via /app/backend_test_phase12.py
+          (26/26 PASS) against http://localhost:8001.
+
+          ✅ POST /api/users/push-token
+             - {token,platform,device_name} → 200 {ok:true}
+             - Repeat POST upserts cleanly (no duplicates, ok:true).
+             - Without Authorization header → 401.
+          ✅ DELETE /api/users/push-token?token=...
+             - On a previously-registered token → 200 {ok:true, matched:1}.
+             - Idempotent: calling again still returns 200 {ok:true} (matched
+               may be 1 because the doc still exists, just inactive — matches
+               the spec's "matched_count may be 0 if already gone"; spec says
+               this either-or is acceptable).
+             - Unknown token → 200 {ok:true, matched:0} (no error).
+             - Without Authorization → 401.
+          ✅ GET /api/users/notification-prefs
+             - Defaults → {daily_digest:true, important_alerts:true} for the
+               brand-new user before any PUT.
+             - Without Authorization → 401.
+          ✅ PUT /api/users/notification-prefs
+             - {daily_digest:false} only → server returns
+               {daily_digest:false, important_alerts:true} (other field
+               unchanged); confirmed persists across a follow-up GET.
+             - Empty body {} → returns prior merged prefs unchanged.
+             - {important_alerts:false} only → other field still false (prior
+               value), important flips false.
+             - Restoring both to true works.
+             - Without Authorization → 401.
+          ✅ POST /api/users/push-test
+             - With NO active tokens → 200 {sent:false}; never 500.
+             - With one fake ExponentPushToken[FAKE-…] registered → 200
+               {sent:true} (Expo accepted the request body — receipt errors
+               for the bogus token are handled gracefully and Expo HTTP 200
+               was logged in /var/log/supervisor/backend.err.log).
+             - Without Authorization → 401.
+
+          REGRESSION ✅ — POST /api/contracts (the route that calls notify_user):
+             - The review request mentioned POST /api/household/tasks/assign
+               but that route does NOT exist in server.py. The other suggested
+               trigger — POST /api/contracts — was used instead. Note: most
+               other "task assignment" notifications in this codebase route
+               through `_create_notification` (no push), but contracts use
+               `notify_user` (which now also fires send_expo_push).
+             - Created a helper account, joined the household via Siti Pertiwi's
+               staff invite code so the staff record now has user_id linked,
+               then owner POST /api/contracts assigned to that staff.
+               • Returned 200 promptly (elapsed=0.00s, well under 5s — push is
+                 properly fire-and-forget via asyncio.create_task).
+               • Helper user's GET /api/notifications?space_id=... immediately
+                 shows the new contract_assigned row with the correct
+                 data.contract_id.
+             - Confirms in-app notification path is unaffected by the new push
+               schedule.
+
+          REGRESSION ✅ — POST /api/inventory/alerts/digest/send:
+             - Returned 200 {sent:true, message:"Digest notification sent"}
+               (alerts existed in the seeded household).
+             - Owner's /api/notifications now contains daily_digest entries
+               (count=2 across this run + a prior digest from earlier today —
+               which is normal because manual digest does not gate on
+               last_digest_date).
+             - No 500 from the route.
+
+          Notes:
+            - send_expo_push respects user prefs (when daily_digest=false the
+              category is filtered before any HTTP call), but during these
+              tests prefs were left at defaults except for the explicit
+              partial-update assertions.
+            - send_expo_push deactivates DeviceNotRegistered tokens but never
+              raises; the in-app notification (DB row + socket emit) always
+              fires regardless.
+
+          No bugs surfaced. Phase 12 backend is production-ready.
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Added new endpoints (server.py, near bottom right before app.include_router):
+            - POST   /api/users/push-token         {token, platform?, device_name?}
+              Upserts into a new `push_tokens` collection keyed on `token`. Sets active=true.
+              Bound to the calling user via Bearer token.
+            - DELETE /api/users/push-token?token=...
+              Marks the matching push_tokens row inactive (idempotent).
+            - GET    /api/users/notification-prefs
+              Returns merged `{daily_digest, important_alerts}` (defaults to true/true).
+              Reads `users.notification_prefs`.
+            - PUT    /api/users/notification-prefs {daily_digest?, important_alerts?}
+              Partial-update of the user's prefs document.
+            - POST   /api/users/push-test
+              Owner-only smoke test that sends a push to the calling user.
+              Returns {sent: bool}.
+
+          Also extended `notify_user(...)` to fire-and-forget call `send_expo_push(...)`,
+          which:
+            • Reads user prefs and skips push if the relevant category is disabled.
+              `kind == "daily_digest"` → checks `daily_digest`.
+              everything else → checks `important_alerts`.
+            • Reads active tokens from `push_tokens` for that user.
+            • POSTs batches of up to 100 to https://exp.host/--/api/v2/push/send.
+            • Auto-deactivates tokens reported as `DeviceNotRegistered` /
+              `InvalidCredentials` in the receipt.
+
+          The daily digest data already includes `screen: "/shopping-list"` for
+          deep linking — no change needed in `_send_digest_for_space`.
+
+          NOTE: send_expo_push only logs warnings on outgoing HTTP failures; it
+          never raises. The in-app notification (DB row + socket emit) still
+          fires regardless. We expect testing without a real Expo token to show
+          "no tokens" → sent=false, which is correct.
+
+          Test coverage requested:
+            ✓ POST /api/users/push-token with a fake token registers it (active=true).
+            ✓ Repeat POST upserts (no duplicates).
+            ✓ DELETE /api/users/push-token?token=... deactivates.
+            ✓ GET /api/users/notification-prefs returns defaults
+              {daily_digest:true, important_alerts:true} for a brand-new user.
+            ✓ PUT /api/users/notification-prefs {daily_digest:false} → true,false
+              and persists across GETs.
+            ✓ PUT with partial body only modifies provided fields.
+            ✓ Auth: all 4 endpoints require Bearer auth (401 without).
+            ✓ POST /api/users/push-test returns {sent: false} when user has no
+              tokens registered (or after deletion); should not 500.
+
+frontend:
+  - task: "Phase 12 — Push registration, deep-link handling, prefs UI"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/notifications.tsx, /app/frontend/app/_layout.tsx, /app/frontend/src/pushNotifications.ts, /app/frontend/src/AuthContext.tsx, /app/frontend/app/(tabs)/profile.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          • Installed expo-notifications + expo-device.
+          • Added expo-notifications plugin to app.json.
+          • New module src/pushNotifications.ts:
+              - installNotificationHandler() (foreground banner+sound).
+              - registerForPushAsync() requests permission, gets ExpoPushToken
+                with projectId fallback chain, POSTs to /api/users/push-token,
+                caches the token in AsyncStorage to avoid repeat POSTs.
+              - unregisterPushAsync() called on logout.
+              - routeFromNotificationData(data) extracts `route|screen|url` for
+                deep linking.
+          • _layout.tsx: installs handler at module load, registers a
+            <NotificationDeepLinker> wrapper that:
+              - addNotificationResponseReceivedListener → router.push(route)
+              - getLastNotificationResponseAsync on cold start → router.push(route)
+                after the auth/route are ready.
+          • AuthContext.tsx: registers tokens on login, unregisters on logout.
+          • New screen app/notifications.tsx with two toggles:
+              - Important alerts (assignments, payroll, contracts, low-stock, ...)
+              - Daily morning digest (with deep-link to /shopping-list)
+            And a "Send a test notification" button calling /api/users/push-test.
+          • Profile screen has a new "Notifications" row that opens this screen.
+
+          Web is a no-op (handler still installs cleanly, registration short-circuits).
+          User will manually test on phone via Expo Go QR.
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Phase 12 implementation done. Backend has 5 new endpoints (push-token register/
+      delete, notification-prefs get/put, push-test). notify_user now also fires
+      Expo push via httpx, gated by user prefs. Frontend wires Expo push tokens on
+      login, deep-links from notification taps to the route stored in `data.screen|
+      data.route|data.url`, and exposes a Notifications screen with two simple
+      toggles. Please backend-test only the new endpoints + that notify_user still
+      works end-to-end (in-app notification still arrives even when push fails).
+
+  - agent: "testing"
+    message: |
+      Phase 12 backend test complete (2026-05-07).
+      /app/backend_test_phase12.py — 26/26 PASS against http://localhost:8001.
+
+      ✅ POST /api/users/push-token register + upsert (no duplicates).
+      ✅ DELETE /api/users/push-token (existing, idempotent re-call, unknown
+         token all return 200; ok:true).
+      ✅ GET /api/users/notification-prefs returns merged defaults
+         {daily_digest:true, important_alerts:true} for a fresh user.
+      ✅ PUT /api/users/notification-prefs partial-update behaviour:
+         - {daily_digest:false} only flips daily_digest, important_alerts stays true.
+         - {} (empty body) keeps prior values.
+         - Subsequent {important_alerts:false} flips important_alerts, daily_digest
+           keeps prior false. All persist across GETs.
+      ✅ POST /api/users/push-test: with no active tokens → 200 {sent:false}; with
+         a fake ExponentPushToken[FAKE-...] registered → 200 {sent:true} (Expo
+         accepted the dispatch — bogus token is rejected via receipt error path
+         and silently swallowed). Never 500.
+      ✅ Auth gating: all 5 new endpoints return 401 without Bearer.
+
+      ✅ REGRESSION — POST /api/contracts (the route that calls notify_user):
+         Returned 200 in <0.01s (push is fire-and-forget via asyncio.create_task);
+         the assigned staff user's GET /api/notifications now contains the
+         contract_assigned row with the correct data.contract_id. In-app
+         notification flow is unaffected.
+
+         NB: review request mentioned POST /api/household/tasks/assign — that
+         route does not exist in server.py. POST /api/contracts is the right
+         regression trigger because it's the path that uses notify_user (most
+         "task assignment" code paths use _create_notification, which doesn't
+         schedule push).
+
+      ✅ REGRESSION — POST /api/inventory/alerts/digest/send returned 200
+         {sent:true, message:"Digest notification sent"} (no 500). Owner's
+         /notifications now includes daily_digest entries (kind=daily_digest,
+         data.screen=/shopping-list).
+
+      Updated test_result.md: Phase 12 backend task → working=true,
+      needs_retesting=false. No backend bugs surfaced.

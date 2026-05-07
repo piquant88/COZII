@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
 import { api, tokenStorage, activeSpaceStorage } from './api';
 import { realtime } from './realtime';
+import { registerForPushAsync, unregisterPushAsync } from './pushNotifications';
 import type { User, FamilySpace } from './types';
 
 export type SpaceRole = {
@@ -102,6 +103,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (user) {
       realtime.connect();
+      // Register for native push notifications. Fire-and-forget, no UI gating.
+      registerForPushAsync().catch((e) => console.warn('push register failed', e));
     } else {
       realtime.disconnect();
     }
@@ -137,6 +140,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const logout = async () => {
+    try { await unregisterPushAsync(); } catch {}
     try { await api.post('/auth/logout'); } catch {}
     await tokenStorage.clear();
     await activeSpaceStorage.clear();

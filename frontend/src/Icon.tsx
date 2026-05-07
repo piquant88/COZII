@@ -2,22 +2,22 @@ import React from 'react';
 import { Image, View, StyleSheet } from 'react-native';
 import {
   Refrigerator, Sparkles, Shirt, Bath, Wind, Wallet, Box, Home, PieChart,
-  User as UserIcon, Plus, Camera, Search, ChevronRight, ChevronDown, ChevronUp, ArrowLeft, X,
+  User as UserIcon, Plus, Camera, Search, ChevronRight, ChevronLeft, ChevronDown, ChevronUp, ArrowLeft, X,
   LogOut, Users, Copy, Check, Trash2, Edit3, MinusCircle, PlusCircle,
   Calendar, DollarSign, Package, Tag, Image as ImageIcon, CircleDot,
   ShoppingBag, Droplet, BookOpen, Apple, Pill, Heart, Star, Lock, Globe, ImagePlus,
   Receipt, ArrowRight, FileText, FilePlus, Clock, CreditCard, Zap, Wifi, Phone, Lightbulb,
-  Repeat, PenLine, Bell, Shield, Download, CheckCircle2, Pen, Eraser, Send,
+  Repeat, PenLine, Bell, Shield, Download, CheckCircle2, Pen, Eraser, Send, Sun,
 } from 'lucide-react-native';
 
 export const ICON_MAP: Record<string, any> = {
   Refrigerator, Sparkles, Shirt, Bath, Wind, Wallet, Box, Home, PieChart,
-  User: UserIcon, Plus, Camera, Search, ChevronRight, ChevronDown, ChevronUp, ArrowLeft, X,
+  User: UserIcon, Plus, Camera, Search, ChevronRight, ChevronLeft, ChevronDown, ChevronUp, ArrowLeft, X,
   LogOut, Users, Copy, Check, Trash2, Edit3, MinusCircle, PlusCircle,
   Calendar, DollarSign, Package, Tag, ImageIcon, CircleDot,
   ShoppingBag, Droplet, BookOpen, Apple, Pill, Heart, Star, Lock, Globe, ImagePlus,
   Receipt, ArrowRight, FileText, FilePlus, Clock, CreditCard, Zap, Wifi, Phone, Lightbulb,
-  Repeat, PenLine, Bell, Shield, Download, CheckCircle2, Pen, Eraser, Send,
+  Repeat, PenLine, Bell, Shield, Download, CheckCircle2, Pen, Eraser, Send, Sun,
 };
 
 export const CATEGORY_ICON_OPTIONS = [
