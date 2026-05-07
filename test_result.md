@@ -2955,12 +2955,75 @@ metadata:
   run_ui: false
 
 test_plan:
-  current_focus: []
+  current_focus:
+    - "Contracts + e-Sign flow (Phase 7)"
+    - "Per-category staff_can_edit toggle (Phase 8)"
+    - "Real-time Socket.io (Phase 9)"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
 
 agent_communication:
+  - agent: "testing"
+    message: |
+      Phase 7+8+9 frontend retest (2026-05-07) — INCONCLUSIVE / PARTIAL BLOCK
+      due to login-button selector flakiness on react-native-web Pressable.
+
+      What I attempted:
+        1) Navigated to https://family-wallet-21.preview.emergentagent.com (the
+           preview URL pointed to by EXPO_PUBLIC_BACKEND_URL — localhost:3000
+           still has the CORS/credentials wildcard issue from the previous run).
+        2) Tapped "Log in" link (footer "Already have an account? Log in") and
+           landed on /login page. Email input was prefilled with
+           "test@cozii.app" and password field accepted "test1234".
+        3) Tried to submit via:
+              - page.get_by_test_id("auth-submit-button").click()
+              - page.get_by_role("button", name="Log in").click()
+              - page.locator('button:has-text("Log in")').click()
+           ALL THREE timed out — the Log-in Pressable on /login is not exposing
+           a queryable role/testid that Playwright finds within 15s, even
+           though the orange "Log in" pill is clearly visible in the
+           screenshot. URL stayed at /login post-attempt.
+
+      Net result for review request:
+        ❌ A1–A9 (Contracts + e-Sign full flow) — NOT VERIFIED. Could not get
+           past the login page, so never reached the household tab let alone
+           /contracts. The seeded "Test Household" space + 4 staff
+           (Sari Putri 28D4A6, Andi Wibowo F04935, Siti Pertiwi, Pierre
+           Lambert) appear to exist per the prompt but I could not visually
+           confirm.
+        ❌ B2 (Permissions sheet edit_inventory toggle) — NOT VERIFIED for
+           the same reason.
+        ✅ B1 (per-category staff_can_edit toggle) — already verified PASS in
+           the prior 2026-05-06 run.
+        ✅ C1 (Socket.IO real-time sync) — already verified PASS in the prior
+           run (21 upgrade events captured against /api/socket.io).
+
+      Browser-automation budget is exhausted (3/3 invocations used) so I
+      cannot retry from this session. The login-button selector issue is the
+      ONE blocker for finishing A1–A9 + B2.
+
+      ACTION ITEMS for main agent:
+        1. Add a stable data-testid on the /login submit Pressable
+           (e.g. data-testid="auth-submit-button"). The auth screen's earlier
+           render path (the welcome screen with Continue with Google /
+           Create account / Log-in link) does not need a change — the
+           /login screen submit pill does. Once present, the test runner
+           script can submit reliably.
+        2. (Optional) Consider also exposing a testid on the inputs
+           (auth-email-input, auth-password-input) — they appear to have
+           none currently since fill via testid also failed in the first
+           attempt; we fell back to nth(0)/nth(1).
+        3. After the testid is added, request a fresh frontend testing run.
+           The full A1–A9 + B2 script is already drafted (see this run's
+           script log) and will execute end-to-end without changes once
+           the login submit selector resolves.
+
+      Console errors observed during the run were limited to two pre-login
+      401s (expected — unauthenticated bootstrap calls) and the benign
+      "shadow*" style-prop deprecation warnings. No red-screen errors, no
+      socket auth failures.
+
   - agent: "testing"
     message: |
       RETEST Phase 9 (2026-05-06): /app/backend_test_phase9.py — 65/65 PASS.
