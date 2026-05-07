@@ -9,6 +9,10 @@ import { useAuth } from '../src/AuthContext';
 import { api } from '../src/api';
 import { colors, radius, spacing, shadows, tints } from '../src/theme';
 import { Icon } from '../src/Icon';
+import * as DocumentPicker from 'expo-document-picker';
+// react-native-webview is bundled in Expo SDK; lazy-import to avoid web-side issues if any.
+let WebView: any = () => null;
+try { WebView = require('react-native-webview').WebView; } catch {}
 
 const FOLDERS = [
   { key: 'contracts', label: 'Contracts', icon: 'FileText', tint: 'sage' },
@@ -157,6 +161,23 @@ export default function DocumentsScreen() {
               <ScrollView contentContainerStyle={{ padding: spacing.md }}>
                 {(viewing.mime || '').startsWith('image/') && viewing.file_base64 ? (
                   <Image source={{ uri: viewing.file_base64 }} style={styles.viewerImg} resizeMode="contain" />
+                ) : ((viewing.mime || '').includes('pdf') || (viewing.file_base64 || '').startsWith('data:application/pdf')) && viewing.file_base64 ? (
+                  <View style={{ height: 520, borderRadius: radius.md, overflow: 'hidden', backgroundColor: '#000' }}>
+                    {Platform.OS === 'web' ? (
+                      // @ts-ignore - iframe is a valid web-only component
+                      <iframe
+                        src={viewing.file_base64}
+                        style={{ width: '100%', height: '100%', border: '0' }}
+                        title={viewing.name || 'PDF'}
+                      />
+                    ) : (
+                      <WebView
+                        originWhitelist={['*']}
+                        source={{ uri: viewing.file_base64 }}
+                        style={{ flex: 1 }}
+                      />
+                    )}
+                  </View>
                 ) : (
                   <View style={styles.viewerPdf}>
                     <Icon name="FileText" size={64} color={colors.textMuted} />
@@ -196,6 +217,35 @@ function DocumentForm({ spaceId, defaultFolder, onClose, onSaved }: any) {
     } catch (e: any) { Alert.alert('Error', e?.message || ''); }
   };
 
+  const pickPdf = async () => {
+    try {
+      const res = await DocumentPicker.getDocumentAsync({
+        type: ['application/pdf', 'image/*'],
+        copyToCacheDirectory: true,
+        multiple: false,
+      });
+      if (res.canceled || !res.assets?.[0]) return;
+      const asset = res.assets[0];
+      const fileMime = asset.mimeType || (asset.name?.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'application/octet-stream');
+      // Read as base64
+      let dataUri = asset.uri;
+      if (!dataUri.startsWith('data:')) {
+        // On native, fetch the file and convert to base64
+        const FileSystem = await import('expo-file-system');
+        const b64 = await FileSystem.readAsStringAsync(asset.uri, { encoding: 'base64' as any });
+        dataUri = `data:${fileMime};base64,${b64}`;
+      }
+      // Soft-cap size to ~10 MB (~13 MB base64) to avoid Mongo bloat
+      if (dataUri.length > 13_000_000) {
+        Alert.alert('File too large', 'Files must be under 10 MB. Try a smaller PDF.');
+        return;
+      }
+      setFileB64(dataUri);
+      setMime(fileMime);
+      if (!name && asset.name) setName(asset.name);
+    } catch (e: any) { Alert.alert('Error', e?.message || 'Could not read file'); }
+  };
+
   const save = async () => {
     if (!fileB64) { Alert.alert('Pick a file first'); return; }
     if (!name.trim()) { Alert.alert('Give it a name'); return; }
@@ -219,15 +269,32 @@ function DocumentForm({ spaceId, defaultFolder, onClose, onSaved }: any) {
             <TouchableOpacity onPress={onClose} style={styles.viewerBtn}><Icon name="X" size={18} color={colors.textMain} /></TouchableOpacity>
           </View>
           <ScrollView contentContainerStyle={{ padding: spacing.md, gap: 10 }}>
-            <TouchableOpacity style={styles.filePick} onPress={pickFile}>
-              {fileB64 ? <Image source={{ uri: fileB64 }} style={styles.filePreview} /> : (
-                <>
-                  <Icon name="Camera" size={28} color={colors.primary} />
-                  <Text style={styles.filePickTxt}>Pick an image</Text>
-                  <Text style={styles.docSub}>PDF support coming soon. Compress big files first.</Text>
-                </>
-              )}
-            </TouchableOpacity>
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              <TouchableOpacity style={[styles.filePick, { flex: 1 }]} onPress={pickFile}>
+                {fileB64 && mime.startsWith('image/') ? (
+                  <Image source={{ uri: fileB64 }} style={styles.filePreview} />
+                ) : (
+                  <>
+                    <Icon name="Camera" size={26} color={colors.primary} />
+                    <Text style={styles.filePickTxt}>Pick image</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.filePick, { flex: 1 }]} onPress={pickPdf}>
+                {fileB64 && (mime.includes('pdf') || mime === 'application/pdf') ? (
+                  <>
+                    <Icon name="FileText" size={28} color={tints.sage.icon} />
+                    <Text style={styles.filePickTxt}>PDF picked ✓</Text>
+                    <Text style={styles.docSub} numberOfLines={1}>{name || 'document.pdf'}</Text>
+                  </>
+                ) : (
+                  <>
+                    <Icon name="FileText" size={26} color={colors.primary} />
+                    <Text style={styles.filePickTxt}>Pick PDF / file</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            </View>
             <Text style={styles.label}>Name</Text>
             <TextInput style={styles.input} value={name} onChangeText={setName} placeholder="e.g. Lease agreement 2026" placeholderTextColor={colors.textMuted} />
             <Text style={styles.label}>Folder</Text>

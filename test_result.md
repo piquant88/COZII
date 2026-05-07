@@ -3302,3 +3302,136 @@ agent_communication:
 
       No bugs surfaced. Phase 10 surface is production-ready. No frontend
       testing performed (per protocol).
+
+
+## 2026-05-07 — Phase 11: Daily morning digest
+
+backend:
+  - task: "Phase 11: Daily morning digest"
+    implemented: true
+    working: false
+    file: "/app/backend/server.py"
+    stuck_count: 1
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: false
+        agent: "testing"
+        comment: |
+          ❌ CRITICAL — All Phase 11 HTTP endpoints return 404 Not Found and are
+          completely unreachable, even though the implementation logic itself
+          looks correct.
+
+          Tested via /app/backend_test_phase11.py (14/25 PASS). The 11 failures
+          all share the same symptom: `404 {"detail":"Not Found"}`. Affected
+          endpoints:
+            - POST /api/inventory/alerts/digest/send?space_id=...
+            - PATCH /api/spaces/{space_id}/digest-prefs
+
+          Root cause (one-line ordering bug in /app/backend/server.py):
+            Line 4702:  app.include_router(api_router)   <-- routes snapshot HERE
+            Line 4815:  @api_router.post("/inventory/alerts/digest/send")
+            Line 4831:  @api_router.patch("/spaces/{space_id}/digest-prefs")
+
+          FastAPI snapshots the routes when `include_router` is called, so any
+          handlers added to the router AFTER the include are silently dropped
+          (they exist on `api_router` but never get registered on `app`).
+          Since the Phase 11 routes are added at the very end of the file
+          (after line 4702), they are not served at all — hence the 404 on
+          every request. The CORS middleware add at 4704 is in the same boat
+          but doesn't matter for routing.
+
+          Fix (one of two options):
+            (a) MOVE `app.include_router(api_router)` to the bottom of the file
+                — just before the socketio wrap on line 4856 — so all router
+                handlers are registered.
+            (b) MOVE the Phase 11 endpoint blocks (lines 4815-4848) to BEFORE
+                line 4702 (i.e. before `app.include_router(api_router)`).
+
+          Option (a) is safest because it also future-proofs against the same
+          mistake recurring; option (b) keeps the digest helpers grouped together.
+
+          Verified by hitting GET /api/inventory/alerts and POST
+          /api/inventory/alerts/to-shopping (both defined at lines 4067/4140,
+          BEFORE the include_router line) — those return 200 and work
+          correctly. Only the new endpoints below the include line are 404.
+
+          Other observations from this run:
+            ✅ /inventory/alerts still returns the full 4-bucket structure
+               (low_stock, finished, expiring, expired, totals) with correct
+               counts after seeding 1 low-stock item + 1 expired item.
+               low_stock>=1, expired>=1, totals.all>=2. No regression.
+            ✅ /inventory/alerts/to-shopping creates pending shopping requests
+               (created>=1, request_ids list returned, GET /household/shopping
+               ?status=pending shows the new entries). No regression.
+            ✅ Background task `_daily_digest_loop` is scheduled — backend log
+               line: "[digest] background task scheduled". Loop logic itself
+               looks correct: skips spaces with `daily_digest_enabled=False`,
+               compares `current_utc_hour` to `daily_digest_utc_hour`,
+               writes `last_digest_date` regardless of `sent`. Idempotency in
+               the loop is enforced by `last_sent == today_key` short-circuit.
+               (Could not exercise this end-to-end without waiting for the
+               actual UTC hour and is unaffected by the route bug.)
+
+          Once the include_router ordering is fixed, all 11 currently-failing
+          assertions are expected to pass (the underlying handler/notification/
+          permission logic appears sound — see the implementation at lines
+          4742-4848).
+
+metadata:
+  created_by: "main_agent"
+  version: "1.6"
+  test_sequence: 9
+  run_ui: false
+
+test_plan:
+  current_focus:
+    - "Phase 11: Daily morning digest"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Phase 11 backend test run (2026-05-07) via /app/backend_test_phase11.py
+      — 14/25 PASS, 11 FAIL.
+
+      ❌ CRITICAL — Both Phase 11 endpoints are 404 because of a route
+         registration ordering bug:
+
+           server.py:4702  app.include_router(api_router)
+           server.py:4815  @api_router.post("/inventory/alerts/digest/send")
+           server.py:4831  @api_router.patch("/spaces/{space_id}/digest-prefs")
+
+         FastAPI registers routes AT include_router time. Routes added to the
+         APIRouter after the include are silently ignored. Every Phase 11
+         request returns `404 {"detail":"Not Found"}`.
+
+         Recommended fix: move `app.include_router(api_router)` from line
+         4702 to the bottom of the file (just before the socketio.ASGIApp
+         wrap on line 4856). Alternatively, move the digest endpoint blocks
+         to before line 4702.
+
+      ✅ Non-regression confirmed:
+         - GET /api/inventory/alerts still returns the 4-bucket structure
+           {low_stock, finished, expiring, expired, totals} with correct
+           counts after seeding 1 low-stock + 1 expired item (totals.all=2).
+         - POST /api/inventory/alerts/to-shopping still creates pending
+           ShoppingRequest entries from item_ids, returns
+           {created>=1, request_ids:[...]}, and GET /household/shopping
+           ?status=pending lists them.
+
+      ✅ Background task scheduled at startup: log line
+         "[digest] background task scheduled". The loop and helper logic
+         (_compute_alerts_for_space, _send_digest_for_space, _daily_digest_loop)
+         look correct. The notification payload would emit
+           - kind="daily_digest"
+           - title=f"Good morning! {N} item(s) need attention"
+           - body=f"... · ... Tap to open the shopping list."
+           - data={"counts": {...}, "screen": "/shopping-list"}
+         …once the route registration is fixed, this should be verifiable end-to-end.
+
+      ACTION ITEM for main agent: apply the ordering fix above, then re-run
+      /app/backend_test_phase11.py — all 11 failing assertions are expected
+      to pass without further code changes.

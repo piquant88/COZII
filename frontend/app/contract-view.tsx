@@ -406,14 +406,19 @@ export default function ContractViewScreen() {
       <Modal visible={signOpen} animationType="slide" transparent onRequestClose={() => setSignOpen(false)}>
         <View style={styles.modalBg}>
           <SafeAreaView style={styles.modalSheet} edges={['bottom']}>
-            <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+            <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
               <View style={styles.modalHeader}>
                 <Text style={styles.modalTitle}>Sign as {myRole === 'owner' ? 'Owner' : 'Staff'}</Text>
                 <TouchableOpacity onPress={() => setSignOpen(false)} style={styles.iconBtn}>
                   <Icon name="X" size={18} color={colors.textMain} />
                 </TouchableOpacity>
               </View>
-              <ScrollView contentContainerStyle={{ padding: spacing.md, gap: 10 }} keyboardShouldPersistTaps="handled" scrollEnabled={!drawingActive}>
+              <ScrollView
+                contentContainerStyle={{ padding: spacing.md, gap: 10, paddingBottom: 24 }}
+                keyboardShouldPersistTaps="handled"
+                scrollEnabled={!drawingActive}
+                style={{ flex: 1 }}
+              >
                 <Text style={styles.helpTxt}>
                   By signing below, you confirm you have read and agree to the terms of "{contract.title}".
                   Your signature, IP address, device info and timestamp will be recorded.
@@ -437,20 +442,38 @@ export default function ContractViewScreen() {
                   testID="sigpad"
                 />
 
+                {/* Live "captured" affirmation so the user knows their drawing is being recorded */}
+                {drawing ? (
+                  <View style={[styles.bannerCard, { backgroundColor: tints.sage.bg, marginTop: 4 }]}>
+                    <Icon name="CheckCircle2" size={16} color={tints.sage.icon} />
+                    <Text style={[styles.bannerSub, { fontWeight: '700', color: tints.sage.icon }]}>
+                      Signature captured. Tap "Agree & Sign" below to submit.
+                    </Text>
+                  </View>
+                ) : null}
+              </ScrollView>
+
+              {/* Sticky submit bar — always visible at the bottom of the modal */}
+              <View style={styles.submitBar}>
                 <TouchableOpacity
-                  style={[styles.signBtn, (submitting || (requireDrawnForMe && !drawing) || (!drawing && !typedName.trim())) && { opacity: 0.5 }]}
+                  style={[styles.submitBtn, (submitting || (requireDrawnForMe && !drawing) || (!drawing && !typedName.trim())) && { opacity: 0.4 }]}
                   onPress={submitSign}
                   disabled={submitting || (requireDrawnForMe && !drawing) || (!drawing && !typedName.trim())}
                   testID="sign-submit"
                 >
                   {submitting ? <ActivityIndicator color="#fff" /> : (
                     <>
-                      <Icon name="CheckCircle2" size={16} color="#fff" />
+                      <Icon name="CheckCircle2" size={18} color="#fff" />
                       <Text style={styles.signTxt}>Agree & Sign</Text>
                     </>
                   )}
                 </TouchableOpacity>
-              </ScrollView>
+                {requireDrawnForMe && !drawing ? (
+                  <Text style={styles.submitHint}>Draw your signature above to enable</Text>
+                ) : (!drawing && !typedName.trim()) ? (
+                  <Text style={styles.submitHint}>Type your name or draw a signature above</Text>
+                ) : null}
+              </View>
             </KeyboardAvoidingView>
           </SafeAreaView>
         </View>
@@ -569,9 +592,22 @@ const styles = StyleSheet.create({
   bannerSub: { fontSize: 12, color: colors.textMain, marginTop: 2, lineHeight: 17 },
   helpTxt: { fontSize: 12, color: colors.textMuted, marginTop: spacing.sm, textAlign: 'center', lineHeight: 17 },
   modalBg: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
-  modalSheet: { backgroundColor: colors.background, borderTopLeftRadius: 24, borderTopRightRadius: 24, maxHeight: '92%' },
+  modalSheet: { backgroundColor: colors.background, borderTopLeftRadius: 24, borderTopRightRadius: 24, maxHeight: '92%', height: '92%' },
   modalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: spacing.md, borderBottomWidth: 1, borderBottomColor: colors.border },
   modalTitle: { fontSize: 18, fontWeight: '800', color: colors.textMain },
   label: { fontSize: 12, fontWeight: '800', color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 },
   input: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, padding: 12, fontSize: 14, color: colors.textMain },
+  submitBar: {
+    padding: spacing.md, paddingTop: 10,
+    borderTopWidth: 1, borderTopColor: colors.border,
+    backgroundColor: colors.background,
+    gap: 6,
+  },
+  submitBtn: {
+    flexDirection: 'row', gap: 8,
+    backgroundColor: colors.primary, padding: 16, borderRadius: radius.full,
+    alignItems: 'center', justifyContent: 'center',
+    ...shadows.button,
+  },
+  submitHint: { fontSize: 11, color: colors.textMuted, textAlign: 'center', fontStyle: 'italic' },
 });

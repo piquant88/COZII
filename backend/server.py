@@ -4716,6 +4716,139 @@ async def shutdown_db_client():
 
 
 # =========================
+# Daily morning digest: low-stock / expiry summary notification
+# Runs as an async background task started at app startup. Every hour it
+# checks each household space and, if (a) the space's configured digest hour
+# matches the current local hour, (b) digest is enabled, and (c) we haven't
+# already sent today, it pushes a one-line summary notification to the owner.
+# =========================
+async def _compute_alerts_for_space(space_id: str, days_threshold: int = 7) -> Dict[str, int]:
+    items = await db.items.find({"space_id": space_id}, {"_id": 0, "status": 1, "expiry_date": 1}).to_list(5000)
+    today = now_utc().replace(hour=0, minute=0, second=0, microsecond=0)
+    threshold = today + timedelta(days=days_threshold)
+    low = 0; finished = 0; expiring = 0; expired = 0
+    for it in items:
+        st = (it.get("status") or "").lower()
+        if st == "low": low += 1
+        elif st == "finished": finished += 1
+        exp = _parse_iso_date(it.get("expiry_date"))
+        if exp:
+            if exp < today: expired += 1
+            elif exp <= threshold: expiring += 1
+    return {"low": low, "finished": finished, "expiring": expiring, "expired": expired,
+            "total": low + finished + expiring + expired}
+
+
+async def _send_digest_for_space(space: Dict[str, Any]) -> bool:
+    """Send the digest notification if there are alerts. Returns True if sent."""
+    counts = await _compute_alerts_for_space(space["space_id"])
+    if counts["total"] == 0:
+        return False
+    owner_id = space.get("owner_id")
+    if not owner_id:
+        return False
+    parts: List[str] = []
+    if counts["low"]: parts.append(f"{counts['low']} low-stock")
+    if counts["finished"]: parts.append(f"{counts['finished']} finished")
+    if counts["expiring"]: parts.append(f"{counts['expiring']} expiring soon")
+    if counts["expired"]: parts.append(f"{counts['expired']} expired")
+    summary = " · ".join(parts)
+    title = f"Good morning! {counts['total']} item{'s' if counts['total'] != 1 else ''} need attention"
+    body = f"{summary}. Tap to open the shopping list."
+    await notify_user(
+        user_id=owner_id,
+        space_id=space["space_id"],
+        kind="daily_digest",
+        title=title,
+        body=body,
+        data={"counts": counts, "screen": "/shopping-list"},
+    )
+    return True
+
+
+async def _daily_digest_loop():
+    """Background loop: every hour, check each household space and send digest if due."""
+    await asyncio.sleep(30)  # wait a bit for app to be ready
+    while True:
+        try:
+            now = now_utc()
+            current_utc_hour = now.hour
+            # Find household spaces with digest enabled. Default = enabled at hour 1 UTC ≈ 8am Jakarta (UTC+7).
+            cursor = db.family_spaces.find(
+                {"$or": [{"space_type": "household"}, {"space_type": {"$exists": False}}]},
+                {"_id": 0},
+            )
+            async for space in cursor:
+                try:
+                    if space.get("daily_digest_enabled") is False:
+                        continue
+                    target_hour = int(space.get("daily_digest_utc_hour", 1))  # default 1 UTC = 08:00 WIB
+                    if current_utc_hour != target_hour:
+                        continue
+                    today_key = now.date().isoformat()
+                    last_sent = space.get("last_digest_date")
+                    if last_sent == today_key:
+                        continue
+                    sent = await _send_digest_for_space(space)
+                    # Always mark date so we don't recompute every minute even if no alerts
+                    await db.family_spaces.update_one(
+                        {"space_id": space["space_id"]},
+                        {"$set": {"last_digest_date": today_key}},
+                    )
+                    if sent:
+                        logger.info(f"[digest] sent for space={space['space_id']}")
+                except Exception as e:
+                    logger.warning(f"[digest] error for space={space.get('space_id')}: {e}")
+        except Exception as e:
+            logger.warning(f"[digest] outer loop error: {e}")
+        # Sleep for ~1 hour, but check every 5 minutes near the boundary so we don't miss
+        await asyncio.sleep(300)
+
+
+@app.on_event("startup")
+async def _start_digest_task():
+    asyncio.create_task(_daily_digest_loop())
+    logger.info("[digest] background task scheduled")
+
+
+# Manual trigger / test endpoint — owner-only
+@api_router.post("/inventory/alerts/digest/send")
+async def send_digest_now(space_id: str, user: User = Depends(get_current_user)):
+    space = await assert_space_member(space_id, user.user_id)
+    if space.get("owner_id") != user.user_id:
+        raise HTTPException(403, "Only the household owner can trigger the digest")
+    sent = await _send_digest_for_space(space)
+    if sent:
+        return {"sent": True, "message": "Digest notification sent"}
+    return {"sent": False, "message": "No alerts right now"}
+
+
+class DigestPrefRequest(BaseModel):
+    daily_digest_enabled: Optional[bool] = None
+    daily_digest_utc_hour: Optional[int] = None  # 0-23 UTC
+
+
+@api_router.patch("/spaces/{space_id}/digest-prefs")
+async def update_digest_prefs(space_id: str, body: DigestPrefRequest, user: User = Depends(get_current_user)):
+    space = await assert_space_member(space_id, user.user_id)
+    if space.get("owner_id") != user.user_id:
+        raise HTTPException(403, "Only the household owner can change digest preferences")
+    updates: Dict[str, Any] = {}
+    if body.daily_digest_enabled is not None:
+        updates["daily_digest_enabled"] = bool(body.daily_digest_enabled)
+    if body.daily_digest_utc_hour is not None:
+        h = max(0, min(23, int(body.daily_digest_utc_hour)))
+        updates["daily_digest_utc_hour"] = h
+    if updates:
+        await db.family_spaces.update_one({"space_id": space_id}, {"$set": updates})
+    out = await db.family_spaces.find_one({"space_id": space_id}, {"_id": 0})
+    return {
+        "daily_digest_enabled": out.get("daily_digest_enabled", True),
+        "daily_digest_utc_hour": out.get("daily_digest_utc_hour", 1),
+    }
+
+
+# =========================
 # Wrap FastAPI with Socket.IO ASGI app
 # Supervisor still runs `uvicorn server:app` — `app` is now the wrapped ASGI app.
 # All FastAPI routes still go through `fastapi_app` underneath.
