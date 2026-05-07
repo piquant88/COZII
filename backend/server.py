@@ -4699,8 +4699,6 @@ async def render_contract(contract_id: str, user: User = Depends(get_current_use
     return {"title": d.get("title"), "rendered_body": rendered, "status": d.get("status"), "variables": d.get("variables") or {}}
 
 
-app.include_router(api_router)
-
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
@@ -4853,6 +4851,7 @@ async def update_digest_prefs(space_id: str, body: DigestPrefRequest, user: User
 # Supervisor still runs `uvicorn server:app` — `app` is now the wrapped ASGI app.
 # All FastAPI routes still go through `fastapi_app` underneath.
 # =========================
+app.include_router(api_router)
 fastapi_app = app
 app = socketio.ASGIApp(sio, other_asgi_app=fastapi_app, socketio_path='/api/socket.io')
 

@@ -3309,12 +3309,53 @@ agent_communication:
 backend:
   - task: "Phase 11: Daily morning digest"
     implemented: true
-    working: false
+    working: true
     file: "/app/backend/server.py"
-    stuck_count: 1
+    stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          Re-tested 2026-05-07 after main agent fixed the route ordering bug
+          (`app.include_router(api_router)` is now called once at the very end
+          of /app/backend/server.py just before the socketio ASGI wrap, ~line
+          4856). /app/backend_test_phase11.py — 37/37 PASS against the public
+          preview URL.
+          
+          A. POST /api/inventory/alerts/digest/send (with auth + alerts present):
+            ✅ 200 with {sent: true, message: "..."} (route now registered)
+            ✅ Notification kind="daily_digest" inserted with:
+                 - title starts with "Good morning!" + mentions "need attention"
+                 - body mentions "shopping list"
+                 - data.screen == "/shopping-list"
+                 - data.counts is dict with low>=1 and expired>=1
+          B. POST on empty space (no alerts):
+            ✅ 200 with {sent: false} and message contains "no alert"
+          C. Permissions:
+            ✅ non-owner member -> 403
+            ✅ outsider -> 403
+            ✅ same 403 enforcement on PATCH /spaces/{id}/digest-prefs (member
+               and outsider both 403)
+          D. PATCH /api/spaces/{space_id}/digest-prefs:
+            ✅ {daily_digest_enabled:false} -> returns enabled=false
+            ✅ {daily_digest_enabled:true} -> returns enabled=true
+            ✅ {daily_digest_utc_hour:5} -> returns 5
+            ✅ {daily_digest_utc_hour:99} -> CLAMPED to 23
+            ✅ {daily_digest_utc_hour:-5} -> CLAMPED to 0
+          E. Idempotency sanity:
+            ✅ Manual trigger called twice in a row both return sent=true and
+               two separate daily_digest notifications recorded
+          F. Non-regression on existing endpoints:
+            ✅ GET /api/inventory/alerts returns 4-bucket structure
+               (low_stock, finished, expiring, expired, totals) with correct
+               counts after seeding 1 low-stock + 1 expired item
+            ✅ POST /api/inventory/alerts/to-shopping returns created>=1 +
+               request_ids list and creates pending /household/shopping rows
+          
+          The route ordering fix is verified end-to-end. Phase 11 surface is
+          production-ready.
       - working: false
         agent: "testing"
         comment: |
@@ -3385,8 +3426,7 @@ metadata:
   run_ui: false
 
 test_plan:
-  current_focus:
-    - "Phase 11: Daily morning digest"
+  current_focus: []
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -3435,3 +3475,34 @@ agent_communication:
       ACTION ITEM for main agent: apply the ordering fix above, then re-run
       /app/backend_test_phase11.py — all 11 failing assertions are expected
       to pass without further code changes.
+
+  - agent: "testing"
+    message: |
+      Phase 11 RETEST (2026-05-07) — route ordering bug FIXED. All 37/37
+      assertions in /app/backend_test_phase11.py PASS against the public
+      preview URL.
+
+      ✅ POST /api/inventory/alerts/digest/send (owner, alerts present)
+         → 200 with {sent: true, message: "..."}; daily_digest notification
+         inserted with title starting "Good morning!" + mentions
+         "need attention", body mentions "shopping list",
+         data.screen="/shopping-list", data.counts has low>=1 + expired>=1.
+      ✅ POST on empty household space → {sent: false} with message
+         containing "no alert".
+      ✅ POST as non-owner member → 403; POST as outsider → 403.
+      ✅ PATCH /api/spaces/{id}/digest-prefs:
+           - {daily_digest_enabled:false} → enabled=false
+           - {daily_digest_enabled:true} → enabled=true
+           - {daily_digest_utc_hour:5} → 5
+           - {daily_digest_utc_hour:99} → CLAMPED to 23
+           - {daily_digest_utc_hour:-5} → CLAMPED to 0
+           - non-owner member PATCH → 403; outsider PATCH → 403.
+      ✅ Idempotency: manual trigger called twice in a row both return
+         sent=true; two distinct daily_digest notifications recorded.
+      ✅ Non-regression: GET /api/inventory/alerts still returns 4-bucket
+         structure; POST /api/inventory/alerts/to-shopping still creates
+         pending shopping requests.
+
+      Phase 11 task updated to working=true, needs_retesting=false,
+      stuck_count reset to 0. test_plan.current_focus cleared. No further
+      backend work required for Phase 11.
