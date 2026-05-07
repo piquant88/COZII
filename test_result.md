@@ -2956,14 +2956,64 @@ metadata:
 
 test_plan:
   current_focus:
-    - "Contracts + e-Sign flow (Phase 7)"
-    - "Per-category staff_can_edit toggle (Phase 8)"
-    - "Real-time Socket.io (Phase 9)"
-  stuck_tasks: []
+    - "Contracts + e-Sign flow (Phase 7) — BLOCKED on missing seed"
+  stuck_tasks:
+    - "Test Household space seed for test@cozii.app"
   test_all: false
   test_priority: "high_first"
 
 agent_communication:
+  - agent: "testing"
+    message: |
+      Phase 7+8+9 frontend FINAL retest (2026-05-07) — A1–A9 + B2 BLOCKED.
+      The login flow now works perfectly with the new test-ids:
+        ✅ /login renders, [data-testid="login-email"], [data-testid="login-password"]
+           and [data-testid="login-submit"] all interactive.
+        ✅ Login submit succeeds (no error, navigates away from /login).
+      However, the SEEDED "Test Household" space is NOT actually available to
+      test@cozii.app. After login:
+        ❌ Profile tab renders the empty-state message "Pick or create a space
+           first." — the user is currently a member of ZERO spaces.
+        ❌ The testid [data-testid="profile-space-space_8784d76aee6d4c56"] never
+           appears anywhere in the Profile screen (verified: 8 scroll attempts,
+           0 matches).
+        ❌ Direct navigation to /contracts loads the Agreements shell but stays
+           empty-loading (no template cards, no add menu) because there is no
+           active space context.
+        ❌ /contract-new shows "Pick a template" header with an indefinite
+           spinner — same root cause: no active household space.
+      Consequence: A1–A9 (entire contracts + e-Sign flow) and B2 (staff
+      permission sheet inside Household tab) cannot be exercised. The frontend
+      code paths themselves look fine — gating on space context is correct,
+      contracts list / template picker render correctly under "no space" with
+      proper empty/loading states, login form testids work as documented.
+      
+      ROOT CAUSE: The MongoDB seed for space_id="space_8784d76aee6d4c56" is
+      either missing or test@cozii.app is not in its member_ids[]. The previous
+      run (this session, earlier message) reported the same blocker; the
+      added testids fixed login + the planned space-switch click, but the seed
+      itself still hasn't materialised in this environment.
+      
+      ACTION ITEMS for main agent:
+        1. Re-seed test@cozii.app into space_id "space_8784d76aee6d4c56" with
+           name="Test Household", space_type="household", currency="USD" and
+           the 4 staff (Sari Putri 28D4A6 / F04935, Andi Wibowo, Siti Pertiwi,
+           Pierre Lambert). Check db.spaces and db.staff_members.
+        2. Verify by curl: POST /api/auth/login → use returned token → GET
+           /api/spaces should include "Test Household". GET /api/household/staff
+           ?space_id=space_8784d76aee6d4c56 should return 4 rows.
+        3. After re-seed, request a fresh frontend run — login + space-switch
+           testids are confirmed working, so A1–A9 + B2 should run end-to-end
+           without further code changes.
+      
+      Already verified PASS in earlier runs and unaffected by this blocker:
+        ✅ B1 — /inventory category-detail "Staff can edit this category"
+           toggle visible & interactive (data-testid="cat-staff-edit-toggle").
+        ✅ C1 — Socket.IO websockets connecting against /api/socket.io/.
+      
+      Browser-automation budget exhausted (3/3) so no further attempts this
+      session. The unblocker is purely a backend seed action.
+
   - agent: "testing"
     message: |
       Phase 7+8+9 frontend retest (2026-05-07) — INCONCLUSIVE / PARTIAL BLOCK

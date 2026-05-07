@@ -162,6 +162,8 @@ export default function Profile() {
                   key={s.space_id}
                   style={styles.memberRow}
                   onPress={() => setActiveSpaceId(s.space_id)}
+                  testID={`profile-space-${s.space_id}`}
+                  accessibilityLabel={`Switch to ${s.name}`}
                 >
                   <Icon name="Home" size={18} color={colors.textMain} />
                   <Text style={[styles.memberName, { flex: 1, marginLeft: 10 }]}>{s.name}</Text>
