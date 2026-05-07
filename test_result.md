@@ -1052,12 +1052,70 @@ metadata:
   run_ui: false
 
 test_plan:
-  current_focus: []
+  current_focus:
+    - "Contracts + e-Sign flow (Phase 7)"
+    - "Per-category staff_can_edit toggle (Phase 8)"
+    - "Real-time Socket.io (Phase 9)"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
 
 agent_communication:
+  - agent: "testing"
+    message: |
+      Phase 7+8+9 frontend re-test (2026-XX-XX) — BLOCKED by missing seed space.
+
+      The review request requires the test account `test@cozii.app` to have a space
+      named EXACTLY "Test Household" with `space_type=household`. After login, the
+      space picker on /home only lists ONE space named "Test Cozii Home" (which is
+      `space_type=roommates` — the Household tab shows the yellow banner
+      "This space is set as Roommates. Switch to Household in Profile to enable
+      household management."). There is NO "Test Household" space to switch to.
+
+      Consequences:
+        ❌ A1–A9 (Contracts + e-Sign): BLOCKED. The `open-contracts` FileText icon
+           is correctly gated to household-typed spaces, so it doesn't render. (Direct
+           nav to /contracts does load the Agreements screen and shows "No agreements
+           yet" with "Create first agreement" CTA — so the contracts UI itself is
+           functional, but the full create→sign→reassign flow requires a household
+           space with seeded staff (Sari Putri, Andi Wibowo, etc.) which don't exist.)
+        ❌ B2 (Permission sheet edit_inventory toggle): BLOCKED. Staff cards live
+           inside the Household tab; on a Roommates-typed space the tab shows the
+           Family-directory empty state instead of staff cards.
+        ✅ B1 PASS — `/inventory` → `Food & Pantry` category detail correctly shows
+           the "Staff can edit this category" toggle (data-testid
+           `cat-staff-edit-toggle`) with helper text "Only owners can add, edit, or
+           delete items in this category." Toggle is interactive.
+        ✅ C1 PASS — Socket.io websockets connected (21 upgrade events captured
+           against /api/socket.io/ during the session). No "socket auth failed"
+           errors in console; only benign 401s for unauthenticated initial calls
+           pre-login.
+
+      Additional CORS issue worth noting:
+        ⚠️ When tested against http://localhost:3000 (per the review prompt), every
+        /api/* request fails with a CORS preflight error:
+          "Access-Control-Allow-Origin header value is wildcard '*' but request's
+           credentials mode is 'include'."
+        The frontend has EXPO_PUBLIC_BACKEND_URL pointing at the preview origin, so
+        from localhost:3000 it's a cross-origin request with credentials, which the
+        backend's CORS config doesn't allow. Switching the test runner to the
+        preview URL (https://family-wallet-21.preview.emergentagent.com) makes this
+        go away — that's what the rest of this run used. Either:
+          (a) seed the required "Test Household" space in MongoDB and update
+              `/app/memory/test_credentials.md` to match, or
+          (b) tighten backend CORS to allow http://localhost:3000 with credentials
+              (Access-Control-Allow-Origin must be the explicit origin, not '*',
+              when credentials mode is include) so the prompt's localhost path works.
+
+      ACTION ITEMS for main agent:
+        1. Re-seed account `test@cozii.app` with a space named exactly
+           "Test Household" of type household + the 4 staff members (Sari Putri
+           invite F04935 / Andi Wibowo / Siti Pertiwi / Pierre Lambert). Without
+           this, the contracts + per-staff perm flows can't be exercised.
+        2. (Optional) Fix CORS for localhost:3000 requests with credentials so
+           future review prompts using http://localhost:3000 work end-to-end.
+        3. After re-seed, re-run the A1–A9 + B2 cases. B1 and C1 are already
+           verified.
   - agent: "main"
     message: |
       Phase 4 extensions (backend) ready for testing.
