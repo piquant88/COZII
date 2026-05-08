@@ -3458,11 +3458,16 @@ async def list_shopping(space_id: str, status: Optional[str] = None, user: User 
 async def create_shopping(body: CreateShoppingRequest, user: User = Depends(get_current_user)):
     space = await assert_space_member(body.space_id, user.user_id)
     is_reimbursement = body.kind == "reimbursement"
+    is_owner = isinstance(space, dict) and space.get("owner_id") == user.user_id
     # Both regular requests AND reimbursements start as "pending":
     #   - request: pending = awaiting owner approval to buy
     #   - reimbursement: pending = awaiting owner pay-back (item already bought by staff)
     # The `kind` field disambiguates the meaning of "pending" in the UI.
-    initial_status = "pending"
+    # Exception: when the OWNER themself is the requester, there's nothing to
+    # approve — they are the approver. Auto-approve so the item lands directly
+    # in the right "shopping" / "purchased" lane without an extra tap.
+    initial_status = "approved" if is_owner else "pending"
+    now_ts = now_utc()
     doc = {
         "request_id": gen_id("shop"),
         "space_id": body.space_id,
@@ -3479,13 +3484,13 @@ async def create_shopping(body: CreateShoppingRequest, user: User = Depends(get_
         "photo_base64": body.photo_base64,
         "requested_by": user.user_id,
         "requested_by_staff_id": body.requested_by_staff_id,
-        "approved_by": None,
-        "approved_at": None,
+        "approved_by": user.user_id if is_owner else None,
+        "approved_at": now_ts if is_owner else None,
         "rejected_reason": None,
         "purchased_by": None,
         "purchased_at": None,
         "fulfilled_at": None,
-        "created_at": now_utc(),
+        "created_at": now_ts,
     }
     await db.shopping_requests.insert_one(doc)
     doc.pop("_id", None)

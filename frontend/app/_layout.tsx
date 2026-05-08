@@ -7,7 +7,7 @@ import { AuthProvider, useAuth } from '../src/AuthContext';
 import { Platform } from 'react-native';
 import { useRouter } from 'expo-router';
 import * as Notifications from 'expo-notifications';
-import { installNotificationHandler, routeFromNotificationData } from '../src/pushNotifications';
+import { installNotificationHandler, routeForNotification } from '../src/pushNotifications';
 
 // Install the foreground notification handler at module load (must be early).
 installNotificationHandler();
@@ -52,8 +52,8 @@ function NotificationDeepLinker({ children }: { children: React.ReactNode }) {
     // Foreground / background tap: user tapped a notification while app was running.
     const sub = Notifications.addNotificationResponseReceivedListener((response) => {
       try {
-        const data = response?.notification?.request?.content?.data;
-        const route = routeFromNotificationData(data);
+        const data = response?.notification?.request?.content?.data || {};
+        const route = routeForNotification((data as any).kind, data);
         if (route) {
           // Slight delay so router is mounted
           setTimeout(() => {
@@ -71,10 +71,9 @@ function NotificationDeepLinker({ children }: { children: React.ReactNode }) {
       handledColdStartRef.current = true;
       try {
         const last = await Notifications.getLastNotificationResponseAsync();
-        const data = last?.notification?.request?.content?.data;
-        const route = routeFromNotificationData(data);
+        const data = last?.notification?.request?.content?.data || {};
+        const route = routeForNotification((data as any).kind, data);
         if (route) {
-          // Wait for auth + router to be ready before pushing
           setTimeout(() => {
             if (user) {
               try { (router as any).push(route); } catch (e) { console.warn('cold-start nav failed', e); }

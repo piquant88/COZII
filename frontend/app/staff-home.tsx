@@ -11,6 +11,7 @@ import { realtime } from '../src/realtime';
 import { colors, radius, spacing, shadows, tints } from '../src/theme';
 import { Icon } from '../src/Icon';
 import { formatMoney } from '../src/currency';
+import { routeForNotification } from '../src/pushNotifications';
 
 const SECTIONS: Array<{ key: 'today' | 'attendance' | 'shopping' | 'wages' | 'handbook' | 'inventory' | 'finance'; label: string; icon: string; tint: keyof typeof tints }> = [
   { key: 'today', label: 'Today', icon: 'Check', tint: 'mint' },
@@ -282,6 +283,10 @@ export default function StaffHome() {
                 <TouchableOpacity key={n.notification_id} style={[styles.notifRow, !n.read && { backgroundColor: tints.mint.bg }]} onPress={async () => {
                   if (!n.read) {
                     try { await api.post(`/notifications/${n.notification_id}/read`, {}); await load(); } catch {}
+                  }
+                  const route = routeForNotification(n.kind, n.data);
+                  if (route) {
+                    try { (router as any).push(route); } catch (e) { console.warn('notif tap nav failed', e); }
                   }
                 }}>
                   <View style={[styles.notifIcon, { backgroundColor: tints.peach.icon }]}>

@@ -20,16 +20,19 @@ export default function Home() {
   const [activity, setActivity] = useState<Activity[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [showSpacePicker, setShowSpacePicker] = useState(false);
+  const [unreadNotifs, setUnreadNotifs] = useState(0);
 
   const load = useCallback(async () => {
     if (!activeSpace) return;
     try {
-      const [s, a] = await Promise.all([
+      const [s, a, n] = await Promise.all([
         api.get<Stats>(`/stats?space_id=${activeSpace.space_id}`),
         api.get<Activity[]>(`/activity?space_id=${activeSpace.space_id}`),
+        api.get<any[]>(`/notifications?space_id=${activeSpace.space_id}`).catch(() => []),
       ]);
       setStats(s);
       setActivity(a);
+      setUnreadNotifs(Array.isArray(n) ? n.filter((x) => !x.read).length : 0);
     } catch (e) {
       console.warn(e);
     }
@@ -76,6 +79,19 @@ export default function Home() {
             <Text style={styles.greet}>{greeting()},</Text>
             <Text style={styles.name} testID="home-user-name">{user?.name?.split(' ')[0] || 'Friend'}</Text>
           </View>
+          <TouchableOpacity
+            style={styles.bellBtn}
+            onPress={() => router.push('/notifications')}
+            testID="home-notifications"
+            accessibilityLabel="Notifications"
+          >
+            <Icon name="Bell" size={20} color={colors.textMain} />
+            {unreadNotifs > 0 && (
+              <View style={styles.bellBadge}>
+                <Text style={styles.bellBadgeTxt}>{unreadNotifs > 9 ? '9+' : String(unreadNotifs)}</Text>
+              </View>
+            )}
+          </TouchableOpacity>
           <TouchableOpacity
             style={styles.spacePill}
             onPress={() => setShowSpacePicker((v) => !v)}
@@ -191,9 +207,23 @@ export default function Home() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   scroll: { padding: spacing.lg, paddingBottom: 140 },
-  header: { flexDirection: 'row', alignItems: 'center', marginBottom: spacing.lg },
+  header: { flexDirection: 'row', alignItems: 'center', marginBottom: spacing.lg, gap: 8 },
   greet: { fontSize: 14, color: colors.textMuted, fontWeight: '500' },
   name: { fontSize: 28, fontWeight: '900', color: colors.textMain, letterSpacing: -0.5 },
+  bellBtn: {
+    width: 40, height: 40, borderRadius: 20,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: colors.surface,
+    ...shadows.card,
+  },
+  bellBadge: {
+    position: 'absolute', top: 4, right: 4,
+    minWidth: 16, height: 16, borderRadius: 8, paddingHorizontal: 4,
+    backgroundColor: colors.dangerText,
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 2, borderColor: colors.surface,
+  },
+  bellBadgeTxt: { fontSize: 9, color: '#fff', fontWeight: '900', lineHeight: 11 },
   spacePill: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
     backgroundColor: colors.surface,

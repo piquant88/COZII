@@ -7,9 +7,6 @@ import { api } from './api';
 
 const STORED_TOKEN_KEY = 'cozii_expo_push_token';
 
-// Handler that decides what to do when a notification arrives while the app
-// is in the foreground. We always show banner + list + sound for parity with
-// the lockscreen experience.
 let _handlerInstalled = false;
 export function installNotificationHandler() {
   if (_handlerInstalled) return;
@@ -30,7 +27,6 @@ export function installNotificationHandler() {
 }
 
 function resolveProjectId(): string | null {
-  // Try multiple known locations across Expo versions.
   const c: any = Constants;
   return (
     c?.expoConfig?.extra?.eas?.projectId ||
@@ -41,16 +37,22 @@ function resolveProjectId(): string | null {
   );
 }
 
-async function ensurePermissionsAsync(): Promise<boolean> {
+function isExpoGo(): boolean {
+  // Constants.appOwnership === 'expo' means running in Expo Go
+  const ownership = (Constants as any)?.appOwnership;
+  const exec = (Constants as any)?.executionEnvironment;
+  return ownership === 'expo' || exec === 'storeClient';
+}
+
+async function ensurePermissionsAsync(): Promise<{ ok: boolean; status: string }> {
   try {
     const existing = await Notifications.getPermissionsAsync();
-    if (existing.status === 'granted') return true;
-    if (!existing.canAskAgain) return false;
+    if (existing.status === 'granted') return { ok: true, status: 'granted' };
+    if (!existing.canAskAgain) return { ok: false, status: existing.status || 'denied' };
     const req = await Notifications.requestPermissionsAsync();
-    return req.status === 'granted';
-  } catch (e) {
-    console.warn('[push] permission error', e);
-    return false;
+    return { ok: req.status === 'granted', status: req.status };
+  } catch (e: any) {
+    return { ok: false, status: `error: ${e?.message || e}` };
   }
 }
 
@@ -68,41 +70,70 @@ async function ensureAndroidChannel() {
   }
 }
 
-/** Register this device for push notifications and POST the token to the backend.
- *  Idempotent: safe to call multiple times. Silently no-ops on web / simulators / when
- *  no projectId is configured.
- */
-export async function registerForPushAsync(): Promise<string | null> {
-  if (Platform.OS === 'web') return null; // Expo push is mobile-only
+export type PushDiagnostics = {
+  platform: string;
+  isDevice: boolean;
+  isExpoGo: boolean;
+  permission: string;
+  projectId: string | null;
+  token: string | null;
+  lastError: string | null;
+};
+
+export async function getPushDiagnostics(): Promise<PushDiagnostics> {
+  const out: PushDiagnostics = {
+    platform: Platform.OS,
+    isDevice: !!Device.isDevice,
+    isExpoGo: isExpoGo(),
+    permission: 'unknown',
+    projectId: resolveProjectId(),
+    token: null,
+    lastError: null,
+  };
   try {
-    if (!Device.isDevice) {
-      console.log('[push] skipping: not a physical device');
-      return null;
-    }
+    const p = await Notifications.getPermissionsAsync();
+    out.permission = p.status;
+  } catch (e: any) {
+    out.permission = `error: ${e?.message || e}`;
+  }
+  try {
+    out.token = await AsyncStorage.getItem(STORED_TOKEN_KEY);
+  } catch {}
+  return out;
+}
+
+export async function registerForPushAsync(opts?: { force?: boolean }): Promise<{ token: string | null; error: string | null }> {
+  if (Platform.OS === 'web') return { token: null, error: 'web (push not supported)' };
+  try {
+    if (!Device.isDevice) return { token: null, error: 'simulator (must run on a real device)' };
     await ensureAndroidChannel();
-    const ok = await ensurePermissionsAsync();
-    if (!ok) {
-      console.log('[push] permission not granted');
-      return null;
-    }
+    const perm = await ensurePermissionsAsync();
+    if (!perm.ok) return { token: null, error: `permission ${perm.status}` };
+
     const projectId = resolveProjectId();
+    if (!projectId) {
+      return {
+        token: null,
+        error: isExpoGo()
+          ? 'Expo Go SDK 53+ no longer supports push notifications. Build a dev client (eas build --profile development) or set extra.eas.projectId in app.json.'
+          : 'No EAS projectId configured. Run `eas init` once and add it to app.json under expo.extra.eas.projectId.',
+      };
+    }
+
     let tokenData;
     try {
-      tokenData = projectId
-        ? await Notifications.getExpoPushTokenAsync({ projectId })
-        : await Notifications.getExpoPushTokenAsync();
+      tokenData = await Notifications.getExpoPushTokenAsync({ projectId });
     } catch (e: any) {
-      // Most common cause in dev: no EAS projectId configured. Don't crash the app.
-      console.warn('[push] getExpoPushTokenAsync failed:', e?.message || e);
-      return null;
+      const msg = e?.message || String(e);
+      console.warn('[push] getExpoPushTokenAsync failed:', msg);
+      return { token: null, error: msg };
     }
     const token = tokenData?.data || null;
-    if (!token) return null;
+    if (!token) return { token: null, error: 'empty token' };
 
-    // Avoid POSTing the same token to the server on every cold start.
-    const cached = await AsyncStorage.getItem(STORED_TOKEN_KEY).catch(() => null);
-    if (cached === token) {
-      return token;
+    if (!opts?.force) {
+      const cached = await AsyncStorage.getItem(STORED_TOKEN_KEY).catch(() => null);
+      if (cached === token) return { token, error: null };
     }
 
     try {
@@ -112,18 +143,15 @@ export async function registerForPushAsync(): Promise<string | null> {
         device_name: Device.deviceName || Device.modelName || null,
       });
       await AsyncStorage.setItem(STORED_TOKEN_KEY, token);
-    } catch (e) {
-      console.warn('[push] failed to register token with backend', e);
+    } catch (e: any) {
+      return { token, error: `backend register failed: ${e?.message || e}` };
     }
-
-    return token;
-  } catch (e) {
-    console.warn('[push] registerForPushAsync outer failure', e);
-    return null;
+    return { token, error: null };
+  } catch (e: any) {
+    return { token: null, error: `outer: ${e?.message || e}` };
   }
 }
 
-/** Best-effort: tell backend to deactivate the cached token (called on logout). */
 export async function unregisterPushAsync(): Promise<void> {
   try {
     const cached = await AsyncStorage.getItem(STORED_TOKEN_KEY).catch(() => null);
@@ -136,10 +164,58 @@ export async function unregisterPushAsync(): Promise<void> {
   } catch {}
 }
 
-/** Extract the deep-link route from a notification payload. */
+/** Schedule a LOCAL notification right now. Used as a fallback in Expo Go where
+ *  remote push is unsupported. The notification still goes through the same
+ *  foreground/response listeners, so deep linking works for testing. */
+export async function scheduleLocalTest(opts: { title: string; body: string; data?: Record<string, any> }) {
+  await ensureAndroidChannel();
+  await Notifications.scheduleNotificationAsync({
+    content: {
+      title: opts.title,
+      body: opts.body,
+      data: opts.data || {},
+      sound: 'default',
+    },
+    trigger: null, // fire immediately
+  });
+}
+
+// =====================================================================
+// Notification → app route resolver. Used for both OS taps and in-app taps.
+// =====================================================================
+
+/** Build the deep-link route given a notification kind + payload data. */
+export function routeForNotification(kind: string | undefined, data: any): string | null {
+  if (!data || typeof data !== 'object') data = {};
+  // Explicit override always wins
+  const explicit = data.route || data.screen || data.url;
+  if (typeof explicit === 'string' && explicit.startsWith('/')) return explicit;
+
+  const k = (kind || '').toLowerCase();
+  switch (k) {
+    case 'daily_digest':
+      return '/shopping-list';
+    case 'contract_assigned':
+    case 'contract_owner_signed':
+    case 'contract_staff_signed':
+      if (data.contract_id) return `/contract-view?id=${encodeURIComponent(String(data.contract_id))}`;
+      return '/contracts';
+    case 'task_assigned':
+    case 'task_done':
+    case 'task_comment':
+      return '/(tabs)/household';
+    case 'wage_paid':
+    case 'wage_confirmed':
+      return '/(tabs)/household';
+    case 'shopping_request':
+    case 'shopping_status':
+      return '/(tabs)/household';
+    default:
+      return null;
+  }
+}
+
+/** Convenience wrapper used by the OS notification response listener. */
 export function routeFromNotificationData(data: any): string | null {
-  if (!data || typeof data !== 'object') return null;
-  const r = data.route || data.screen || data.url;
-  if (typeof r === 'string' && r.startsWith('/')) return r;
-  return null;
+  return routeForNotification(data?.kind, data);
 }

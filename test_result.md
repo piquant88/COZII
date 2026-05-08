@@ -3731,3 +3731,146 @@ agent_communication:
 
       Updated test_result.md: Phase 12 backend task → working=true,
       needs_retesting=false. No backend bugs surfaced.
+
+
+#============== Phase 12.1 — Polish: owner auto-approve shopping + in-app deep links ==============
+backend:
+  - task: "Phase 12.1 — Owner shopping request auto-approval"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          POST /api/household/shopping now auto-approves the request when the
+          calling user is the owner of the space (space.owner_id == user.user_id).
+          Specifically it sets:
+            • status = "approved" (instead of "pending")
+            • approved_by = user.user_id
+            • approved_at = now_utc()
+          For non-owners (members or staff), behavior is unchanged: status starts
+          at "pending". Applies to both kind="request" and kind="reimbursement".
+
+          Test coverage requested:
+            ✓ Owner POST /household/shopping {kind:"request"} → returns object
+              with status="approved", approved_by=owner.user_id, approved_at set.
+            ✓ Owner POST /household/shopping {kind:"reimbursement"} → same.
+            ✓ Member POST (non-owner) → status="pending" (regression).
+            ✓ Staff POST via {requested_by_staff_id} (using a staff-linked user)
+              → status="pending" (regression).
+            ✓ Subsequent PATCH /household/shopping/{id} on an owner-created
+              already-approved request still works (e.g. mark purchased).
+      - working: true
+        agent: "testing"
+        comment: |
+          Phase 12.1 owner auto-approve verified via /app/backend_test.py against
+          the public preview URL. 9/9 assertions PASS.
+          Owner: test@cozii.app (user_e534ee64cc46419c) on
+          space_8784d76aee6d4c56 (Test Household, type=household, currency=USD).
+
+          ✅ T1 — Owner POST /household/shopping {kind:"request",
+             item_name:"Detergent", quantity:"1", urgency:"normal"} → 200,
+             status="approved", approved_by=owner.user_id, approved_at=
+             "2026-05-08T10:08:09.010508Z" (non-null), kind="request".
+          ✅ T2 — Owner POST /household/shopping {kind:"reimbursement",
+             item_name:"Eggs", quantity:"1", actual_price:50000} → 200,
+             status="approved", approved_by=owner.user_id, approved_at non-null,
+             kind="reimbursement".
+          ✅ T3 — Fresh member account joined via space.invite_code (MFQ7X8),
+             then POST /household/shopping → 200, status="pending",
+             approved_by=null, approved_at=null. Regression preserved.
+          ✅ T4 — Owner created a fresh staff record (invite_code 7E1982),
+             a brand-new user POST /household/staff/join, then that staff-user
+             POST /household/shopping with requested_by_staff_id → 200,
+             status="pending", approved_by=null, approved_at=null. Staff
+             cannot self-approve. Regression preserved.
+          ✅ T5 — Member POST /household/shopping/{owner_request_id}/purchase
+             {actual_price:25000} → 200, status="purchased",
+             purchased_by=member.user_id, actual_price=25000.0, and
+             approved_by remains the owner's user_id (auto-approval is not
+             clobbered by the downstream purchase pipeline).
+
+          No backend bugs surfaced. Production-ready.
+
+frontend:
+  - task: "Phase 12.1 — In-app notifications: deep link on tap, Bell badge in home, diagnostic + local fallback"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/notifications.tsx, /app/frontend/app/staff-home.tsx, /app/frontend/app/(tabs)/home.tsx, /app/frontend/src/pushNotifications.ts, /app/frontend/app/_layout.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          • Added `routeForNotification(kind, data)` in src/pushNotifications.ts
+            that resolves a deep-link route from notification data:
+              - data.route|screen|url overrides win
+              - kind=daily_digest → /shopping-list
+              - kind=contract_* → /contract-view?id=…
+              - kind=task_* / wage_* / shopping_* → /(tabs)/household
+          • staff-home.tsx notification panel rows now navigate to that route
+            on tap (after marking read).
+          • app/notifications.tsx is now a 2-tab screen:
+              - "Inbox" — recent notifications list with deep-link on tap,
+                unread badges, mark-all-read, empty state.
+              - "Settings" — the existing daily_digest / important_alerts
+                toggles + Send Test + Diagnostics card.
+          • Bell icon with unread count badge added to home.tsx header,
+            opens /notifications.
+          • Local-notification fallback added: if `registerForPushAsync`
+            cannot get a real Expo token (e.g. running in Expo Go SDK 53+
+            without an EAS projectId), the "Send a test notification"
+            button schedules a local notification instead — so the user can
+            still verify the foreground handler + deep link path.
+          • Diagnostic card surfaces platform / Expo Go state /
+            permission / projectId / token, with an actionable footnote
+            explaining how to fix each failure mode.
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Three small follow-ups requested by the user:
+      1) Owner shopping requests now auto-approve (backend done).
+      2) In-app notification panel taps now deep-link to the correct screen
+         (frontend done in staff-home and the new notifications.tsx Inbox tab).
+      3) Test notification falls back to a LOCAL notification when real
+         Expo push isn't available (Expo Go SDK 53+ / no EAS projectId).
+         The diagnostics card on /notifications now explains *why* real push
+         is or isn't working.
+
+      Please backend-test only:
+        - POST /api/household/shopping behavior matrix for owner vs member
+          (status + approved_by + approved_at), incl. kind="reimbursement".
+        - Confirm regression: existing PATCH/purchase flows on an already-
+          approved request still work.
+      Frontend deep-link / Bell badge will be verified manually by the user
+      on their phone — DO NOT run the frontend test agent.
+  - agent: "testing"
+    message: |
+      Phase 12.1 backend test (2026-05-08) — 9/9 PASS via /app/backend_test.py
+      against the public preview URL.
+
+      ✅ Owner kind=request auto-approves (status=approved, approved_by=owner.user_id,
+         approved_at non-null ISO timestamp, kind preserved).
+      ✅ Owner kind=reimbursement also auto-approves identically.
+      ✅ Fresh member (joined via space invite_code) → POST /household/shopping
+         remains pending with approved_by=null, approved_at=null.
+      ✅ Fresh staff-user (joined via /household/staff/join with the staff record's
+         invite_code) submitting with requested_by_staff_id → also remains pending
+         with approved_by=null. Staff cannot self-approve.
+      ✅ Regression: member POST /household/shopping/{owner_request_id}/purchase
+         {actual_price:25000} on the auto-approved owner request → 200,
+         status=purchased, purchased_by=member.user_id, approved_by still
+         points to the owner. Auto-approval doesn't break the downstream
+         purchase pipeline.
+
+      Phase 12.1 backend task marked working=true, needs_retesting=false.
+      No backend bugs surfaced. Owner credentials test1234 worked (Robot1
+      from the review prompt was not needed). Frontend was NOT tested per
+      main agent instruction.
