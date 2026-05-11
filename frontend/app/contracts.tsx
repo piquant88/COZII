@@ -83,7 +83,12 @@ export default function ContractsScreen() {
 
       {/* Staff filter chips */}
       {isOwner && staffList.length > 0 && (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.filterScroll}
+          contentContainerStyle={styles.filterRow}
+        >
           <TouchableOpacity
             style={[styles.chip, !staffFilter && styles.chipActive]}
             onPress={() => setStaffFilter(null)}
@@ -195,8 +200,16 @@ const styles = StyleSheet.create({
   addBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center', ...shadows.button },
   kicker: { fontSize: 11, color: colors.textMuted, fontWeight: '700', textTransform: 'uppercase' },
   title: { fontSize: 24, fontWeight: '900', color: colors.textMain, letterSpacing: -0.5 },
-  filterRow: { paddingHorizontal: spacing.md, gap: 6, paddingBottom: spacing.sm },
-  chip: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: radius.full, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, marginRight: 6 },
+  filterScroll: { flexGrow: 0, maxHeight: 44 },
+  filterRow: { paddingHorizontal: spacing.md, gap: 6, paddingBottom: spacing.sm, alignItems: 'center' },
+  chip: {
+    paddingHorizontal: 14, paddingVertical: 7,
+    borderRadius: radius.full,
+    backgroundColor: colors.surface,
+    borderWidth: 1, borderColor: colors.border,
+    marginRight: 6,
+    alignSelf: 'center',
+  },
   chipActive: { backgroundColor: colors.textMain, borderColor: colors.textMain },
   chipTxt: { fontSize: 12, fontWeight: '700', color: colors.textMain },
   scroll: { padding: spacing.md, paddingTop: 0 },

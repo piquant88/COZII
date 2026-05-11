@@ -3874,3 +3874,48 @@ agent_communication:
       No backend bugs surfaced. Owner credentials test1234 worked (Robot1
       from the review prompt was not needed). Frontend was NOT tested per
       main agent instruction.
+
+#============== Phase 12.2 — Deep-link section param + chip layout fix ==============
+frontend:
+  - task: "Phase 12.2 — Notifications open the correct household section + agreements pill layout"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/(tabs)/household.tsx, /app/frontend/src/pushNotifications.ts, /app/frontend/app/contracts.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          User feedback:
+            • All in-app notifications were always landing on "People" inside the
+              Household tab.
+            • The staff-name filter pills on the Agreements page were getting
+              vertically stretched.
+
+          Fixes:
+            1. household.tsx now reads `?section=` from useLocalSearchParams and
+               sets/updates the initial section accordingly. Allowed values:
+               people | staff | tasks | attendance | shopping | roles | handbook.
+            2. routeForNotification in pushNotifications.ts updated:
+                 - task_* → /(tabs)/household?section=tasks
+                 - wage_* → /(tabs)/household?section=staff
+                 - shopping_* → /(tabs)/household?section=shopping
+               (contract_* and daily_digest unchanged.)
+            3. contracts.tsx filter ScrollView now uses `style={flexGrow:0,
+               maxHeight:44}` and `contentContainerStyle={alignItems:'center'}`
+               so chips stop stretching vertically. Chip padding bumped slightly
+               (12/6 → 14/7) for a tighter touch target.
+
+          User will verify on phone — no automated retest required.
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Two quick polish fixes following user feedback:
+        • Deep links now route to the actual subsection of /(tabs)/household
+          (tasks for task notifs, shopping for shopping notifs, staff for wage).
+        • Agreements page filter pills no longer stretch vertically.
+      No backend changes. User to verify on phone.
+

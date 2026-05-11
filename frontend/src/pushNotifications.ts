@@ -203,13 +203,13 @@ export function routeForNotification(kind: string | undefined, data: any): strin
     case 'task_assigned':
     case 'task_done':
     case 'task_comment':
-      return '/(tabs)/household';
+      return '/(tabs)/household?section=tasks';
     case 'wage_paid':
     case 'wage_confirmed':
-      return '/(tabs)/household';
+      return '/(tabs)/household?section=staff';
     case 'shopping_request':
     case 'shopping_status':
-      return '/(tabs)/household';
+      return '/(tabs)/household?section=shopping';
     default:
       return null;
   }

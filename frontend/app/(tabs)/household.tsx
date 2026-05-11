@@ -4,7 +4,7 @@ import {
   ActivityIndicator, Modal, KeyboardAvoidingView, Platform, TextInput, Alert, Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect, useRouter } from 'expo-router';
+import { useFocusEffect, useRouter, useLocalSearchParams } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import { useAuth } from '../../src/AuthContext';
 import { api } from '../../src/api';
@@ -37,7 +37,25 @@ const HANDBOOK_TEMPLATES = [
 export default function HouseholdHub() {
   const router = useRouter();
   const { activeSpace } = useAuth();
-  const [section, setSection] = useState<typeof SECTIONS[number]['key']>('people');
+  const params = useLocalSearchParams<{ section?: string }>();
+  const initialSection: typeof SECTIONS[number]['key'] = (() => {
+    const s = (params?.section || '').toString();
+    const allowed = SECTIONS.map((x) => x.key) as readonly string[];
+    return (allowed.includes(s) ? s : 'people') as typeof SECTIONS[number]['key'];
+  })();
+  const [section, setSection] = useState<typeof SECTIONS[number]['key']>(initialSection);
+
+  // Respond to navigation that arrives with a ?section= query (e.g. from a
+  // notification deep link) even after the screen is already mounted.
+  useEffect(() => {
+    const s = (params?.section || '').toString();
+    if (!s) return;
+    const allowed = SECTIONS.map((x) => x.key) as readonly string[];
+    if (allowed.includes(s) && s !== section) {
+      setSection(s as typeof SECTIONS[number]['key']);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params?.section]);
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
 
