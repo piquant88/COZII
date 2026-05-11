@@ -3919,3 +3919,174 @@ agent_communication:
         • Agreements page filter pills no longer stretch vertically.
       No backend changes. User to verify on phone.
 
+
+
+#============== Phase 13 — server.py refactor regression ==============
+backend:
+  - task: "Phase 13 — server.py refactor regression"
+    implemented: true
+    working: false
+    file: "/app/backend/core.py, /app/backend/models.py, /app/backend/routes/*.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: false
+        agent: "testing"
+        comment: |
+          Phase 13 refactor regression smoke run (2026-05-11) against
+          http://localhost:8001 via /app/backend_test_phase13.py.
+
+          ❌ CRITICAL — the refactor is INCOMPLETE. Multiple modules import
+          symbols that are not actually exported / imported, and the backend
+          throws NameError on most non-auth endpoints. I had to apply three
+          minor fixes just to get past /api/auth/login → /api/auth/me; the
+          remaining failures are listed below and need to be patched by the
+          main agent before retesting.
+
+          ── Minor fixes I applied (test-runner unblock only) ─────────────
+          1) /app/backend/routes/auth.py — added `SESSION_DURATION_DAYS` to
+             the `from core import (...)` block. Without it, every
+             /api/auth/login + /api/auth/register raised
+               `NameError: name 'SESSION_DURATION_DAYS' is not defined`
+             at lines 58, 78, 121, 129.
+          2) /app/backend/models.py — top-level `from datetime import
+             datetime, timezone` (only `datetime` was imported, so
+             `_ensure_tz_aware` raised `NameError: name 'timezone' is not
+             defined` for every TZAware response containing a naive datetime
+             — i.e. essentially every model returning `created_at`).
+          3) /app/backend/core.py — `get_current_user` referenced `User(...)`
+             which was undefined in core.py (no longer imports from models;
+             models imports `now_utc`/`gen_id` from core → potential circular
+             dependency). Patched with a local-import:
+               `from models import User as _User; return _User(**user_doc)`
+             Without this, every authenticated endpoint returned 500
+             `NameError: name 'User' is not defined`.
+
+          ── REMAINING REFACTOR REGRESSIONS (main agent must fix) ─────────
+
+          The routes/*.py modules reference private helper functions
+          (_foo) that live in /app/backend/core.py but are NOT included in
+          the `from core import (...)` block. Because the legacy server.py
+          defined these in the same module, they were always in-scope; in
+          the new split layout they must be explicitly imported.
+
+          Per route module:
+
+          A) routes/contracts.py — missing:
+               _client_ip, _render_contract_body
+          B) routes/finance.py — missing:
+               _compute_bill_state
+          C) routes/household.py — missing:
+               _ensure_default_roles, _attach_role_name,
+               _gen_staff_invite_code, _ensure_wages_category,
+               _task_due_on, _create_notification
+          D) routes/inventory.py — missing:
+               _parse_iso_date, _send_digest_for_space,
+               _search_product_image, _extract_json_block
+          E) routes/push.py — missing:
+               _get_user_notification_prefs
+          F) routes/reports.py — missing:
+               _compute_bill_state, _period_range
+
+          Confirmed runtime symptoms while running the smoke test (after
+          the 3 minor fixes above were applied):
+
+          ✅ POST /api/auth/login → 200 (after fix #1)
+          ✅ GET  /api/auth/me   → 200 (after fix #3)
+          ✅ GET  /api/spaces, POST /api/spaces, /api/spaces/{id}/members,
+             /api/spaces/{id}/my_role, PATCH /api/spaces/{id}/digest-prefs
+             all 200 — spaces.py routes are correctly wired.
+          ✅ POST /api/categories → 200, POST /api/items → 200,
+             PATCH /api/items/{id} → 200, GET /api/categories → 200,
+             GET /api/items → 200, GET /api/bills → 200,
+             GET /api/agreement → 200, GET /api/balances → 200.
+          ❌ GET /api/inventory/alerts → 500 (likely _parse_iso_date /
+             _send_digest_for_space dependency).
+          ❌ POST /api/bills → 500
+             (`NameError: _compute_bill_state not defined`).
+          ❌ GET /api/reports/finance → 500
+             (`NameError: _period_range not defined`).
+          ❌ GET /api/household/roles → 500
+             (`NameError: _ensure_default_roles not defined`).
+          ❌ The follow-up household endpoints (family, staff, handbook,
+             tasks, shopping, shortcuts, attendance, counts) were not
+             reached because the test stopped on the household.py
+             NameError cascade.
+          📝 Documents (GET /api/documents, /folders), Notifications (GET
+             /api/notifications, POST /read_all), Contracts
+             (GET /api/contract-templates), Push (POST/DELETE /push-token,
+             GET/PUT /notification-prefs, POST /push-test), Misc
+             (/api/, /api/activity, /api/stats), and Socket.IO mount were
+             NOT exercised in this run because of the early NameErrors;
+             they require the above fixes before the smoke test can
+             complete.
+
+          ── Recommended fix ─────────────────────────────────────────────
+          In each affected route module, add the missing helpers to the
+          `from core import (...)` block (or simply add a single line
+            `from core import _ensure_default_roles, _attach_role_name, ...`
+          right after the main import). Once the missing imports are
+          added, re-run /app/backend_test_phase13.py — the script is
+          already designed to walk through every Phase 1–12.1 domain and
+          will surface any remaining issues.
+
+          The Phase 12.1 owner-shopping auto-approve check, contracts
+          full lifecycle, /reports/household, /household/export,
+          /api/notifications mark-read, and Socket.IO hello/join_room
+          asserts are all encoded in the script but were never reached.
+
+          ── Suggestion (architectural) ───────────────────────────────────
+          To future-proof, consider re-exporting all private helpers from
+          core.py via an explicit `__all__` list, OR collapsing the
+          `from core import (...)` per-route blocks into
+          `from core import *` (still safer than the current state since
+          the helpers truly live in core.py).
+
+          stuck_count remains 0 because this is the first regression run;
+          the main agent has not previously tried/failed to fix these.
+
+metadata:
+  created_by: "main_agent"
+  version: "2.1"
+  test_sequence: 16
+  run_ui: false
+
+test_plan:
+  current_focus:
+    - "Phase 13 — server.py refactor regression"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Phase 13 refactor smoke run (2026-05-11) — INCOMPLETE refactor.
+      The 5000-line server.py split into core.py + models.py + routes/*.py
+      has multiple missing imports that prevent most endpoints from
+      working. After 3 minor unblock-fixes I applied (see status_history
+      under "Phase 13 — server.py refactor regression"), the test could
+      reach Auth + Spaces + parts of Inventory/Finance, but immediately
+      tripped on missing helper imports in routes/household.py,
+      routes/reports.py, routes/finance.py, routes/inventory.py,
+      routes/contracts.py, and routes/push.py.
+
+      ACTION ITEMS for main agent:
+        1. Add the missing helper imports listed in the task
+           status_history to each routes/*.py module's
+           `from core import (...)` block. Helpers are already defined
+           in core.py — they just aren't re-exported into the routes.
+        2. After applying, re-run /app/backend_test_phase13.py. It is a
+           single-file script that covers Auth, Spaces, Inventory,
+           Finance, Household (incl. Phase 12.1 owner auto-approve),
+           Documents, Notifications, Contracts full lifecycle, Reports,
+           Push, Misc, and Socket.IO connect/hello. ~75 assertions.
+        3. Don't re-fix the 3 imports I already patched (auth.py,
+           models.py, core.py) — they're correct as-is. Those three are
+           also true bugs in the refactor though, so please leave them
+           in place rather than reverting.
+
+      Per protocol, NO frontend testing was performed.
+
+      YOU MUST ASK USER BEFORE DOING FRONTEND TESTING
