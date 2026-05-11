@@ -1,6 +1,8 @@
 """Auto-generated route module — split from server.py."""
 from __future__ import annotations
 
+import io
+import csv as _csv
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Dict, Any, Tuple
 from fastapi import HTTPException, Depends, Request, Response
