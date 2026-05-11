@@ -128,8 +128,13 @@ async def main() -> int:
         # ── 4. FINANCE ──────────────────────────────────────────
         print("\n[4] finance.py")
         r = await c.get(f"/balances?space_id={space_id}", headers=H)
-        check("GET /balances → 200 + list",
-              r.status_code == 200 and isinstance(r.json(), list), r.text[:200])
+        # Endpoint returns a dict with you_owe/owed_to_you/others/net/etc.
+        body_bal = r.json() if r.status_code == 200 else {}
+        check("GET /balances → 200 + dict shape",
+              r.status_code == 200 and isinstance(body_bal, dict)
+              and "you_owe" in body_bal and "owed_to_you" in body_bal
+              and "net" in body_bal,
+              r.text[:200])
 
         r = await c.get(f"/bills?space_id={space_id}", headers=H)
         bills = r.json() if r.status_code == 200 else []
@@ -278,8 +283,8 @@ async def main() -> int:
                   r.status_code == 200 and "total_spent" in r.json() and "staff" in r.json(),
                   r.text[:200])
 
-            r = await c.get(f"/household/export?space_id={hid}", headers=H)
-            check("GET /household/export → 200",
+            r = await c.get(f"/reports/household/export?space_id={hid}", headers=H)
+            check("GET /reports/household/export → 200",
                   r.status_code == 200, r.text[:200])
 
         # ── 10. PUSH ────────────────────────────────────────────

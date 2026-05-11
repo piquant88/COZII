@@ -4090,3 +4090,142 @@ agent_communication:
       Per protocol, NO frontend testing was performed.
 
       YOU MUST ASK USER BEFORE DOING FRONTEND TESTING
+
+## 2026-05-11 — Phase 13 server.py refactor RE-TEST (round 2)
+
+backend:
+  - task: "Phase 13 — server.py refactor regression smoke"
+    implemented: true
+    working: false
+    file: "/app/backend/routes/*.py, /app/backend/core.py, /app/backend/models.py, /app/backend/server.py"
+    stuck_count: 1
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: false
+        agent: "testing"
+        comment: |
+          Re-ran /app/backend_test_phase13.py (round 2) after main agent
+          patched the previously-missing helper imports into the six
+          routes/*.py modules.
+
+          RESULT: 49 PASS / 2 FAIL (out of 51 assertions).
+
+          The earlier round-1 import bugs are confirmed resolved — Auth,
+          Spaces, Inventory, Finance (incl. /bills, /bills/{id}/pay,
+          /agreement, /reports/finance), Household (incl. Phase 12.1 owner
+          shopping auto-approve which returns status="approved" and
+          approved_by=<owner_id>), Documents, Notifications, Reports
+          (/reports/household), Push (full register→prefs→test→delete
+          cycle), Misc (/api/, /activity, /stats), and Socket.IO
+          connect+hello all return 200 / behave correctly.
+
+          Socket.IO + side-effects spot-checks (as required by review):
+            ✅ socket.io connect at /api/socket.io with auth={token}  
+               succeeds (sio_client.connected == true).
+            ✅ hello event payload received with user_id == owner.user_id.
+            ✅ /api/activity returns ≥1 row after recent writes
+               (record_activity → db.activity_log still writing).
+            ✅ POST /api/users/push-test → returns {sent: <bool>} (push
+               fire-and-forget path still wired; no 500). DELETE
+               /users/push-token then POST /users/push-test again still
+               returns 200 (no 500 with zero tokens).
+            ✅ POST /household/shopping (owner, kind=request) — Phase 12.1
+               auto-approve still active: response.status == "approved",
+               response.approved_by == owner.user_id.
+
+          ❌ TWO new refactor regressions still outstanding — both are
+          the same class of missing-name-in-`from core import (...)` bug
+          that the prior round fixed for helpers, but the constants /
+          stdlib aliases were missed:
+
+          1) GET /api/contract-templates → 500 Internal Server Error
+             Traceback:
+               File "/app/backend/routes/contracts.py", line 35,
+                 in list_contract_templates
+                   return CONTRACT_TEMPLATES
+               NameError: name 'CONTRACT_TEMPLATES' is not defined
+             Root cause: `CONTRACT_TEMPLATES` is defined in
+             /app/backend/core.py:769 (a list of 4 template dicts) but
+             is NOT included in routes/contracts.py's
+             `from core import (...)` block. Add `CONTRACT_TEMPLATES`
+             to the import list.
+             Impact: front-end "New contract" template picker is broken
+             (cannot fetch the 4 starter templates: blank, NDA, work
+             agreement, lease).
+
+          2) GET /api/reports/household/export → 500 Internal Server Error
+             Traceback:
+               File "/app/backend/routes/reports.py", line 240,
+                 in export_household_report
+                   buf = io.StringIO()
+               NameError: name 'io' is not defined
+             Root cause: `routes/reports.py` uses `io.StringIO()` and
+             likely `csv` for CSV export, but `import io` (and probably
+             `import csv`) was lost during the refactor. Add `import io`
+             at the top of routes/reports.py (and `import csv` if also
+             used in that function).
+             Impact: monthly household-report CSV/Excel export endpoint
+             is unusable.
+
+          Side notes (not failures):
+            - GET /api/balances returns the dict shape
+              {you_owe, owed_to_you, others, total_you_owe,
+               total_owed_to_you, net, shared_categories_count}, not a
+              bare list. Test assertion updated to match the actual API
+              contract — this is NOT a regression, just clarifying for
+              the main agent that the test now asserts the dict shape.
+            - The household export route lives at
+              /api/reports/household/export (not /api/household/export).
+              The test script path was corrected.
+
+          FIX (3 lines max):
+            # routes/contracts.py — add CONTRACT_TEMPLATES to the core import
+            from core import (..., CONTRACT_TEMPLATES, ...)
+
+            # routes/reports.py — add stdlib import (top of file)
+            import io
+            # Verify if `csv` is also used inside export_household_report;
+            # if so, also add `import csv`.
+
+          After both 1-line additions the test should pass 51/51.
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Phase 13 refactor RE-TEST round 2 results — 49/51 PASS.
+      Big win: every previously-failing import that you patched is
+      green now. Auth, Spaces, Inventory, Finance, Household
+      (incl. Phase 12.1 owner shopping auto-approve), Documents,
+      Notifications, Reports (/reports/household), Push, Misc and
+      Socket.IO connect+hello all behave correctly. record_activity
+      is still writing db.activity_log rows and the push fire-and-
+      forget path still returns 200 (no 500) on /users/push-test
+      with and without tokens.
+
+      TWO refactor regressions still outstanding — same missing-
+      import class as the previous round, but constants/stdlib this
+      time:
+
+      1) GET /api/contract-templates → 500
+         routes/contracts.py uses `CONTRACT_TEMPLATES` but never
+         imports it from core (defined in core.py:769). Just add
+         `CONTRACT_TEMPLATES` to the `from core import (...)` line
+         in routes/contracts.py.
+
+      2) GET /api/reports/household/export → 500
+         routes/reports.py uses `io.StringIO()` but `import io` is
+         missing at the top of the file. Add `import io` (and
+         double-check that `import csv` is present if the function
+         also calls csv.writer).
+
+      Once those two one-line fixes go in, the suite will be
+      51/51 PASS. Per the review request I did NOT mark the Phase
+      13 task as working=true since these two endpoints are still
+      broken — the front-end "new contract template picker" and the
+      "monthly report CSV export" are non-functional.
+
+      Per protocol, NO frontend testing was performed.
+
+      YOU MUST ASK USER BEFORE DOING FRONTEND TESTING
+
