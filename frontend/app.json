@@ -1,15 +1,16 @@
 {
   "expo": {
-    "name": "frontend",
-    "slug": "frontend",
+    "name": "Cozii",
+    "slug": "cozii",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "frontend",
+    "scheme": "cozii",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
+      "bundleIdentifier": "app.cozii.mobile",
       "infoPlist": {
         "NSCameraUsageDescription": "Scan receipts to add items automatically",
         "NSPhotoLibraryUsageDescription": "Pick receipt photos and item images",
@@ -17,6 +18,7 @@
       }
     },
     "android": {
+      "package": "app.cozii.mobile",
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#000"
@@ -58,6 +60,9 @@
     },
     "experiments": {
       "typedRoutes": true
+    },
+    "extra": {
+      "backendUrl": "https://family-wallet-21.preview.emergentagent.com"
     }
   }
 }

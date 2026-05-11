@@ -1,6 +1,48 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Platform } from 'react-native';
+import Constants from 'expo-constants';
 
-const BASE_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
+/**
+ * Backend URL resolution order:
+ *   1. EXPO_PUBLIC_BACKEND_URL (set in /app/frontend/.env at build time)
+ *   2. expo.extra.backendUrl from app.json (always shipped in the JS bundle)
+ *   3. Hardcoded production fallback (last-resort safety net so native builds
+ *      NEVER hit "Network request failed" because of a missing env var).
+ *
+ * On web in local dev we ALSO accept window.location.origin as a fallback so
+ * `/api/*` routes go through the dev proxy, but for native builds we always
+ * want the deployed URL.
+ */
+const PROD_BACKEND_FALLBACK = 'https://family-wallet-21.preview.emergentagent.com';
+
+function resolveBackendUrl(): string {
+  // 1) Build-time env var
+  const fromEnv = (process.env.EXPO_PUBLIC_BACKEND_URL || '').trim();
+  if (fromEnv) return fromEnv.replace(/\/+$/, '');
+
+  // 2) app.json `expo.extra.backendUrl`
+  const fromExtra = (Constants as any)?.expoConfig?.extra?.backendUrl
+    || (Constants as any)?.manifest?.extra?.backendUrl
+    || (Constants as any)?.manifest2?.extra?.expoClient?.extra?.backendUrl;
+  if (typeof fromExtra === 'string' && fromExtra.trim()) {
+    return fromExtra.trim().replace(/\/+$/, '');
+  }
+
+  // 3) Web local dev: same-origin proxy
+  if (Platform.OS === 'web' && typeof window !== 'undefined' && window.location?.origin) {
+    return window.location.origin.replace(/\/+$/, '');
+  }
+
+  // 4) Hardcoded prod fallback (never gives up)
+  return PROD_BACKEND_FALLBACK;
+}
+
+const BASE_URL = resolveBackendUrl();
+
+if (__DEV__) {
+  // eslint-disable-next-line no-console
+  console.log('[api] BASE_URL =', BASE_URL, '| platform =', Platform.OS);
+}
 
 const TOKEN_KEY = 'cozii_token';
 const SPACE_KEY = 'cozii_active_space';
@@ -38,12 +80,29 @@ async function request<T = any>(
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
 
-  const res = await fetch(`${BASE_URL}/api${path}`, {
+  // `credentials: 'include'` is a web-only fetch option (for cookie-based
+  // session). Including it on native is harmless but `fetch` polyfills behave
+  // differently on some RN versions, so we omit it there.
+  const init: RequestInit = {
     method,
     headers,
-    credentials: 'include',
     body: body ? JSON.stringify(body) : undefined,
-  });
+  };
+  if (Platform.OS === 'web') {
+    (init as any).credentials = 'include';
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(`${BASE_URL}/api${path}`, init);
+  } catch (e: any) {
+    // Surface a clearer message than "Network request failed"
+    const reason = e?.message || 'unknown';
+    const err: any = new Error(`Network error reaching ${BASE_URL}${path}: ${reason}`);
+    err.cause = e;
+    err.isNetworkError = true;
+    throw err;
+  }
 
   let data: any = null;
   const text = await res.text();

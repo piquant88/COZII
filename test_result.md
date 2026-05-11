@@ -4332,3 +4332,80 @@ agent_communication:
       could be inlined into their corresponding route modules to reduce
       models.py size, but that's optional polish.
 
+
+#============== Phase 14 — Mobile auth fix (iOS native build) ==============
+frontend:
+  - task: "Phase 14 — Native backend URL + real Google sign-in on mobile"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/api.ts, /app/frontend/src/googleAuth.ts, /app/frontend/app/welcome.tsx, /app/frontend/app.json"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Two issues from user: iOS build shows "Network request failed" on
+          signup/login, and "Continue with Google" was UI-only on native.
+
+          Fixes:
+
+          1) api.ts — robust BASE_URL resolver with fallback chain:
+             a. process.env.EXPO_PUBLIC_BACKEND_URL (build-time env var)
+             b. Constants.expoConfig.extra.backendUrl (shipped in app.json)
+             c. window.location.origin on web (local dev)
+             d. hardcoded production fallback
+                ('https://family-wallet-21.preview.emergentagent.com')
+             Also: removed `credentials: 'include'` from native fetch (web-only),
+             and added a clearer "Network error reaching <url>" message when
+             fetch fails so future regressions are easier to diagnose.
+
+          2) app.json — added `extra.backendUrl` (always shipped in the JS
+             bundle), set `scheme` from "frontend" → "cozii", added
+             `ios.bundleIdentifier = "app.cozii.mobile"` and matching
+             `android.package`. App name updated to "Cozii".
+
+          3) New src/googleAuth.ts — `googleSignInNative()` opens
+             https://auth.emergentagent.com with a `redirect=cozii://...` param
+             via `WebBrowser.openAuthSessionAsync`. On Android this uses Custom
+             Tabs; on iOS this uses ASWebAuthenticationSession (built-in,
+             secure, doesn't trigger a "wants to use Google" prompt). After the
+             user signs in, the OAuth page redirects to
+             `cozii://auth-callback#session_id=...`. We extract the session_id
+             from the returned URL and hand it off to
+             `loginWithGoogleSession(...)` exactly like the web flow already
+             does. No backend changes required.
+
+          4) welcome.tsx — `handleGoogle()` now:
+             - Keeps the existing web behavior (full-page redirect to
+               auth.emergentagent.com).
+             - On native, calls `googleSignInNative()` and runs the existing
+               `loginWithGoogleSession(sessionId)` from AuthContext on success
+               (creates account if new, logs in if existing — semantics
+               unchanged from web).
+             - Shows a spinner and "Opening Google…" label while busy.
+             - Falls back to a clean Alert on errors.
+
+          Email/password flows are untouched.
+
+          USER-FACING NEXT STEPS (told the user separately):
+            • REBUILD required (native config + new scheme).
+            • No Google Cloud console setup needed because we're still using
+              Emergent's hosted OAuth, which already has Google sign-in
+              configured.
+            • Redirect URI to whitelist (if Emergent ever asks): cozii://auth-callback
+              (auto-derived via expo-linking).
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Mobile auth fix complete on the frontend side. No backend changes
+      needed. Approach kept lightweight: re-uses the existing
+      /api/auth/google-session endpoint via Emergent's hosted OAuth + an
+      in-app browser auth session on native.
+
+      Will NOT run frontend tests automatically — user will verify on
+      device after rebuilding the iOS app. The web flow is unchanged and
+      verified by visual screenshot.
+

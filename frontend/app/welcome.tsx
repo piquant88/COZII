@@ -1,22 +1,47 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
-  View, Text, StyleSheet, TouchableOpacity, Image, Platform,
+  View, Text, StyleSheet, TouchableOpacity, Image, Platform, ActivityIndicator, Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { colors, radius, spacing, shadows } from '../src/theme';
+import { googleSignInNative } from '../src/googleAuth';
+import { useAuth } from '../src/AuthContext';
 
 export default function Welcome() {
   const router = useRouter();
+  const { loginWithGoogleSession } = useAuth();
+  const [googleBusy, setGoogleBusy] = useState(false);
 
-  const handleGoogle = () => {
+  const handleGoogle = async () => {
+    if (googleBusy) return;
+
+    // Web: use the existing full-page redirect that the GoogleSessionInterceptor
+    // in _layout.tsx already handles.
     if (Platform.OS === 'web' && typeof window !== 'undefined') {
       // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
       const redirectUrl = window.location.origin + '/';
       window.location.href = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
-    } else {
-      // On native, fallback to email login for now
-      router.push('/login');
+      return;
+    }
+
+    // Native: open an in-app browser auth session, capture the session_id from
+    // the redirect URL, and exchange for a Cozii token.
+    setGoogleBusy(true);
+    try {
+      const r = await googleSignInNative();
+      if (r.status === 'success') {
+        await loginWithGoogleSession(r.sessionId);
+        router.replace('/(tabs)/home');
+      } else if (r.status === 'cancel' || r.status === 'dismiss') {
+        // user backed out — silently ignore
+      } else {
+        Alert.alert('Google sign-in failed', r.message || 'Please try again or use email login.');
+      }
+    } catch (e: any) {
+      Alert.alert('Google sign-in failed', e?.message || 'Please try again or use email login.');
+    } finally {
+      setGoogleBusy(false);
     }
   };
 
@@ -41,16 +66,21 @@ export default function Welcome() {
 
         <View style={styles.actions}>
           <TouchableOpacity
-            style={styles.googleBtn}
+            style={[styles.googleBtn, googleBusy && { opacity: 0.6 }]}
             onPress={handleGoogle}
             activeOpacity={0.85}
+            disabled={googleBusy}
             testID="welcome-google-btn"
           >
-            <Image
-              source={{ uri: 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c1/Google_%22G%22_logo.svg/512px-Google_%22G%22_logo.svg.png' }}
-              style={styles.googleIcon}
-            />
-            <Text style={styles.googleText}>Continue with Google</Text>
+            {googleBusy ? (
+              <ActivityIndicator color={colors.textMain} />
+            ) : (
+              <Image
+                source={{ uri: 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c1/Google_%22G%22_logo.svg/512px-Google_%22G%22_logo.svg.png' }}
+                style={styles.googleIcon}
+              />
+            )}
+            <Text style={styles.googleText}>{googleBusy ? 'Opening Google…' : 'Continue with Google'}</Text>
           </TouchableOpacity>
 
           <TouchableOpacity
