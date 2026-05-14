@@ -4409,3 +4409,83 @@ agent_communication:
       device after rebuilding the iOS app. The web flow is unchanged and
       verified by visual screenshot.
 
+
+#============== Phase 14.1 — Google OAuth backend fix ==============
+backend:
+  - task: "Phase 14.1 — POST /api/auth/google-session 500 due to missing EMERGENT_AUTH_URL import"
+    implemented: true
+    working: true
+    file: "/app/backend/routes/auth.py, /app/backend/routes/spaces.py, /app/backend/routes/household.py, /app/backend/routes/inventory.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: false
+        agent: "user"
+        comment: |
+          User reported iOS native build: Google OAuth handshake works,
+          redirect back into app works, but then app shows
+          "Google sign-in failed — Request failed (500)" after selecting an
+          account.
+      - working: true
+        agent: "main"
+        comment: |
+          ROOT CAUSE: After the Phase 13 server.py refactor, the
+          /api/auth/google-session route in routes/auth.py references the
+          constant EMERGENT_AUTH_URL (which lives in core.py) but the
+          constant wasn't included in the route module's
+          `from core import (...)` block. Python raised
+          `NameError: name 'EMERGENT_AUTH_URL' is not defined`, which FastAPI
+          translated into a 500.
+
+          Confirmed via /var/log/supervisor/backend.err.log traceback:
+            File "/app/backend/routes/auth.py", line 89, in google_session
+              r = await hclient.get(EMERGENT_AUTH_URL, headers=...)
+            NameError: name 'EMERGENT_AUTH_URL' is not defined
+
+          Fix:
+            • Added EMERGENT_AUTH_URL to routes/auth.py's import block.
+            • Defensive scan for ALL_CAPS module-level constants in core.py
+              that any route file references but doesn't import. Caught 3 more
+              latent bugs from the same refactor:
+                - household.py and spaces.py both reference DEFAULT_STAFF_PERMS
+                  and DEFAULT_HOUSEHOLD_ROLES.
+                - inventory.py references EMERGENT_LLM_KEY,
+                  AI_SCAN_MODEL_NAME, AI_SCAN_MODEL_PROVIDER (used by the AI
+                  receipt scan flow).
+              All patched into the corresponding `from core import (...)`
+              blocks.
+            • Re-ran the Phase 13 regression suite: 51/51 PASS.
+            • Re-tested POST /api/auth/google-session with a bogus session_id
+              → now returns proper 401 "Invalid session ID" instead of 500
+              (it correctly reaches Emergent's verification URL).
+
+          The google_session implementation itself was already correct:
+            1. Sends X-Session-ID header to Emergent's auth endpoint.
+            2. On 200, reads {email, name, picture, session_token}.
+            3. If user with that email exists, updates name/picture; else
+               creates a new user with auth_provider="google".
+            4. Inserts a row into db.user_sessions with the token.
+            5. Sets httpOnly secure cookie for web AND returns the token in
+               the JSON response body for native clients.
+            6. Frontend's loginWithGoogleSession() stores the token via
+               AsyncStorage and uses it as the Authorization: Bearer header
+               on subsequent requests — preserving existing session
+               architecture.
+
+          NO iOS REBUILD REQUIRED. This was a backend-only fix.
+          Email/password auth untouched.
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Pure backend bug from the Phase 13 refactor — EMERGENT_AUTH_URL constant
+      wasn't re-exported into routes/auth.py. Fixed + ran a defensive scan
+      that turned up 3 more missing-constant imports in other route modules
+      (DEFAULT_STAFF_PERMS, DEFAULT_HOUSEHOLD_ROLES, EMERGENT_LLM_KEY,
+      AI_SCAN_MODEL_NAME, AI_SCAN_MODEL_PROVIDER). All patched.
+
+      Regression suite (51 tests) still 51/51 green. User does NOT need to
+      rebuild the iOS app — pure backend fix, the existing native build will
+      pick this up immediately.
+

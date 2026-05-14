@@ -23,6 +23,7 @@ from core import (
     is_space_owner, get_staff_record, assert_can_edit_category_items,
     emit_space_event, emit_user_event, notify_user, send_expo_push,
     _ensure_default_roles, _attach_role_name, _gen_staff_invite_code, _ensure_wages_category, _task_due_on, _create_notification,
+    DEFAULT_STAFF_PERMS, DEFAULT_HOUSEHOLD_ROLES,
 )
 # Pydantic models are re-exported through `models` for convenience.
 from models import *  # noqa: F401,F403

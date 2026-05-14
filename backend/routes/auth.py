@@ -23,6 +23,7 @@ from core import (
     is_space_owner, get_staff_record, assert_can_edit_category_items,
     emit_space_event, emit_user_event, notify_user, send_expo_push,
     SESSION_DURATION_DAYS,
+    EMERGENT_AUTH_URL,
 )
 # Pydantic models are re-exported through `models` for convenience.
 from models import *  # noqa: F401,F403

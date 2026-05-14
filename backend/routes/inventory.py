@@ -23,6 +23,7 @@ from core import (
     is_space_owner, get_staff_record, assert_can_edit_category_items,
     emit_space_event, emit_user_event, notify_user, send_expo_push,
     _parse_iso_date, _send_digest_for_space, _search_product_image, _extract_json_block, _compute_alerts_for_space,
+    EMERGENT_LLM_KEY, AI_SCAN_MODEL_NAME, AI_SCAN_MODEL_PROVIDER,
 )
 # Pydantic models are re-exported through `models` for convenience.
 from models import *  # noqa: F401,F403
