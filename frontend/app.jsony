@@ -1,16 +1,15 @@
 {
   "expo": {
-    "name": "Cozii",
-    "slug": "cozii",
+    "name": "frontend",
+    "slug": "frontend",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
-    "scheme": "cozii",
+    "icon": "./assets/images/favicon.png",
+    "scheme": "frontend",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "app.cozii.mobile",
       "infoPlist": {
         "NSCameraUsageDescription": "Scan receipts to add items automatically",
         "NSPhotoLibraryUsageDescription": "Pick receipt photos and item images",
@@ -18,17 +17,21 @@
       }
     },
     "android": {
-      "package": "app.cozii.mobile",
       "adaptiveIcon": {
-        "foregroundImage": "./assets/images/adaptive-icon.png",
-        "backgroundColor": "#000"
+        "foregroundImage": "./assets/images/favicon.png",
+        "backgroundColor": "#000000"
       },
+"statusBar": {
+"backgroundColor": "#000000"
+},
+
       "edgeToEdgeEnabled": true,
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.READ_EXTERNAL_STORAGE",
         "android.permission.READ_MEDIA_IMAGES"
-      ]
+      ],
+      "package": "com.piquant88.cozii"
     },
     "web": {
       "bundler": "metro",
@@ -43,30 +46,20 @@
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 200,
           "resizeMode": "contain",
-          "backgroundColor": "#000"
+          "backgroundColor": "#000000"
         }
       ],
-      "expo-web-browser",
-      [
-        "expo-notifications",
-        {
-          "color": "#FF8C73",
-          "defaultChannel": "default"
-        }
-      ]
+      "expo-web-browser"
     ],
-    "notification": {
-      "iosDisplayInForeground": true
-    },
     "experiments": {
       "typedRoutes": true
     },
     "extra": {
-      "backendUrl": "https://family-wallet-21.preview.emergentagent.com",
       "router": {},
       "eas": {
-        "projectId": "42729cf6-7c87-4397-a2f8-7e8a2f24adf5"
+        "projectId": "3c3eabdd-bdd9-4724-aa7f-bcf642ac5736"
       }
     }
   }
 }
+
