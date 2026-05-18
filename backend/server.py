@@ -38,3 +38,12 @@ async def _on_shutdown():
 
 
 app = socketio.ASGIApp(sio, other_asgi_app=fastapi_app, socketio_path='/api/socket.io')
+import os
+import uvicorn
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "server:app",
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 10000))
+    )
