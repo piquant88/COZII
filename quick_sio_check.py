@@ -1,6 +1,7 @@
 import asyncio, socketio, requests
 
-BASE = "http://localhost:8001"
+#BASE = "http://localhost:8001"
+BASE = "https://cozii.onrender.com"
 
 async def main():
     # Login to get token
