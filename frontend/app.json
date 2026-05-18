@@ -62,7 +62,7 @@
       "typedRoutes": true
     },
     "extra": {
-      "backendUrl": "https://family-wallet-21.preview.emergentagent.com",
+      "backendUrl": "https://cozii.onrender.com",
       "router": {},
       "eas": {
         "projectId": "42729cf6-7c87-4397-a2f8-7e8a2f24adf5"
