@@ -13,7 +13,9 @@ import Constants from 'expo-constants';
  * `/api/*` routes go through the dev proxy, but for native builds we always
  * want the deployed URL.
  */
-const PROD_BACKEND_FALLBACK = 'https://family-wallet-21.preview.emergentagent.com';
+
+//const PROD_BACKEND_FALLBACK = 'https://family-wallet-21.preview.emergentagent.com';
+const PROD_BACKEND_FALLBACK = 'https://cozii.onrender.com';
 
 function resolveBackendUrl(): string {
   // 1) Build-time env var
