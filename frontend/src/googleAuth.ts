@@ -13,7 +13,8 @@ try { (WebBrowser as any).maybeCompleteAuthSession?.(); } catch {}
 // This keeps the same architecture we already use for web — we just need to
 // open it in an in-app browser on native and listen for the callback URL.
 
-const EMERGENT_AUTH_BASE = 'https://auth.emergentagent.com/';
+//const EMERGENT_AUTH_BASE = 'https://auth.emergentagent.com/';
+const EMERGENT_AUTH_BASE = 'https://cozii.onrender.com/api/auth/google/login';
 
 /** Parse a redirect URL like `cozii://auth-callback#session_id=xyz` and pull
  *  out the session_id. Supports both hash-fragment and query-string variants. */
@@ -56,7 +57,8 @@ export async function googleSignInNative(): Promise<GoogleSignInResult> {
   // We let expo-linking generate it so it's correct in both dev (Expo Go) and
   // production builds.
   const redirectUrl = Linking.createURL('auth-callback');
-  const authUrl = `${EMERGENT_AUTH_BASE}?redirect=${encodeURIComponent(redirectUrl)}`;
+ // const authUrl = `${EMERGENT_AUTH_BASE}?redirect=${encodeURIComponent(redirectUrl)}`;
+  const authUrl = `${EMERGENT_AUTH_BASE}?redirect_url=${encodeURIComponent(redirectUrl)}`;
 
   let result;
   try {
