@@ -15,6 +15,9 @@ import string
 import uuid
 import httpx
 
+from google.oauth2 import id_token
+from google.auth.transport import requests as grequests
+
 from core import (
     app, api_router, db, sio, logger, client,
     now_utc, ensure_aware, hash_password, verify_password,
@@ -83,58 +86,132 @@ async def login(body: LoginRequest):
     return AuthResponse(token=token, user=User(**user_public))
 
 
+# @api_router.post("/auth/google-session", response_model=AuthResponse)
+# async def google_session(body: GoogleSessionRequest, response: Response):
+#     async with httpx.AsyncClient(timeout=15) as hclient:
+#         r = await hclient.get(EMERGENT_AUTH_URL, headers={"X-Session-ID": body.session_id})
+#     if r.status_code != 200:
+#         raise HTTPException(status_code=401, detail="Invalid session ID")
+#     data = r.json()
+#     email = data.get("email", "").lower().strip()
+#     name = data.get("name") or email.split("@")[0]
+#     picture = data.get("picture")
+#     emergent_token = data.get("session_token")
+#     if not email:
+#         raise HTTPException(status_code=400, detail="Invalid auth data")
+
+#     existing = await db.users.find_one({"email": email}, {"_id": 0})
+#     if existing:
+#         user_id = existing["user_id"]
+#         await db.users.update_one(
+#             {"user_id": user_id},
+#             {"$set": {"name": name, "picture": picture, "auth_provider": existing.get("auth_provider", "google")}},
+#         )
+#     else:
+#         user_id = gen_id("user")
+#         await db.users.insert_one({
+#             "user_id": user_id,
+#             "email": email,
+#             "name": name,
+#             "picture": picture,
+#             "auth_provider": "google",
+#             "created_at": now_utc(),
+#         })
+
+#     token = emergent_token or gen_session_token()
+#     await db.user_sessions.insert_one({
+#         "session_token": token,
+#         "user_id": user_id,
+#         "expires_at": now_utc() + timedelta(days=SESSION_DURATION_DAYS),
+#         "created_at": now_utc(),
+#     })
+
+#     # Also set httpOnly cookie for web flow
+#     response.set_cookie(
+#         key="session_token",
+#         value=token,
+#         max_age=SESSION_DURATION_DAYS * 24 * 3600,
+#         httponly=True,
+#         secure=True,
+#         samesite="none",
+#         path="/",
+#     )
+#     user_doc = await db.users.find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0})
+#     return AuthResponse(token=token, user=User(**user_doc))
+
 @api_router.post("/auth/google-session", response_model=AuthResponse)
 async def google_session(body: GoogleSessionRequest, response: Response):
-    async with httpx.AsyncClient(timeout=15) as hclient:
-        r = await hclient.get(EMERGENT_AUTH_URL, headers={"X-Session-ID": body.session_id})
-    if r.status_code != 200:
-        raise HTTPException(status_code=401, detail="Invalid session ID")
-    data = r.json()
-    email = data.get("email", "").lower().strip()
-    name = data.get("name") or email.split("@")[0]
-    picture = data.get("picture")
-    emergent_token = data.get("session_token")
-    if not email:
-        raise HTTPException(status_code=400, detail="Invalid auth data")
 
-    existing = await db.users.find_one({"email": email}, {"_id": 0})
-    if existing:
-        user_id = existing["user_id"]
-        await db.users.update_one(
-            {"user_id": user_id},
-            {"$set": {"name": name, "picture": picture, "auth_provider": existing.get("auth_provider", "google")}},
+    try:
+        idinfo = id_token.verify_oauth2_token(
+            body.session_id,
+            grequests.Request(),
+            os.getenv("GOOGLE_CLIENT_ID")
         )
-    else:
-        user_id = gen_id("user")
-        await db.users.insert_one({
+
+        email = idinfo.get("email", "").lower().strip()
+        name = idinfo.get("name") or email.split("@")[0]
+        picture = idinfo.get("picture")
+
+        if not email:
+            raise HTTPException(status_code=400, detail="Invalid Google account")
+
+        existing = await db.users.find_one({"email": email}, {"_id": 0})
+
+        if existing:
+            user_id = existing["user_id"]
+
+            await db.users.update_one(
+                {"user_id": user_id},
+                {
+                    "$set": {
+                        "name": name,
+                        "picture": picture,
+                        "auth_provider": "google",
+                    }
+                },
+            )
+
+        else:
+            user_id = gen_id("user")
+
+            await db.users.insert_one({
+                "user_id": user_id,
+                "email": email,
+                "name": name,
+                "picture": picture,
+                "auth_provider": "google",
+                "created_at": now_utc(),
+            })
+
+        token = gen_session_token()
+
+        await db.user_sessions.insert_one({
+            "session_token": token,
             "user_id": user_id,
-            "email": email,
-            "name": name,
-            "picture": picture,
-            "auth_provider": "google",
+            "expires_at": now_utc() + timedelta(days=SESSION_DURATION_DAYS),
             "created_at": now_utc(),
         })
 
-    token = emergent_token or gen_session_token()
-    await db.user_sessions.insert_one({
-        "session_token": token,
-        "user_id": user_id,
-        "expires_at": now_utc() + timedelta(days=SESSION_DURATION_DAYS),
-        "created_at": now_utc(),
-    })
+        response.set_cookie(
+            key="session_token",
+            value=token,
+            max_age=SESSION_DURATION_DAYS * 24 * 3600,
+            httponly=True,
+            secure=True,
+            samesite="none",
+            path="/",
+        )
 
-    # Also set httpOnly cookie for web flow
-    response.set_cookie(
-        key="session_token",
-        value=token,
-        max_age=SESSION_DURATION_DAYS * 24 * 3600,
-        httponly=True,
-        secure=True,
-        samesite="none",
-        path="/",
-    )
-    user_doc = await db.users.find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0})
-    return AuthResponse(token=token, user=User(**user_doc))
+        user_doc = await db.users.find_one(
+            {"user_id": user_id},
+            {"_id": 0, "password_hash": 0},
+        )
+
+        return AuthResponse(token=token, user=User(**user_doc))
+
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=str(e))
 
 
 @api_router.get("/auth/me", response_model=User)
