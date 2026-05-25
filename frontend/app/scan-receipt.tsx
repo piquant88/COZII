@@ -4,6 +4,7 @@ import {
   TextInput, ActivityIndicator, KeyboardAvoidingView, Platform,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
+import { pickImage as pickImageWithPermission } from '../src/imagePicker';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useAuth } from '../src/AuthContext';
@@ -69,27 +70,20 @@ export default function ScanReceipt() {
 
   const pickImage = async (fromCamera: boolean) => {
     setError(null);
-    try {
-      const options = {
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        allowsEditing: false,
-        quality: 0.5,
-        base64: true,
-      } as any;
-      const result = fromCamera
-        ? await ImagePicker.launchCameraAsync(options)
-        : await ImagePicker.launchImageLibraryAsync(options);
-      if (!result.canceled && result.assets?.[0]) {
-        const a = result.assets[0];
-        let base64 = a.base64 ? `data:image/jpeg;base64,${a.base64}` : a.uri;
-        // Downscale on web to save AI tokens
-        if (Platform.OS === 'web' && base64.startsWith('data:')) {
-          try { base64 = await downscaleBase64(base64, 1024); } catch {}
-        }
-        setPhoto(base64);
-        setItems([]);
-      }
-    } catch (e) { console.warn(e); }
+    const picked = await pickImageWithPermission({
+      source: fromCamera ? 'camera' : 'library',
+      allowsEditing: false,
+      quality: 0.5,
+      base64: true,
+    });
+    if (!picked) return; // cancelled or permission denied (helper showed Alert)
+    let base64 = picked.dataUri;
+    // Downscale on web to save AI tokens
+    if (Platform.OS === 'web' && base64.startsWith('data:')) {
+      try { base64 = await downscaleBase64(base64, 1024); } catch {}
+    }
+    setPhoto(base64);
+    setItems([]);
   };
 
   async function downscaleBase64(src: string, maxSide: number): Promise<string> {

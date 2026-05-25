@@ -4489,3 +4489,124 @@ agent_communication:
       rebuild the iOS app — pure backend fix, the existing native build will
       pick this up immediately.
 
+
+#============== Phase 15 — Bug fixes + Inventory +/- + audit log ==============
+backend:
+  - task: "Phase 15 — Defensive error handling + Inventory adjust/audit endpoints"
+    implemented: true
+    working: true
+    file: "/app/backend/routes/household.py, /app/backend/routes/inventory.py, /app/backend/models.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Bug fixes (user reported "Request failed (500)" on staff create + receipt scan):
+            • Reproduced both flows on the local backend — BOTH WORK without any
+              code change. The 500s the user is seeing on their iPhone must be
+              hitting a stale Render deployment that lags behind our recent
+              import-fix patches.
+            • Defensively wrapped POST /api/household/staff with try/except +
+              logger.exception(); now any future hidden failure surfaces as a
+              clean 400 with the actual reason instead of an opaque 500.
+            • scan_receipt already had try/except around the AI call paths —
+              left as-is.
+
+          NEW endpoints (Phase B — inventory +/- + audit):
+            • POST /api/items/{item_id}/adjust  {delta:float, note?:str,
+                                                  source?:str, source_id?:str}
+              - Increments/decrements quantity by `delta` (respects unit
+                step on the FE: 0.1 for kg/l/oz, 1 for countable units).
+              - Clamps at zero so quantities can never go negative.
+              - Auto-updates `status` based on the existing low_threshold logic.
+              - Writes an immutable row to a NEW `item_audit_log` collection:
+                  {audit_id, item_id, space_id, category_id, item_name,
+                   user_id, user_name, action, delta, prev_qty, new_qty,
+                   unit, note, source, source_id, created_at}
+              - Respects existing category staff_can_edit permission.
+              - Calls record_activity → real-time socket emit.
+            • GET  /api/items/{item_id}/audit?limit=50
+              - Returns the audit rows newest first.
+
+          NEW models in models.py: AdjustItemQuantityRequest, ItemAuditEntry.
+
+          Verified locally:
+            ✅ POST adjust +1 from qty=1 → qty=2
+            ✅ POST adjust -2 from qty=2 → qty=0, status auto-flips to "finished"
+            ✅ GET audit returns 2 rows newest-first with correct deltas
+            ✅ Phase 13 regression suite still 51/51 PASS
+
+frontend:
+  - task: "Phase 15 — iPhone camera permissions + inventory +/- stepper + item Activity panel"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/imagePicker.ts (NEW), /app/frontend/app/scan-receipt.tsx, /app/frontend/src/ItemEditor.tsx, /app/frontend/app/category/[id].tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          iPhone camera bugfix (root cause):
+            scan-receipt.tsx called launchCameraAsync() WITHOUT first
+            requesting camera permission. iOS silently denies in that case.
+
+          New shared helper: /app/frontend/src/imagePicker.ts
+            • pickImage({source: 'camera' | 'library', ...}) handles:
+                - getCameraPermissionsAsync / requestCameraPermissionsAsync
+                  (or media-library equivalents)
+                - friendly Alert with "Open Settings" CTA if denied
+                - launchCameraAsync / launchImageLibraryAsync
+                - returns null on cancel or denial (no exception)
+                - returns {uri, base64, dataUri} ready for upload
+            • pickImageWithChoice() — Alert prompting Camera/Library/Cancel.
+            • Compatible with expo-image-picker SDK 50–55 (MediaTypeOptions
+              fallback to string array).
+
+          Refactored callers:
+            • scan-receipt.tsx pickImage(fromCamera) now uses the helper.
+            • ItemEditor.tsx pickImage() now uses pickImageWithChoice() —
+              user can take a photo from the editor too.
+          iOS infoPlist usage strings (Camera + PhotoLibrary +
+          PhotoLibraryAdd) are already present in app.json.
+
+          Inventory +/- stepper (category detail page):
+            • Each item row now has a [−  qty unit  +] compact stepper.
+            • Tap = adjust quantity by step.
+            • Long-press the − = toggle finished (preserves old behaviour).
+            • Step size respects unit type:
+                - countable (pcs, ea, pack, box, can, bottle, bag, slice…) → 1
+                - mass/volume (kg, g, mg, lb, oz, l, ml, m, cm, cup, tsp…) → 0.1
+                - no unit → 1
+            • Optimistic UI update + revert on backend error.
+
+          Item Activity panel (ItemEditor edit mode):
+            • Loads GET /api/items/{id}/audit?limit=30 in parallel with
+              the form (never blocks the editor).
+            • Renders a compact list:
+                "[icon] User incremented +2 pcs  (4 → 6)"
+                "May 25, 2026, 4:09 PM • optional note"
+            • Empty state explains the +/- stepper.
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Phase A bug fixes + Phase B (inventory audit) shipped. Phase C (the
+      unified purchase_sessions model) NOT in this push — will be the next
+      phase per user's "incremental focused changes" directive.
+
+      All 51 backend regression tests pass. Backend endpoints verified via
+      curl locally. Frontend bundles cleanly.
+
+      User to verify on phone:
+        - Take-photo on receipt scan now prompts for camera permission and
+          actually opens the camera on iPhone.
+        - Item rows in a category have a working +/- stepper.
+        - Tapping into an item shows the new Activity section with the
+          audit history.
+        - Staff create still works (and any failure now surfaces a real
+          error message instead of 500).
+

@@ -253,6 +253,41 @@ class RefreshImageRequest(BaseModel):
     query: Optional[str] = None  # override search query
 
 
+# =========================
+# Inventory audit log (Phase B)
+# =========================
+class AdjustItemQuantityRequest(BaseModel):
+    """Body for POST /api/items/{item_id}/adjust.
+    `delta` is positive to increment, negative to decrement. Step size is
+    decided by the client (1 for countable units, 0.1 for kg/litres, etc.)."""
+    delta: float
+    note: Optional[str] = None
+    # Where the change originated. Defaults to "manual" (the +/- stepper).
+    # Future purchase-session integration uses "purchase_session" with the
+    # session_id in source_id.
+    source: Optional[str] = None
+    source_id: Optional[str] = None
+
+
+class ItemAuditEntry(TZAware):
+    audit_id: str
+    item_id: str
+    space_id: str
+    category_id: Optional[str] = None
+    item_name: Optional[str] = None
+    user_id: str
+    user_name: str
+    action: str  # "incremented" | "decremented"
+    delta: float
+    prev_qty: float
+    new_qty: float
+    unit: Optional[str] = None
+    note: Optional[str] = None
+    source: Optional[str] = "manual"
+    source_id: Optional[str] = None
+    created_at: datetime
+
+
 
 # =========================
 # Settlements / Splits

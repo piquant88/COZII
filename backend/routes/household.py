@@ -178,34 +178,44 @@ async def list_staff(space_id: str, user: User = Depends(get_current_user)):
 
 @api_router.post("/household/staff", response_model=StaffMember)
 async def create_staff(body: CreateStaffRequest, user: User = Depends(get_current_user)):
-    space = await assert_space_member(body.space_id, user.user_id)
-    doc = {
-        "staff_id": gen_id("staff"),
-        "space_id": body.space_id,
-        "name": body.name.strip(),
-        "role_id": body.role_id,
-        "photo_base64": body.photo_base64,
-        "phone": body.phone,
-        "emergency_contact": body.emergency_contact,
-        "id_number": body.id_number,
-        "salary": body.salary,
-        "pay_cycle": body.pay_cycle or "monthly",
-        "salary_currency": body.salary_currency or (space.get("currency") if isinstance(space, dict) else None) or "USD",
-        "off_day": body.off_day,
-        "start_date": body.start_date,
-        "end_date": body.end_date,
-        "active": True if body.active is None else bool(body.active),
-        "notes": body.notes,
-        "requires_wage_confirmation": bool(body.requires_wage_confirmation),
-        "user_id": None,
-        "invite_code": _gen_staff_invite_code(),
-        "permissions": DEFAULT_STAFF_PERMS.copy(),
-        "created_at": now_utc(),
-    }
-    await db.staff_members.insert_one(doc)
-    doc.pop("_id", None)
-    await _attach_role_name(doc)
-    return StaffMember(**doc)
+    try:
+        space = await assert_space_member(body.space_id, user.user_id)
+        doc = {
+            "staff_id": gen_id("staff"),
+            "space_id": body.space_id,
+            "name": (body.name or "").strip(),
+            "role_id": body.role_id,
+            "photo_base64": body.photo_base64,
+            "phone": body.phone,
+            "emergency_contact": body.emergency_contact,
+            "id_number": body.id_number,
+            "salary": body.salary,
+            "pay_cycle": body.pay_cycle or "monthly",
+            "salary_currency": body.salary_currency or (space.get("currency") if isinstance(space, dict) else None) or "USD",
+            "off_day": body.off_day,
+            "start_date": body.start_date,
+            "end_date": body.end_date,
+            "active": True if body.active is None else bool(body.active),
+            "notes": body.notes,
+            "requires_wage_confirmation": bool(body.requires_wage_confirmation),
+            "user_id": None,
+            "invite_code": _gen_staff_invite_code(),
+            "permissions": DEFAULT_STAFF_PERMS.copy(),
+            "created_at": now_utc(),
+        }
+        if not doc["name"]:
+            raise HTTPException(status_code=400, detail="Name is required")
+        await db.staff_members.insert_one(doc)
+        doc.pop("_id", None)
+        await _attach_role_name(doc)
+        return StaffMember(**doc)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"create_staff failed for space={body.space_id} user={user.user_id}")
+        # Surface a clean 400 with the actual reason so the iPhone client shows
+        # something useful instead of "Request failed (500)".
+        raise HTTPException(status_code=400, detail=f"Could not save staff member: {e}")
 
 
 @api_router.patch("/household/staff/{staff_id}/permissions", response_model=StaffMember)

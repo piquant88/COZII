@@ -84,6 +84,44 @@ export default function CategoryDetail() {
     } catch (e) { console.warn(e); }
   };
 
+  /** Step size respects the item's unit type:
+   *   - countable units (pcs, ea, pack, box, can, bottle, bag, slice, jar…) → 1
+   *   - mass / volume / continuous units (kg, g, mg, lb, oz, l, ml, m, cm…) → 0.1
+   *   - no unit set → 1 */
+  const stepFor = (unit?: string | null): number => {
+    if (!unit) return 1;
+    const u = unit.toLowerCase().trim();
+    if (/(kg|gram|g|mg|lb|oz|liter|litre|ml|fl|cl|cm|m|cup|tsp|tbsp)$/.test(u)) return 0.1;
+    return 1;
+  };
+
+  const adjustQty = async (item: Item, dir: 1 | -1) => {
+    const step = stepFor(item.unit);
+    const delta = dir * step;
+    // Optimistic UI update so the +/- feels instant
+    setItems((prev) => prev.map((x) => {
+      if (x.item_id !== item.item_id) return x;
+      const next = Math.max(0, (x.quantity ?? 0) + delta);
+      let nextStatus: typeof x.status = x.status;
+      if (next === 0) nextStatus = 'finished';
+      else if (typeof x.low_threshold === 'number' && next < x.low_threshold) nextStatus = 'low';
+      else nextStatus = 'available';
+      return { ...x, quantity: next, status: nextStatus } as Item;
+    }));
+    try {
+      await api.post(`/items/${item.item_id}/adjust`, { delta });
+    } catch (e: any) {
+      Alert.alert('Could not adjust', e?.message || 'Try again.');
+      load();
+    }
+  };
+
+  const formatQty = (q: number | null | undefined, unit?: string | null) => {
+    const n = q ?? 0;
+    const rounded = Number.isInteger(n) ? n.toFixed(0) : n.toFixed(1).replace(/\.0$/, '');
+    return unit ? `${rounded} ${unit}` : rounded;
+  };
+
   const confirmDeleteCategory = () => {
     const doIt = async () => {
       try {
@@ -239,17 +277,25 @@ export default function CategoryDetail() {
                     )}
                   </View>
                 </View>
-                <TouchableOpacity
-                  style={styles.finishBtn}
-                  onPress={() => toggleStatus(it, it.status === 'finished' ? 'available' : 'finished')}
-                  testID={`item-${it.item_id}-toggle-finish`}
-                >
-                  <Icon
-                    name={it.status === 'finished' ? 'PlusCircle' : 'MinusCircle'}
-                    size={24}
-                    color={it.status === 'finished' ? colors.primary : colors.textMuted}
-                  />
-                </TouchableOpacity>
+                <View style={styles.stepperWrap}>
+                  <TouchableOpacity
+                    style={[styles.stepBtn, ((it.quantity ?? 0) <= 0) && { opacity: 0.4 }]}
+                    onPress={() => adjustQty(it, -1)}
+                    onLongPress={() => toggleStatus(it, it.status === 'finished' ? 'available' : 'finished')}
+                    disabled={(it.quantity ?? 0) <= 0}
+                    testID={`item-${it.item_id}-dec`}
+                  >
+                    <Icon name="MinusCircle" size={22} color={colors.textMain} />
+                  </TouchableOpacity>
+                  <Text style={styles.stepQty} numberOfLines={1}>{formatQty(it.quantity, it.unit)}</Text>
+                  <TouchableOpacity
+                    style={styles.stepBtn}
+                    onPress={() => adjustQty(it, +1)}
+                    testID={`item-${it.item_id}-inc`}
+                  >
+                    <Icon name="PlusCircle" size={22} color={colors.primary} />
+                  </TouchableOpacity>
+                </View>
               </TouchableOpacity>
             );
           })
@@ -390,6 +436,17 @@ const styles = StyleSheet.create({
   pillTxt: { fontSize: 10, fontWeight: '800' },
   metaTxt: { fontSize: 12, color: colors.textMuted },
   finishBtn: { padding: 4 },
+  stepperWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: colors.surfaceAlt,
+    borderRadius: radius.full,
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+  },
+  stepBtn: { padding: 6, alignItems: 'center', justifyContent: 'center' },
+  stepQty: { minWidth: 36, textAlign: 'center', fontWeight: '800', fontSize: 13, color: colors.textMain },
   fab: {
     position: 'absolute',
     right: 20, bottom: 110,

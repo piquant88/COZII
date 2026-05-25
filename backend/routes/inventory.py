@@ -232,6 +232,93 @@ async def delete_item(item_id: str, user: User = Depends(get_current_user)):
     return {"success": True}
 
 
+@api_router.post("/items/{item_id}/adjust", response_model=Item)
+async def adjust_item_quantity(item_id: str, body: AdjustItemQuantityRequest, user: User = Depends(get_current_user)):
+    """Increment / decrement an item's quantity by a delta and write an
+    immutable audit row. Respects the existing category staff_can_edit
+    permission via assert_can_edit_category_items."""
+    doc = await db.items.find_one({"item_id": item_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Item not found")
+    await assert_space_member(doc["space_id"], user.user_id)
+    await assert_can_edit_category_items(doc["space_id"], doc["category_id"], user.user_id)
+
+    try:
+        delta = float(body.delta)
+    except Exception:
+        raise HTTPException(status_code=400, detail="delta must be numeric")
+    if delta == 0:
+        raise HTTPException(status_code=400, detail="delta must be non-zero")
+
+    prev_qty = float(doc.get("quantity") or 0)
+    new_qty = prev_qty + delta
+    # Clamp at zero — quantities can't go negative.
+    if new_qty < 0:
+        new_qty = 0
+        # Effective delta after clamp for the audit row (so history reads true)
+        delta = new_qty - prev_qty
+
+    # Status auto-update mirrors existing PATCH behavior.
+    new_status = doc.get("status")
+    if new_qty == 0:
+        new_status = "finished"
+    elif new_qty < (doc.get("low_threshold") or 0):
+        new_status = "low"
+    else:
+        if new_status in ("finished", "low") and (doc.get("low_threshold") is None or new_qty >= (doc.get("low_threshold") or 0) + 0):
+            new_status = "good"
+
+    await db.items.update_one(
+        {"item_id": item_id},
+        {"$set": {"quantity": new_qty, "status": new_status, "updated_at": now_utc()}},
+    )
+
+    # Audit row
+    actor_name = user.name or user.email or user.user_id
+    audit_doc = {
+        "audit_id": gen_id("aud"),
+        "item_id": item_id,
+        "space_id": doc["space_id"],
+        "category_id": doc.get("category_id"),
+        "item_name": doc.get("name"),
+        "user_id": user.user_id,
+        "user_name": actor_name,
+        "action": "incremented" if delta > 0 else "decremented",
+        "delta": delta,
+        "prev_qty": prev_qty,
+        "new_qty": new_qty,
+        "unit": doc.get("unit"),
+        "note": body.note,
+        "source": body.source or "manual",  # "manual" | "purchase_session" | "shopping_request" | "scan"
+        "source_id": body.source_id,
+        "created_at": now_utc(),
+    }
+    await db.item_audit_log.insert_one(audit_doc)
+
+    # Real-time + activity feed
+    await record_activity(
+        doc["space_id"], user,
+        f"{'+' if delta > 0 else ''}{delta:g} {doc.get('unit') or ''}".strip(),
+        "item", item_id, doc.get("name") or "",
+    )
+
+    out = await db.items.find_one({"item_id": item_id}, {"_id": 0})
+    return Item(**out)
+
+
+@api_router.get("/items/{item_id}/audit", response_model=List[ItemAuditEntry])
+async def get_item_audit(item_id: str, user: User = Depends(get_current_user), limit: int = 50):
+    """Return the change history for a single inventory item, newest first."""
+    doc = await db.items.find_one({"item_id": item_id}, {"_id": 0, "space_id": 1})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Item not found")
+    await assert_space_member(doc["space_id"], user.user_id)
+    rows = await db.item_audit_log.find(
+        {"item_id": item_id}, {"_id": 0},
+    ).sort("created_at", -1).limit(max(1, min(200, int(limit or 50)))).to_list(200)
+    return [ItemAuditEntry(**r) for r in rows]
+
+
 @api_router.post("/ai/scan-receipt", response_model=ScanReceiptResponse)
 async def scan_receipt(body: ScanReceiptRequest, user: User = Depends(get_current_user)):
     if not EMERGENT_LLM_KEY:

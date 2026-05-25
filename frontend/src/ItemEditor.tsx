@@ -4,6 +4,7 @@ import {
   KeyboardAvoidingView, Platform, Image, Alert,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
+import { pickImageWithChoice } from './imagePicker';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useAuth } from './AuthContext';
@@ -39,6 +40,8 @@ export default function ItemEditor({ mode, itemId, preselectCategoryId }: Props)
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [bootLoading, setBootLoading] = useState(mode === 'edit');
+  const [auditRows, setAuditRows] = useState<any[]>([]);
+  const [auditLoading, setAuditLoading] = useState(false);
 
   useEffect(() => {
     const run = async () => {
@@ -59,6 +62,12 @@ export default function ItemEditor({ mode, itemId, preselectCategoryId }: Props)
           setPhoto(it.photo_base64 || null);
           setImageUrl(it.image_url || null);
           setFields(it.fields || {});
+          // Load audit history in parallel — never block the editor on this
+          setAuditLoading(true);
+          api.get<any[]>(`/items/${itemId}/audit?limit=30`)
+            .then((rows) => setAuditRows(Array.isArray(rows) ? rows : []))
+            .catch(() => setAuditRows([]))
+            .finally(() => setAuditLoading(false));
         } else if (!categoryId && cats.length > 0) {
           setCategoryId(cats[0].category_id);
         }
@@ -74,21 +83,10 @@ export default function ItemEditor({ mode, itemId, preselectCategoryId }: Props)
   const activeCategory = categories.find((c) => c.category_id === categoryId);
 
   const pickImage = async () => {
-    try {
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        allowsEditing: true,
-        aspect: [1, 1],
-        quality: 0.6,
-        base64: true,
-      });
-      if (!result.canceled && result.assets[0]) {
-        const a = result.assets[0];
-        const base64 = a.base64 ? `data:image/jpeg;base64,${a.base64}` : a.uri;
-        setPhoto(base64);
-        setImageUrl(null); // user-uploaded photo overrides web image
-      }
-    } catch (e) { console.warn(e); }
+    const picked = await pickImageWithChoice({ allowsEditing: true, aspect: [1, 1], quality: 0.6, base64: true });
+    if (!picked) return; // cancelled or denied (helper showed Alert)
+    setPhoto(picked.dataUri);
+    setImageUrl(null); // user-uploaded photo overrides web image
   };
 
   const findImage = async () => {
@@ -381,6 +379,53 @@ export default function ItemEditor({ mode, itemId, preselectCategoryId }: Props)
           >
             <Text style={styles.primaryTxt}>{loading ? 'Saving...' : (mode === 'create' ? 'Save item' : 'Save changes')}</Text>
           </TouchableOpacity>
+
+          {/* Activity / history — only on edit mode */}
+          {mode === 'edit' && (
+            <View style={styles.activityCard}>
+              <View style={styles.activityHeader}>
+                <Icon name="Clock" size={16} color={colors.textMain} />
+                <Text style={styles.activityTitle}>Activity</Text>
+                {auditRows.length > 0 && <Text style={styles.activityCount}>{auditRows.length}</Text>}
+              </View>
+              {auditLoading ? (
+                <Text style={styles.activityEmpty}>Loading…</Text>
+              ) : auditRows.length === 0 ? (
+                <Text style={styles.activityEmpty}>No changes yet. Use the +/- buttons in inventory to start tracking.</Text>
+              ) : (
+                auditRows.map((row, i) => {
+                  const isInc = (row.delta || 0) > 0;
+                  const deltaTxt = `${isInc ? '+' : ''}${row.delta}${row.unit ? ' ' + row.unit : ''}`;
+                  const when = (() => {
+                    try {
+                      const d = new Date(row.created_at);
+                      return d.toLocaleString();
+                    } catch { return row.created_at; }
+                  })();
+                  return (
+                    <View key={row.audit_id || i} style={styles.auditRow}>
+                      <View style={[styles.auditBadge, { backgroundColor: isInc ? '#E6F5E8' : '#FFE4E1' }]}>
+                        <Icon
+                          name={isInc ? 'PlusCircle' : 'MinusCircle'}
+                          size={14}
+                          color={isInc ? '#5FA06A' : '#C0392B'}
+                        />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.auditLine}>
+                          <Text style={styles.auditUser}>{row.user_name}</Text>
+                          <Text> {row.action} </Text>
+                          <Text style={styles.auditDelta}>{deltaTxt}</Text>
+                          <Text style={styles.auditTail}>{`  (${row.prev_qty} → ${row.new_qty})`}</Text>
+                        </Text>
+                        <Text style={styles.auditTime}>{when}{row.note ? ` • ${row.note}` : ''}</Text>
+                      </View>
+                    </View>
+                  );
+                })
+              )}
+            </View>
+          )}
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -461,6 +506,37 @@ const styles = StyleSheet.create({
     ...shadows.button,
   },
   primaryTxt: { color: '#fff', fontWeight: '800' },
+  activityCard: {
+    marginTop: spacing.lg,
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    padding: spacing.md,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  activityHeader: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    marginBottom: spacing.sm,
+  },
+  activityTitle: { flex: 1, fontWeight: '800', fontSize: 14, color: colors.textMain },
+  activityCount: {
+    fontSize: 11, fontWeight: '700', color: colors.textMuted,
+    backgroundColor: colors.surfaceAlt, paddingHorizontal: 8, paddingVertical: 2, borderRadius: radius.full,
+  },
+  activityEmpty: { color: colors.textMuted, fontSize: 12, paddingVertical: 8, lineHeight: 17 },
+  auditRow: {
+    flexDirection: 'row', alignItems: 'flex-start', gap: 10,
+    paddingVertical: 8,
+    borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border,
+  },
+  auditBadge: {
+    width: 26, height: 26, borderRadius: 13,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  auditLine: { fontSize: 13, color: colors.textMain, lineHeight: 18 },
+  auditUser: { fontWeight: '800' },
+  auditDelta: { fontWeight: '800', color: colors.textMain },
+  auditTail: { color: colors.textMuted, fontWeight: '500' },
+  auditTime: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
   selectChipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   selectChip: {
     paddingHorizontal: 14, paddingVertical: 8,
