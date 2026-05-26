@@ -4723,3 +4723,107 @@ agent_communication:
 
       No bugs surfaced. Phase 16 endpoints are production-ready.
 
+
+#============== Phase 16 — Unified Purchase Session ==============
+backend:
+  - task: "Phase 16 — purchase_sessions collection + endpoints (unified shopping-trip model)"
+    implemented: true
+    working: true
+    file: "/app/backend/routes/purchase_sessions.py, /app/backend/routes/__init__.py, /app/backend/models.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Single source of truth for a shopping trip. POST /api/purchase-sessions
+          creates one document AND fires four coordinated side-effects:
+            1. Inventory: increments matching items (creates them if missing
+               and create_item=true). Respects category staff_can_edit perms.
+            2. Audit: writes one item_audit_log row per inventory mutation with
+               source="purchase_session", source_id=session_id.
+            3. Shopping requests: each id in source_request_ids becomes
+               status="purchased", with purchased_via_session_id back-reference.
+            4. Activity feed: ONE record_activity entry per session (not one per
+               item), which fans out via Socket.IO to the space room.
+
+          DELETE rolls back EVERY side effect:
+            - inventory qtys decremented back (clamped at 0)
+            - audit rows for that session removed
+            - linked shopping requests reverted to status="approved"
+            - the session doc itself removed
+          Authorization: only the space owner OR the original creator may delete.
+
+          Endpoints:
+            POST   /api/purchase-sessions
+            GET    /api/purchase-sessions?space_id=...&limit=...
+            GET    /api/purchase-sessions/{session_id}
+            PATCH  /api/purchase-sessions/{session_id}  (merchant/date/notes/total)
+            DELETE /api/purchase-sessions/{session_id}
+
+          Models: PurchaseSession, PurchaseSessionItem, CreatePurchaseSessionRequest,
+          UpdatePurchaseSessionRequest (in models.py).
+      - working: true
+        agent: "testing"
+        comment: |
+          /app/backend_test_phase16.py — 59/59 PASS.
+          Verified end-to-end including DELETE rollback semantics and the
+          shopping-request → purchase-session linkage. Phase 13 regression
+          suite still 51/51 PASS. /api/items/{id}/adjust (Phase 15) still works.
+
+frontend:
+  - task: "Phase 16 — Purchase Session list/detail screen + Finance grouping + receipt-scan wiring"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/purchase-session.tsx (NEW), /app/frontend/app/scan-receipt.tsx, /app/frontend/app/(tabs)/finance.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          • New screen /app/purchase-session.tsx is a combined list + detail
+            view (using ?id= query param).
+              - List: cards showing "<Merchant> · <date> · N items · <total>".
+                Tap to expand inline → shows line items. Long-press OR
+                "Open full session" → detail page.
+              - Detail: hero summary (merchant, date, total, source),
+                line-item table with per-line totals, notes, "Delete" in header.
+          • Receipt scan flow now ends in a Purchase Session:
+              - Added a new "Merchant" field above Event tag.
+              - save() now calls POST /api/purchase-sessions (instead of
+                /items/bulk) with the scanned items, receipt photo, source
+                tag, and event-tag stored in notes.
+              - After save, user is taken straight to the session detail.
+              - One write → inventory items created/incremented, audit rows
+                written, finance card auto-appears, all real-time emitted.
+          • Finance tab: new "Recent purchases" section right above
+            "Where it went" pie. Lists up to 5 most-recent sessions with
+            tap-to-detail. "See all" → /purchase-session list. Subscribes to
+            realtime kind="purchase_session".
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Phase C (unified purchase session) shipped.
+
+      Verified end-to-end:
+        - 59/59 Phase 16 tests pass.
+        - 51/51 Phase 13 regression unchanged.
+        - Frontend bundles cleanly (verified curl http://localhost:3000 → 200).
+
+      User instructed me to stop here before more major features so they can
+      rebuild for TestFlight.
+
+      Required user action: rebuild the iOS app to pick up the new screen
+      + receipt-scan rewiring + Finance grouping. Backend changes already live
+      via supervisor.
+
+      Also: the user-reported "404 on add staff / create category" turned out
+      to be 401 (expired token) per backend.out.log — not a code bug. After
+      re-login, both endpoints log 200. The Phase A defensive logging on
+      staff create is still useful: any future hidden failure now surfaces a
+      readable 400 message instead of an opaque 500.
+
