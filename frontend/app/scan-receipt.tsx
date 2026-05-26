@@ -50,6 +50,7 @@ export default function ScanReceipt() {
   const [showCategoryPicker, setShowCategoryPicker] = useState(false);
   const [pickerForIndex, setPickerForIndex] = useState<number | null>(null);
   const [eventTag, setEventTag] = useState<string>('');
+  const [merchant, setMerchant] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
   const [lockCategory, setLockCategory] = useState<boolean>(!!preselectCategoryId);
 
@@ -154,32 +155,40 @@ export default function ScanReceipt() {
     if (!activeSpace || !defaultCategoryId) return;
     const valid = items.filter((it) => it.name.trim());
     if (valid.length === 0) { setError('Add at least one item'); return; }
+    const merchantName = (merchant || eventTag).trim() || 'Receipt scan';
     setSaving(true);
     setError(null);
     try {
-      const perItem: Record<string, string> = {};
-      items.forEach((it, idx) => {
-        if (it.category_id && it.category_id !== defaultCategoryId) perItem[String(idx)] = it.category_id;
-      });
-      await api.post('/items/bulk', {
+      // Unified purchase session: one call creates the session, increments
+      // each inventory item (creates new ones if needed) and writes audit
+      // rows tagged source=purchase_session.
+      const total = valid.reduce((acc, it) => acc + (it.price ?? 0) * (it.quantity ?? 1), 0);
+      const sessionItems = valid.map((it) => ({
+        name: it.name.trim(),
+        quantity: it.quantity || 1,
+        unit_price: it.price ?? null,
+        category_id: it.category_id || defaultCategoryId,
+        create_item: true,
+      }));
+      const session = await api.post<any>('/purchase-sessions', {
         space_id: activeSpace.space_id,
-        category_id: defaultCategoryId,
-        per_item_category: perItem,
-        items: valid.map((it) => ({
-          name: it.name.trim(),
-          quantity: it.quantity,
-          price: it.price,
-          category_hint: it.category_hint,
-          fields: it.fields || {},
-        })),
+        merchant: merchantName,
         purchase_date: new Date().toISOString().slice(0, 10),
-        receipt_photo_base64: photo,
-        event_tag: eventTag.trim() || null,
-        auto_fetch_images: true,
+        total,
+        items: sessionItems,
+        receipt_image_base64: photo,
+        source: 'receipt_scan',
+        notes: eventTag.trim() ? `Event: ${eventTag.trim()}` : null,
       });
-      router.replace('/(tabs)/inventory');
+      // Send the user straight to the session detail so they can see what
+      // happened (items, total, inventory increments).
+      if (session?.session_id) {
+        router.replace(`/purchase-session?id=${session.session_id}`);
+      } else {
+        router.replace('/(tabs)/inventory');
+      }
     } catch (e: any) {
-      setError(e?.message || 'Failed to save');
+      setError(e?.message || 'Save failed');
     } finally {
       setSaving(false);
     }
@@ -263,6 +272,21 @@ export default function ScanReceipt() {
                         <Text style={styles.catSelectTxt}>{defaultCategory?.name || 'Pick category'}</Text>
                         <Icon name="ChevronRight" size={16} color={colors.textMuted} />
                       </TouchableOpacity>
+                    </View>
+                  </View>
+
+                  <View style={styles.defaultCatBox}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.label}>Merchant</Text>
+                      <TextInput
+                        style={styles.eventInput}
+                        value={merchant}
+                        onChangeText={setMerchant}
+                        placeholder='e.g. "Ranch Market" or "Cafe Halim"'
+                        placeholderTextColor={colors.textMuted}
+                        testID="scan-merchant"
+                      />
+                      <Text style={styles.eventHint}>Used as the purchase-session label in Finance.</Text>
                     </View>
                   </View>
 

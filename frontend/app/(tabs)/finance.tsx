@@ -20,18 +20,21 @@ export default function Finance() {
   const router = useRouter();
   const [items, setItems] = useState<Item[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
+  const [sessions, setSessions] = useState<any[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [view, setView] = useState<'month' | 'trend'>('month');
 
   const load = useCallback(async () => {
     if (!activeSpace) return;
     try {
-      const [it, cats] = await Promise.all([
+      const [it, cats, ps] = await Promise.all([
         api.get<Item[]>(`/items?space_id=${activeSpace.space_id}`),
         api.get<Category[]>(`/categories?space_id=${activeSpace.space_id}`),
+        api.get<any[]>(`/purchase-sessions?space_id=${activeSpace.space_id}&limit=20`).catch(() => []),
       ]);
       setItems(it);
       setCategories(cats);
+      setSessions(Array.isArray(ps) ? ps : []);
     } catch (e) { console.warn(e); }
   }, [activeSpace]);
 
@@ -42,7 +45,7 @@ export default function Finance() {
     if (!activeSpace) return;
     const off = realtime.onSpaceEvent((e) => {
       if (e.space_id !== activeSpace.space_id) return;
-      if (['item', 'category', 'payment', 'transaction', 'bill', 'shopping', 'settlement'].includes(e.kind)) load();
+      if (['item', 'category', 'payment', 'transaction', 'bill', 'shopping', 'settlement', 'purchase_session'].includes(e.kind)) load();
     });
     return off;
   }, [activeSpace, load]);
@@ -199,7 +202,40 @@ export default function Finance() {
               </View>
             </View>
 
-            <Text style={styles.sectionTitle}>Where it went</Text>
+            {/* Purchase Sessions — grouped shopping trips */}
+            {sessions.length > 0 && (
+              <>
+                <View style={styles.psHeaderRow}>
+                  <Text style={styles.sectionTitle}>Recent purchases</Text>
+                  <TouchableOpacity onPress={() => router.push('/purchase-session')}>
+                    <Text style={styles.psSeeAll}>See all</Text>
+                  </TouchableOpacity>
+                </View>
+                {sessions.slice(0, 5).map((s) => (
+                  <TouchableOpacity
+                    key={s.session_id}
+                    style={styles.psCard}
+                    onPress={() => router.push(`/purchase-session?id=${s.session_id}`)}
+                    testID={`finance-session-${s.session_id}`}
+                  >
+                    <View style={[styles.psBadge, { backgroundColor: '#FFE4DC' }]}>
+                      <Icon name="ShoppingBag" size={16} color="#D45B43" />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.psMerchant} numberOfLines={1}>{s.merchant}</Text>
+                      <Text style={styles.psMeta} numberOfLines={1}>
+                        {(() => { try { return new Date(s.purchase_date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); } catch { return s.purchase_date; } })()}
+                        {' · '}{s.items?.length || 0} item{(s.items?.length || 0) !== 1 ? 's' : ''}
+                      </Text>
+                    </View>
+                    <Text style={styles.psTotal}>{formatMoney(s.total, s.currency || cur)}</Text>
+                    <Icon name="ChevronRight" size={16} color={colors.textMuted} />
+                  </TouchableOpacity>
+                ))}
+              </>
+            )}
+
+            <Text style={[styles.sectionTitle, sessions.length > 0 && { marginTop: spacing.lg }]}>Where it went</Text>
             <View style={styles.pieCard}>
               {pieSlices.length === 0 ? (
                 <View style={{ alignItems: 'center', paddingVertical: 24 }}>
@@ -326,6 +362,18 @@ const styles = StyleSheet.create({
   diffTxt: { fontWeight: '800', fontSize: 12 },
   diffLabel: { fontSize: 12, color: colors.textMuted },
   sectionTitle: { fontSize: 18, fontWeight: '800', color: colors.textMain, marginBottom: spacing.sm },
+  psHeaderRow: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' },
+  psSeeAll: { fontSize: 12, fontWeight: '700', color: colors.primary, marginBottom: spacing.sm },
+  psCard: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    backgroundColor: colors.surface, borderRadius: radius.md,
+    padding: spacing.md, marginBottom: 8,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  psBadge: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
+  psMerchant: { fontSize: 14, fontWeight: '800', color: colors.textMain },
+  psMeta: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  psTotal: { fontSize: 14, fontWeight: '800', color: colors.textMain },
   pieCard: {
     backgroundColor: colors.surface,
     borderRadius: radius.lg,

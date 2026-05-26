@@ -288,6 +288,86 @@ class ItemAuditEntry(TZAware):
     created_at: datetime
 
 
+# =========================
+# Unified Purchase Session (Phase C)
+# =========================
+class PurchaseSessionItem(BaseModel):
+    """One line item in a purchase session.
+
+    Either `item_id` is set (link to an existing inventory item that will be
+    incremented) OR `name` is set with `create_item=True` so we look up by
+    name in `category_id` and create the inventory item if missing.
+    """
+    line_id: Optional[str] = None  # filled in by backend on insert
+    item_id: Optional[str] = None
+    category_id: Optional[str] = None
+    name: str
+    quantity: float
+    unit: Optional[str] = None
+    unit_price: Optional[float] = None
+    total_price: Optional[float] = None
+    shopping_request_id: Optional[str] = None  # fulfills this request, if set
+    # Persist whether the inventory was actually touched. Set by the backend.
+    inventory_applied: Optional[bool] = None
+    create_item: bool = True
+
+
+class PurchaseSession(TZAware):
+    """Single source of truth for a shopping trip.
+
+    A purchase session represents one purchase at one merchant on one date
+    (e.g. "Ranch Market — May 20 — Rp850.000"). Creating one fires four
+    coordinated side-effects:
+      1. Inventory: each item's quantity is incremented (or the item is
+         created in the chosen category).
+      2. Audit: an item_audit_log row is written with
+         source="purchase_session", source_id=session_id for every item.
+      3. Shopping requests (optional): each request id in
+         source_request_ids is marked "purchased".
+      4. Activity feed + Socket.IO: a single "session created" entry is
+         emitted to the space room (not one per item).
+    """
+    session_id: str
+    space_id: str
+    merchant: str
+    purchase_date: str  # YYYY-MM-DD
+    total: float
+    currency: str
+    receipt_image_base64: Optional[str] = None
+    receipt_raw: Optional[str] = None  # raw AI JSON text, for debugging
+    source: str = "manual"  # "manual" | "receipt_scan" | "shopping_request"
+    source_request_ids: List[str] = []
+    items: List[PurchaseSessionItem] = []
+    paid_by: str
+    notes: Optional[str] = None
+    created_by: str
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+
+class CreatePurchaseSessionRequest(BaseModel):
+    space_id: str
+    merchant: str
+    purchase_date: Optional[str] = None  # defaults to today
+    total: Optional[float] = None  # computed if missing from items
+    currency: Optional[str] = None
+    items: List[PurchaseSessionItem] = []
+    receipt_image_base64: Optional[str] = None
+    receipt_raw: Optional[str] = None
+    source: Optional[str] = "manual"
+    source_request_ids: Optional[List[str]] = None
+    notes: Optional[str] = None
+    paid_by: Optional[str] = None  # defaults to current user
+
+
+class UpdatePurchaseSessionRequest(BaseModel):
+    merchant: Optional[str] = None
+    purchase_date: Optional[str] = None
+    total: Optional[float] = None
+    currency: Optional[str] = None
+    notes: Optional[str] = None
+
+
 
 # =========================
 # Settlements / Splits

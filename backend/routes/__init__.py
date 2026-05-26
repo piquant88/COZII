@@ -12,5 +12,6 @@ from . import inventory  # noqa: F401
 from . import misc  # noqa: F401
 from . import notifications  # noqa: F401
 from . import push  # noqa: F401
+from . import purchase_sessions  # noqa: F401
 from . import reports  # noqa: F401
 from . import spaces  # noqa: F401

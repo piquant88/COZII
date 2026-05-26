@@ -4610,3 +4610,116 @@ agent_communication:
         - Staff create still works (and any failure now surfaces a real
           error message instead of 500).
 
+
+## 2026-05-26 — Phase 16: Unified Purchase Session
+
+backend:
+  - task: "Unified Purchase Session (/api/purchase-sessions)"
+    implemented: true
+    working: true
+    file: "/app/backend/routes/purchase_sessions.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          Phase 16 backend test (/app/backend_test_phase16.py) — 59/59 PASS against
+          http://localhost:8001. Side-effects all verified end-to-end.
+
+          A) POST /api/purchase-sessions (3 line items, owner, IDR space):
+             ✅ 200 OK, total auto-computed = 188,000 (50000*3 + 30000 + 8000*1)
+             ✅ session.merchant, .currency, .items[3] all correct
+             ✅ Two new inventory items (Caviar Test*, Milk Test*) created with
+                qty=3 and qty=2 respectively
+             ✅ Pre-existing seed item incremented by 1 (initial qty=4 → 5)
+             ✅ All 3 line items in response have inventory_applied=true and
+                item_id populated
+             ✅ GET /api/items/{caviar_id}/audit returns exactly 1 row with
+                source="purchase_session", source_id=<session_id>, delta=3,
+                new_qty=3
+             ✅ Existing item audit list also contains a row tied to this session
+                (source="purchase_session", source_id=<session_id>)
+          B) GET /api/purchase-sessions?space_id=…&limit=20 → 200, new session
+             present in list.
+          C) GET /api/purchase-sessions/{id} → 200, items[] has 3 lines, ids match.
+          D) PATCH /api/purchase-sessions/{id} {merchant, notes} → 200, both
+             returned in response; updated_at populated.
+          E) Auth: all 5 endpoints (POST, GET list, GET one, PATCH, DELETE)
+             without Bearer return 401/403 (FastAPI HTTPBearer rejects auto).
+          F) Member (non-owner) POST /api/purchase-sessions in their joined
+             space → 200; created_by == member's user_id; total auto-computed.
+          G) A DIFFERENT member's DELETE on M1's session → 403; session still
+             exists afterwards (verified via GET).
+          H) Owner DELETE of session A → 200, then:
+             ✅ GET /api/purchase-sessions/{id} → 404
+             ✅ Caviar.quantity rolled back from 3 → 0
+             ✅ Milk.quantity rolled back from 2 → 0
+             ✅ Existing item rolled back from 5 → 4 (initial)
+             ✅ item_audit_log rows for source_id=session are gone from
+                /api/items/{id}/audit
+          I) source_request_ids link:
+             ✅ Owner-created shopping request starts status="approved" (owner
+                auto-approves)
+             ✅ Creating a session with source_request_ids=[req] → request
+                status flips to "purchased", purchased_via_session_id set to
+                the new session id
+             ✅ Deleting that linked session → request reverts to
+                status="approved", purchased_by/purchased_at/purchased_via_session_id
+                all cleared (null)
+
+          REGRESSION:
+             ✅ /api/items/{item_id}/adjust still works (+1 / −1 round-trip).
+             ✅ Phase 13 smoke (51 cases) re-run → 51/51 PASS (auth, spaces,
+                categories, items, finance, household, documents, notifications,
+                contracts, reports, push, misc, socket.io).
+
+          No bugs surfaced. Phase 16 surface is production-ready.
+
+metadata:
+  created_by: "main_agent"
+  version: "1.6"
+  test_sequence: 16
+  run_ui: false
+
+test_plan:
+  current_focus: []
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Phase 16 — Unified Purchase Session backend testing complete (2026-05-26).
+      /app/backend_test_phase16.py — 59/59 PASS.
+
+      Verified all requested cases A–I:
+        A POST 3 items (new + existing) → total=188000, two new items created
+          (qty 3 / 2), existing incremented (+1), audit row written for each
+          inventory mutation with source="purchase_session" + source_id=<sid>.
+        B GET list returns the session.
+        C GET single returns same with items[].
+        D PATCH merchant + notes returns updated doc with updated_at set.
+        E All 5 endpoints reject unauth requests (401/403).
+        F Non-owner member can create a session in their joined space; total
+          auto-computed; created_by = member's user_id.
+        G Another member's DELETE on M1's session → 403; doc still exists.
+        H Original creator (owner) DELETE → 200; rolls back inventory
+          quantities to pre-session values; audit rows for that session_id are
+          removed; subsequent GET → 404.
+        I source_request_ids: creating a session with the id of an approved
+          shopping request flips that request to status="purchased" and sets
+          purchased_via_session_id; deleting the session reverts it back to
+          status="approved" with purchased_by / purchased_at /
+          purchased_via_session_id cleared.
+
+      Regression smoke:
+        - Phase 13 smoke 51/51 PASS (no breakage in auth, spaces, categories,
+          items, finance, household, documents, notifications, contracts,
+          reports, push, misc, Socket.IO).
+        - /api/items/{item_id}/adjust (Phase 15) — +1 / −1 round-trip works.
+
+      No bugs surfaced. Phase 16 endpoints are production-ready.
+
