@@ -62,7 +62,7 @@
       "typedRoutes": true
     },
     "extra": {
-      "backendUrl": "https://family-wallet-21.preview.emergentagent.com"
+      "backendUrl": "https://cozii.onrender.com"
     }
   }
 }

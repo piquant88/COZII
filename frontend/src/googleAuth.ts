@@ -1,19 +1,29 @@
 import { Platform } from 'react-native';
 import * as WebBrowser from 'expo-web-browser';
 import * as Linking from 'expo-linking';
+import Constants from 'expo-constants';
+import { BASE_URL } from './api';
 
 // Pre-warm the WebBrowser auth session for snappier opens on Android.
 try { (WebBrowser as any).maybeCompleteAuthSession?.(); } catch {}
 
-// We hand off Google sign-in to Emergent's hosted OAuth page. After the user
-// finishes signing in there, Emergent redirects back to our `redirect_url`
-// with `#session_id=...` appended. We then call the backend
-// `POST /api/auth/google-session` to exchange that for a real Cozii token.
-//
-// This keeps the same architecture we already use for web — we just need to
-// open it in an in-app browser on native and listen for the callback URL.
+// Resolve the Google OAuth landing URL.
+// Priority:
+//   1. EXPO_PUBLIC_GOOGLE_AUTH_URL (build-time env)
+//   2. app.json → expo.extra.googleAuthUrl
+//   3. `${BASE_URL}/auth/google` (our Render backend's hosted OAuth page)
+function resolveGoogleAuthUrl(): string {
+  const fromEnv = (process.env.EXPO_PUBLIC_GOOGLE_AUTH_URL || '').trim();
+  if (fromEnv) return fromEnv.replace(/\/+$/, '');
+  const fromExtra = (Constants as any)?.expoConfig?.extra?.googleAuthUrl
+    || (Constants as any)?.manifest?.extra?.googleAuthUrl;
+  if (typeof fromExtra === 'string' && fromExtra.trim()) {
+    return fromExtra.trim().replace(/\/+$/, '');
+  }
+  return `${BASE_URL}/auth/google`;
+}
 
-const EMERGENT_AUTH_BASE = 'https://auth.emergentagent.com/';
+export const GOOGLE_AUTH_URL = resolveGoogleAuthUrl();
 
 /** Parse a redirect URL like `cozii://auth-callback#session_id=xyz` and pull
  *  out the session_id. Supports both hash-fragment and query-string variants. */
