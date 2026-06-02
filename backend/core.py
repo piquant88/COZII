@@ -323,10 +323,29 @@ async def notify_user(user_id: str, space_id: str, kind: str, title: str, body: 
 
 
 SESSION_DURATION_DAYS = 7
-EMERGENT_AUTH_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
-EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
-AI_SCAN_MODEL_PROVIDER = os.environ.get("AI_SCAN_PROVIDER", "openai")
+
+# ---------------------------------------------------------------------------
+# Google OAuth (Cozii-owned). All credentials live on Render env vars.
+# Authorized redirect URI registered in Google Cloud Console must match
+# GOOGLE_OAUTH_REDIRECT_URI exactly.
+# ---------------------------------------------------------------------------
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_OAUTH_REDIRECT_URI = os.environ.get(
+    "GOOGLE_OAUTH_REDIRECT_URI",
+    "https://cozii.onrender.com/auth/google/callback",
+)
+GOOGLE_AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO_ENDPOINT = "https://openidconnect.googleapis.com/v1/userinfo"
+
+# ---------------------------------------------------------------------------
+# AI (OpenAI direct — no third-party SDKs).
+# ---------------------------------------------------------------------------
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 AI_SCAN_MODEL_NAME = os.environ.get("AI_SCAN_MODEL", "gpt-4o")
+# AI_SCAN_MODEL_PROVIDER kept only for backward log compatibility; not used now.
+AI_SCAN_MODEL_PROVIDER = "openai"
 
 
 # =========================

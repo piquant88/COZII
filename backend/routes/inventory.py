@@ -23,7 +23,7 @@ from core import (
     is_space_owner, get_staff_record, assert_can_edit_category_items,
     emit_space_event, emit_user_event, notify_user, send_expo_push,
     _parse_iso_date, _send_digest_for_space, _search_product_image, _extract_json_block, _compute_alerts_for_space,
-    EMERGENT_LLM_KEY, AI_SCAN_MODEL_NAME, AI_SCAN_MODEL_PROVIDER,
+    OPENAI_API_KEY, AI_SCAN_MODEL_NAME,
 )
 # Pydantic models are re-exported through `models` for convenience.
 from models import *  # noqa: F401,F403
@@ -321,11 +321,11 @@ async def get_item_audit(item_id: str, user: User = Depends(get_current_user), l
 
 @api_router.post("/ai/scan-receipt", response_model=ScanReceiptResponse)
 async def scan_receipt(body: ScanReceiptRequest, user: User = Depends(get_current_user)):
-    if not EMERGENT_LLM_KEY:
-        raise HTTPException(status_code=503, detail="AI key not configured")
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=503, detail="AI key not configured (OPENAI_API_KEY missing)")
 
     try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
+        from openai import AsyncOpenAI
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"AI library not available: {e}")
 
@@ -375,27 +375,31 @@ async def scan_receipt(body: ScanReceiptRequest, user: User = Depends(get_curren
                 + "\n".join(field_instructions)
             )
 
-    chat = LlmChat(
-        api_key=EMERGENT_LLM_KEY,
-        session_id=f"scan_{user.user_id}_{uuid.uuid4().hex[:8]}",
-        system_message=system_message,
-    ).with_model(AI_SCAN_MODEL_PROVIDER, AI_SCAN_MODEL_NAME)
-
-    message = UserMessage(
-        text="Extract each line item from this image as JSON following the schema.",
-        file_contents=[ImageContent(image_base64=raw)],
-    )
+    # Build OpenAI vision payload — base64 inline image + JSON-mode response
+    openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    image_data_url = f"data:image/jpeg;base64,{raw}"
 
     try:
-        response = await chat.send_message(message)
+        response = await openai_client.chat.completions.create(
+            model=AI_SCAN_MODEL_NAME,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "Extract each line item from this image as JSON following the schema."},
+                    {"type": "image_url", "image_url": {"url": image_data_url}},
+                ]},
+            ],
+            max_tokens=2000,
+        )
     except Exception as e:
         logger.exception("AI scan failed")
         msg = str(e).lower()
-        if 'budget' in msg or 'quota' in msg or '429' in msg:
-            raise HTTPException(status_code=402, detail="AI quota reached. Please top up your Emergent LLM key or try again later.")
+        if 'quota' in msg or 'rate' in msg or '429' in msg or 'insufficient' in msg:
+            raise HTTPException(status_code=402, detail="AI quota reached. Please check your OpenAI billing or try again later.")
         raise HTTPException(status_code=502, detail=f"AI scan failed: {e}")
 
-    text = response if isinstance(response, str) else str(response)
+    text = (response.choices[0].message.content if response and response.choices else "") or ""
     json_text = _extract_json_block(text)
 
     parsed = None
@@ -404,17 +408,21 @@ async def scan_receipt(body: ScanReceiptRequest, user: User = Depends(get_curren
     except Exception:
         # Retry: one more LLM call asking it to return ONLY JSON, very strict
         try:
-            retry_chat = LlmChat(
-                api_key=EMERGENT_LLM_KEY,
-                session_id=f"scan_retry_{user.user_id}_{uuid.uuid4().hex[:6]}",
-                system_message=(
-                    "You convert receipt-like text to STRICT JSON. "
-                    'Output ONLY the JSON object: {"items":[{"name":"string","quantity":number,"price":number_or_null,"category_hint":"string","fields":{}}]}. '
-                    "No markdown, no commentary. If the input is a transfer/payment, return one item describing it."
-                ),
-            ).with_model(AI_SCAN_MODEL_PROVIDER, AI_SCAN_MODEL_NAME)
-            r2 = await retry_chat.send_message(UserMessage(text=f"Convert this OCR/text to JSON (strict): {text[:1500]}"))
-            parsed = json.loads(_extract_json_block(r2 if isinstance(r2, str) else str(r2)))
+            retry = await openai_client.chat.completions.create(
+                model=AI_SCAN_MODEL_NAME,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": (
+                        "You convert receipt-like text to STRICT JSON. "
+                        'Output ONLY the JSON object: {"items":[{"name":"string","quantity":number,"price":number_or_null,"category_hint":"string","fields":{}}]}. '
+                        "No markdown, no commentary. If the input is a transfer/payment, return one item describing it."
+                    )},
+                    {"role": "user", "content": f"Convert this OCR/text to JSON (strict): {text[:1500]}"},
+                ],
+                max_tokens=1500,
+            )
+            r2_text = (retry.choices[0].message.content if retry and retry.choices else "") or ""
+            parsed = json.loads(_extract_json_block(r2_text))
         except Exception:
             parsed = None
 

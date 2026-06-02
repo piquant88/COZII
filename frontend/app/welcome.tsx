@@ -5,7 +5,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { colors, radius, spacing, shadows } from '../src/theme';
-import { googleSignInNative } from '../src/googleAuth';
+import { googleSignInNative, GOOGLE_AUTH_URL } from '../src/googleAuth';
 import { useAuth } from '../src/AuthContext';
 
 export default function Welcome() {
@@ -16,12 +16,11 @@ export default function Welcome() {
   const handleGoogle = async () => {
     if (googleBusy) return;
 
-    // Web: use the existing full-page redirect that the GoogleSessionInterceptor
-    // in _layout.tsx already handles.
+    // Web: kick the browser through the Cozii backend OAuth start endpoint.
+    // GoogleSessionInterceptor in _layout.tsx redeems the session_id on return.
     if (Platform.OS === 'web' && typeof window !== 'undefined') {
-      // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
       const redirectUrl = window.location.origin + '/';
-      window.location.href = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
+      window.location.href = `${GOOGLE_AUTH_URL}?redirect=${encodeURIComponent(redirectUrl)}`;
       return;
     }
 

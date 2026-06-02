@@ -7,11 +7,11 @@ import { BASE_URL } from './api';
 // Pre-warm the WebBrowser auth session for snappier opens on Android.
 try { (WebBrowser as any).maybeCompleteAuthSession?.(); } catch {}
 
-// Resolve the Google OAuth landing URL.
+// Resolve the Google OAuth landing URL on the Cozii backend.
 // Priority:
-//   1. EXPO_PUBLIC_GOOGLE_AUTH_URL (build-time env)
+//   1. EXPO_PUBLIC_GOOGLE_AUTH_URL (build-time env override, rarely used)
 //   2. app.json → expo.extra.googleAuthUrl
-//   3. `${BASE_URL}/auth/google` (our Render backend's hosted OAuth page)
+//   3. `${BASE_URL}/auth/google/start` (the Cozii Render backend OAuth entrypoint)
 function resolveGoogleAuthUrl(): string {
   const fromEnv = (process.env.EXPO_PUBLIC_GOOGLE_AUTH_URL || '').trim();
   if (fromEnv) return fromEnv.replace(/\/+$/, '');
@@ -20,7 +20,7 @@ function resolveGoogleAuthUrl(): string {
   if (typeof fromExtra === 'string' && fromExtra.trim()) {
     return fromExtra.trim().replace(/\/+$/, '');
   }
-  return `${BASE_URL}/auth/google`;
+  return `${BASE_URL}/auth/google/start`;
 }
 
 export const GOOGLE_AUTH_URL = resolveGoogleAuthUrl();
@@ -49,14 +49,28 @@ function extractSessionId(url: string | null | undefined): string | null {
   return null;
 }
 
+function extractAuthError(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    const qIdx = url.indexOf('?');
+    if (qIdx >= 0) {
+      const params = new URLSearchParams(url.slice(qIdx + 1));
+      const e = params.get('auth_error');
+      if (e) return decodeURIComponent(e);
+    }
+  } catch {}
+  return null;
+}
+
 export type GoogleSignInResult =
   | { status: 'success'; sessionId: string }
   | { status: 'cancel' }
   | { status: 'dismiss' }
   | { status: 'error'; message: string };
 
-/** Open Emergent OAuth and resolve with the session_id (mobile native).
- *  On web, the caller should use the existing full-page redirect path. */
+/** Open the Cozii-hosted Google OAuth flow on the Render backend, capture the
+ *  session_id from the redirect URL, and resolve. On web, the caller should
+ *  use the existing full-page redirect path instead. */
 export async function googleSignInNative(): Promise<GoogleSignInResult> {
   if (Platform.OS === 'web') {
     return { status: 'error', message: 'Use the web redirect flow on web.' };
@@ -66,7 +80,7 @@ export async function googleSignInNative(): Promise<GoogleSignInResult> {
   // We let expo-linking generate it so it's correct in both dev (Expo Go) and
   // production builds.
   const redirectUrl = Linking.createURL('auth-callback');
-  const authUrl = `${EMERGENT_AUTH_BASE}?redirect=${encodeURIComponent(redirectUrl)}`;
+  const authUrl = `${GOOGLE_AUTH_URL}?redirect=${encodeURIComponent(redirectUrl)}`;
 
   let result;
   try {
@@ -80,7 +94,10 @@ export async function googleSignInNative(): Promise<GoogleSignInResult> {
   }
 
   if (result.type === 'success' && (result as any).url) {
-    const sessionId = extractSessionId((result as any).url);
+    const url = (result as any).url as string;
+    const errMsg = extractAuthError(url);
+    if (errMsg) return { status: 'error', message: errMsg };
+    const sessionId = extractSessionId(url);
     if (sessionId) return { status: 'success', sessionId };
     return { status: 'error', message: 'OAuth completed but no session_id in callback URL' };
   }

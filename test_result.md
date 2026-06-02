@@ -4827,3 +4827,303 @@ agent_communication:
       staff create is still useful: any future hidden failure now surfaces a
       readable 400 message instead of an opaque 500.
 
+
+
+
+#============== Phase 17 — Emergent Dependency Removal & Cozii-owned Google OAuth ==============
+backend:
+  - task: "Phase 17 — Remove all Emergent dependencies; add Cozii-owned Google OAuth + native OpenAI"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/core.py, /app/backend/routes/auth.py, /app/backend/routes/inventory.py, /app/backend/requirements.txt, /app/backend/.env"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Complete migration off Emergent infrastructure. Two big surfaces:
+
+          1) Google OAuth — replaced the Emergent demobackend session-exchange
+             with first-party Google OAuth on the Cozii Render backend.
+
+             NEW endpoints (mounted directly on `app`, NOT under /api so Google
+             can redirect cleanly):
+               GET  /auth/google/start?redirect=<deeplink>
+                    → stashes {state, redirect} in db.oauth_states (TTL 10m)
+                    → 302 to https://accounts.google.com/o/oauth2/v2/auth
+                       with client_id, redirect_uri, scope=openid email profile,
+                       state, prompt=select_account
+               GET  /auth/google/callback?code=&state=
+                    → verifies+consumes state
+                    → POST oauth2.googleapis.com/token (auth code grant)
+                    → decodes id_token (claims only) or hits
+                       openidconnect.googleapis.com/v1/userinfo as fallback
+                    → upserts the Cozii user, mints a 7-day session_token
+                    → stores {short_id → session_token} ticket in
+                       db.oauth_pending_sessions (TTL 5m, single-use)
+                    → 302 to <deeplink>#session_id=<short_id>
+                    → on any failure, redirects to
+                       <deeplink>?auth_error=<reason> so the app can surface it
+
+             REWRITTEN endpoint (kept the same shape so the frontend
+             AuthContext.loginWithGoogleSession works unchanged):
+               POST /api/auth/google-session { session_id }
+                    → looks up the ticket, marks it redeemed (single-use),
+                      returns {token, user}
+                    → NO outbound network calls; no more demobackend.
+
+             Safe-redirect allowlist: only cozii://, exp://,
+             https://cozii.onrender.com, http://localhost. Anything else
+             collapses to the default cozii://auth-callback.
+
+          2) AI receipt scanning — replaced `emergentintegrations` + EMERGENT_LLM_KEY
+             with the direct openai SDK + OPENAI_API_KEY.
+               /api/ai/scan-receipt now uses
+                 AsyncOpenAI.chat.completions.create(
+                    model=AI_SCAN_MODEL_NAME,            # default gpt-4o
+                    response_format={"type":"json_object"},
+                    messages=[system, user(text + image_url base64 data URI)]
+                 )
+               Retry path uses the same OpenAI client. Quota/429 still bubbles
+               up as HTTP 402.
+
+          Config changes (core.py):
+             - DELETED  EMERGENT_AUTH_URL constant.
+             - DELETED  EMERGENT_LLM_KEY constant.
+             - ADDED    GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
+                        GOOGLE_OAUTH_REDIRECT_URI (default
+                        https://cozii.onrender.com/auth/google/callback),
+                        GOOGLE_AUTH_ENDPOINT, GOOGLE_TOKEN_ENDPOINT,
+                        GOOGLE_USERINFO_ENDPOINT.
+             - ADDED    OPENAI_API_KEY, AI_SCAN_MODEL_NAME (default gpt-4o).
+             - KEPT     AI_SCAN_MODEL_PROVIDER as the constant "openai" (only
+                        for log compatibility — not used by the new code).
+
+          backend/.env: removed EMERGENT_LLM_KEY=...; added OPENAI_API_KEY=,
+          GOOGLE_CLIENT_ID=, GOOGLE_CLIENT_SECRET=,
+          GOOGLE_OAUTH_REDIRECT_URI=https://cozii.onrender.com/auth/google/callback,
+          AI_SCAN_MODEL=gpt-4o. (Local dev placeholders only — Render owns the
+          real values.)
+
+          backend/requirements.txt: emergentintegrations==0.1.0 removed (via
+          `pip uninstall emergentintegrations -y && pip freeze`).
+
+          PyJWT (already in requirements as PyJWT==2.12.1) is used to decode
+          Google's id_token payload without signature verification — safe in
+          the OAuth code-grant flow because the token came directly from
+          Google over TLS as the response to our /token request.
+
+          Smoke tested locally:
+            - GET /api/  →  200 {"message":"Cozii API running"}
+            - GET /auth/google/start?redirect=cozii://auth-callback  →  503
+              "Google sign-in not configured" (correct — no client_id locally;
+              will return 302 on Render once env vars are set).
+            - GET /auth/google/callback  →  302 to default deeplink with
+              auth_error=invalid_or_expired_state (correct error path).
+            - python -c "from routes import auth, inventory" → no ImportError
+              even AFTER emergentintegrations is uninstalled.
+
+          REMAINING action required from user (deployment side):
+            Render env vars to set:
+              GOOGLE_CLIENT_ID=...
+              GOOGLE_CLIENT_SECRET=...
+              GOOGLE_OAUTH_REDIRECT_URI=https://cozii.onrender.com/auth/google/callback
+              OPENAI_API_KEY=...      (already set per user)
+            Google Cloud Console:
+              authorized redirect URI = https://cozii.onrender.com/auth/google/callback
+            Optional: delete the now-unused EMERGENT_LLM_KEY env var on Render.
+
+frontend:
+  - task: "Phase 17 — Wire Google sign-in to Cozii backend; remove auth.emergentagent.com"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/googleAuth.ts, /app/frontend/app/welcome.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          • googleAuth.ts: fixed the latent ReferenceError that broke native
+            Google sign-in in TestFlight — the file referenced an undefined
+            EMERGENT_AUTH_BASE constant. Now uses the already-resolved
+            GOOGLE_AUTH_URL (defaults to `${BASE_URL}/auth/google/start`).
+            Added handling for the new ?auth_error= query param the backend
+            returns on OAuth failure so the user gets a real message instead
+            of a silent "session_id missing".
+          • welcome.tsx (web path): replaced the hardcoded
+            https://auth.emergentagent.com/?redirect=... with
+            `${GOOGLE_AUTH_URL}?redirect=${origin}`. Same backend entrypoint,
+            no Emergent.
+          • frontend/.env intentionally NOT modified — its EXPO_PUBLIC_*
+            values are dev-preview-only and overridden in production by
+            app.json `extra.backendUrl` + the hardcoded
+            https://cozii.onrender.com fallback in api.ts.
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Phase 17 — Full Emergent purge complete on production-shipping code.
+
+      Verified final grep — the ONLY remaining "Emergent" string in
+      production code is the docstring in /app/backend/routes/auth.py that
+      reads "Auth routes — Cozii-owned, no Emergent dependencies." That's
+      documentation, not a dependency.
+
+      Backend tests requested:
+        1. /api/auth/register + /api/auth/login still work (no regressions).
+        2. /api/auth/google-session with an invalid session_id → 401
+           (and does NOT make any outbound HTTP call to demobackend.*).
+        3. /api/auth/google-session with a synthetic ticket inserted into
+           db.oauth_pending_sessions → 200 + {token, user}. Re-redeem of the
+           same ticket → 401 ("already redeemed"). Expired ticket → 401.
+        4. /auth/google/start with no env vars set → 503 with the
+           "Google sign-in not configured" message. (We can't fully test the
+           live Google round-trip from inside the test container.)
+        5. /auth/google/callback with invalid state → 302 to the default
+           deeplink with ?auth_error=invalid_or_expired_state.
+        6. /api/ai/scan-receipt with no OPENAI_API_KEY → 503 "AI key not
+           configured (OPENAI_API_KEY missing)". (Live OpenAI calls only
+           feasible on Render where the key is set — please confirm there.)
+        7. Smoke: 51/51 Phase 13 regression should still pass — nothing else
+           touched.
+
+      Files changed:
+        /app/backend/core.py
+        /app/backend/routes/auth.py            (full rewrite)
+        /app/backend/routes/inventory.py       (scan_receipt section)
+        /app/backend/requirements.txt          (emergentintegrations removed)
+        /app/backend/.env                      (EMERGENT_LLM_KEY → OPENAI_API_KEY + Google placeholders)
+        /app/frontend/src/googleAuth.ts        (full rewrite)
+        /app/frontend/app/welcome.tsx          (web OAuth URL)
+
+
+
+## 2026-06-02 — Phase 17 verification (testing agent)
+
+backend:
+  - task: "Phase 17 — Emergent removal + Cozii-owned Google OAuth"
+    implemented: true
+    working: true
+    file: "/app/backend/routes/auth.py, /app/backend/routes/inventory.py, /app/backend/.env"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: |
+          Phase 17 backend verification complete via /app/backend_test_phase17.py
+          — 33/33 PASS. Detailed results:
+
+          A. Regression (existing auth + CRUD) — 19/19 PASS (preview URL):
+             ✅ POST /api/auth/register fresh user
+             ✅ POST /api/auth/login
+             ✅ GET /api/auth/me
+             ✅ POST /api/auth/logout, then GET /auth/me returns 401
+             ✅ POST/GET /api/spaces
+             ✅ POST/GET/DELETE /api/categories
+             ✅ POST/GET/PATCH/DELETE /api/items
+             ✅ POST/GET /api/bills
+             ✅ GET /api/activity, /api/stats, /api/balances
+
+          B. New Google OAuth endpoints (localhost:8001 — Kubernetes ingress
+             only forwards /api/*, so /auth/google/* is only reachable
+             internally; this matches the design since the live OAuth flow
+             uses the Render deployment) — 5/5 PASS:
+             ✅ GET /auth/google/start → 503 with body
+                "Google sign-in not configured" (env GOOGLE_CLIENT_ID empty)
+             ✅ GET /auth/google/callback (no params) → 302 Location:
+                cozii://auth-callback?auth_error=invalid_or_expired_state
+             ✅ GET /auth/google/callback?state=garbage → 302 same as above
+             ✅ GET /auth/google/start?redirect=https://evil.example.com →
+                still 503 (no creds)
+             ✅ GET /auth/google/callback?state=<valid synth in mongo>
+                (no code) → 302 cozii://auth-callback?auth_error=missing_code
+                (proves the state lookup + safe-redirect work correctly)
+
+          C. POST /api/auth/google-session redemption (preview URL) — 6/6 PASS:
+             ✅ {session_id: ""} → 400 "Missing session_id"
+             ✅ {} (field missing) → 422 (Pydantic), not 500
+             ✅ {session_id: "definitely-not-a-real-ticket"} → 401
+                "Invalid or expired session". Confirmed NO outbound httpx
+                call to demobackend.emergentagent.com (verified via grep on
+                backend.out.log / backend.err.log).
+             ✅ Synthetic ticket inserted into db.oauth_pending_sessions
+                pointing at a real user_id + session_token →
+                POST /api/auth/google-session {session_id: <short_id>}
+                returns 200 with {token: <session_token>, user: {...}}.
+             ✅ Replay same short_id → 401 "Session already redeemed".
+             ✅ Insert a ticket with expires_at = now-10min → 401
+                "Session expired".
+
+          D. /api/ai/scan-receipt with OPENAI_API_KEY="" — 2/2 PASS:
+             ✅ Authenticated POST returns 503 with body containing
+                "AI key not configured (OPENAI_API_KEY missing)"
+             ✅ Error body does NOT mention Emergent (substring check
+                'emergent' not in body.lower()).
+
+          E. Backend logs (demobackend.emergentagent.com) — 1/1 PASS:
+             Grepped /var/log/supervisor/backend.{out,err}.log for the string
+             "demobackend.emergentagent.com" and filtered by timestamp:
+               - 13 historical lines remain in the rotated log file, all
+                 dated between 2026-04-30 and 2026-05-25 (i.e. pre-refactor).
+               - 0 lines AFTER the current backend session start
+                 (2026-06-02 05:57:52,581 — the supervisor restart that
+                 picked up the refactored code).
+             So no outbound httpx call to Emergent has occurred since
+             the Phase 17 refactor was deployed. ✅
+
+          Conclusion: the Phase 17 changes are production-ready on the
+          backend. No regressions in the existing flows, the new Cozii-owned
+          OAuth endpoints behave correctly when creds are missing, the
+          one-shot ticket redemption path is fully functional (success +
+          all 3 failure modes), and the AI receipt-scan endpoint cleanly
+          reports missing OPENAI_API_KEY without referencing Emergent.
+
+          The only caveat is environmental, not a code bug: the OAuth
+          start/callback URLs are mounted on the FastAPI `app` directly
+          (NOT under /api), so through the preview ingress they return 404
+          — they can only be exercised via http://localhost:8001 inside
+          the container OR via the Render production deployment whose
+          authorised redirect URI is
+          https://cozii.onrender.com/auth/google/callback. That matches
+          the intent in /app/backend/.env.
+
+agent_communication:
+  - agent: "testing"
+    message: |
+      Phase 17 verification — 33/33 PASS via /app/backend_test_phase17.py.
+
+      ✅ A. Regression: register/login/me/logout, spaces, categories, items,
+         bills, activity, stats, balances — all green via preview URL.
+      ✅ B. /auth/google/start → 503 "not configured" (creds empty).
+            /auth/google/callback with no params or garbage state → 302 to
+            cozii://auth-callback?auth_error=invalid_or_expired_state.
+            Valid synthetic state with missing code → 302 missing_code.
+            (These endpoints are not under /api so they're only reachable
+            from inside the container or from Render, which is by design.)
+      ✅ C. POST /api/auth/google-session: empty session_id → 400; missing
+            field → 422; garbage ticket → 401 (and zero outbound httpx
+            calls to demobackend); inserted valid ticket → 200 {token,user};
+            replay → 401 "Session already redeemed"; expired ticket → 401
+            "Session expired".
+      ✅ D. POST /api/ai/scan-receipt → 503 "AI key not configured
+            (OPENAI_API_KEY missing)"; no reference to Emergent in the body.
+      ✅ E. backend.out.log + backend.err.log: zero "demobackend.emergent
+            agent.com" log lines after the current backend session start
+            (2026-06-02 05:57:52). All 13 historical lines are pre-refactor.
+
+      No backend regressions. The Emergent purge is complete and the
+      Cozii-owned OAuth + OpenAI direct integrations are wired correctly.
+
+      Note for future testing: /auth/google/* (non-/api) cannot be tested
+      via the preview ingress (returns 404), only via localhost:8001 or
+      Render. This is intentional per the new architecture. Live OAuth
+      round-trip with real Google credentials can only be exercised on
+      Render once GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / OPENAI_API_KEY
+      are populated in the Render environment.
+
