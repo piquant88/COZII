@@ -53,7 +53,8 @@
           "color": "#FF8C73",
           "defaultChannel": "default"
         }
-      ]
+      ],
+      "expo-font"
     ],
     "notification": {
       "iosDisplayInForeground": true
