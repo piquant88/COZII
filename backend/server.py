@@ -20,11 +20,15 @@ app.include_router(api_router)
 fastapi_app = app
 
  #added here
+print("========== SERVER STARTING ==========")
+
 for r in app.routes:
     try:
         print("ROUTE:", r.path)
-    except Exception:
-        pass
+    except Exception as e:
+        print("ROUTE ERROR:", e)
+
+print("========== ROUTE DUMP COMPLETE ==========")
 # -
 
 @fastapi_app.on_event("startup")
