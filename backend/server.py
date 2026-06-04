@@ -19,6 +19,13 @@ import asyncio
 app.include_router(api_router)
 fastapi_app = app
 
+ #added here
+for r in app.routes:
+    try:
+        print("ROUTE:", r.path)
+    except Exception:
+        pass
+# -
 
 @fastapi_app.on_event("startup")
 async def _on_startup():
