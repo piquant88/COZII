@@ -112,7 +112,8 @@ def _safe_redirect(target: Optional[str]) -> str:
     return "cozii://auth-callback"
 
 
-@app.get("/auth/google/start")
+#@app.get("/auth/google/start")
+@api_router.get("/auth/google/start")
 async def google_oauth_start(redirect: Optional[str] = None):
     if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
         return HTMLResponse(
@@ -149,7 +150,8 @@ def _bounce_with_error(deeplink: str, msg: str) -> RedirectResponse:
     return RedirectResponse(f"{deeplink}{sep}auth_error={quote(msg)}", status_code=302)
 
 
-@app.get("/auth/google/callback")
+#@app.get("/auth/google/callback")
+@api_router.get("/auth/google/callback")
 async def google_oauth_callback(
     code: Optional[str] = None,
     state: Optional[str] = None,
