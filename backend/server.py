@@ -15,9 +15,16 @@ import routes  # noqa: F401 — side effects: registers all routes
 from core import _daily_digest_loop  # background task
 import asyncio
 
+# debug endpoint
+@api_router.get("/debug/routes")
+async def debug_routes():
+    return [r.path for r in app.routes]
+
+    
 # Final wiring — exactly once, at the end.
 app.include_router(api_router)
 fastapi_app = app
+
 
  #added here
 print("========== SERVER STARTING ==========")
@@ -30,6 +37,7 @@ for r in app.routes:
 
 print("========== ROUTE DUMP COMPLETE ==========")
 # -
+
 
 @fastapi_app.on_event("startup")
 async def _on_startup():
